@@ -28,3 +28,23 @@ data/token.json
 *credentials*.json
 *token*.json
 client_secret*.json
+
+# Environment variants - the bare .env above does not cover these
+.env.local
+.env.production
+
+# A credential filename the *credentials*/*token* patterns above miss
+creds.json
+
+# Local tool settings, machine-specific
+.claude/settings.local.json
+
+# Editor and OS artefacts
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local logs and stores
+*.log
+*.db
