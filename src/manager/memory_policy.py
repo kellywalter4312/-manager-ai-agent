@@ -1,0 +1,296 @@
+"""What the Manager is allowed to remember.
+
+Memory is not a log. The distinction this module exists to enforce:
+
+    log            - what happened, in order, for a human to read afterwards
+    state          - what a specific job needs to not repeat itself
+    MEMORY         - knowledge that should change a future decision
+
+All three are useful and only the third belongs here. An orchestrator that
+remembered every task it ran would have a history, not knowledge: the volume
+would grow without bound, recall would return mostly noise, and the few facts
+worth acting on would be buried under thousands of routine executions. So the
+rule is an allow-list, not a deny-list - nothing is remembered unless it fits a
+category that was chosen on purpose.
+
+Four categories, and the test for adding a fifth is high: it must be
+information that would plausibly change what the Manager decides next time. If
+it would only be interesting to read, it is a log.
+
+    USER_CONTEXT        stable facts about the person or the project
+    DECISION            an orchestration choice, and why it was made
+    DELEGATION_OUTCOME  what came back from a specialist, and whether it worked
+    LESSON              something learned that should change future behaviour
+
+The exclusions below are data rather than comments, following the same
+reasoning as DEFAULT_NEVER in soul.py: a rule expressed as a constant can be
+tested, listed and shown to a user, while a rule expressed as a comment is a
+hope. EXCLUDED_KINDS names things that must never enter Manager memory *and
+says why*, so a rejection can explain itself.
+
+This module holds no Gmail knowledge, and needs none. A raw Gmail message is
+refused because it is not one of the four categories - the same rule that
+refuses a log line, a debug dump and a stack trace. Domain-specific exclusions
+are named for the quality of the error message, never because the rule depends
+on them.
+
+Scope note: defining what *may* be remembered is not the same as deciding what
+*is* remembered. Nothing here extracts, records or stores anything, and the
+Manager does not yet hold a policy. Admission rules first, recording later.
+"""
+
+from __future__ import annotations
+
+import re
+from enum import Enum
+
+from src.services.memory.memory import MemoryRecord
+from src.services.memory.policy import MemoryPolicy, PolicyVerdict
+
+
+class MemoryCategory(str, Enum):
+    """The only kinds of thing the Manager retains.
+
+    Values match MemoryRecord.kind, which is already normalised to lowercase -
+    so a category is stored on the record itself and needs no parallel field.
+    """
+
+    USER_CONTEXT = "user_context"
+    DECISION = "decision"
+    DELEGATION_OUTCOME = "delegation_outcome"
+    LESSON = "lesson"
+
+    @property
+    def label(self) -> str:
+        return {
+            "user_context": "USER CONTEXT",
+            "decision": "ORCHESTRATION DECISION",
+            "delegation_outcome": "DELEGATION OUTCOME",
+            "lesson": "LESSON LEARNED",
+        }[self.value]
+
+    @property
+    def meaning(self) -> str:
+        """What belongs in this category, in one sentence."""
+        return {
+            "user_context": (
+                "A stable fact about the person or the project that should "
+                "inform future decisions - a preference, a constraint, a goal."
+            ),
+            "decision": (
+                "An orchestration choice the Manager made and the reasoning "
+                "behind it, so a similar situation can be handled consistently."
+            ),
+            "delegation_outcome": (
+                "What a specialist returned and whether it was useful, so "
+                "future routing can account for what actually works."
+            ),
+            "lesson": (
+                "Something learned during execution that should change future "
+                "behaviour - a repeated failure, a better approach."
+            ),
+        }[self.value]
+
+    @classmethod
+    def of(cls, record: MemoryRecord) -> "MemoryCategory | None":
+        """The category a record claims, or None if it claims none of them."""
+        try:
+            return cls(record.kind)
+        except ValueError:
+            return None
+
+
+# Things that must never enter Manager memory, each with the reason it is
+# refused. Named as data so the rule can be listed, tested and explained -
+# the same reasoning as DEFAULT_NEVER in soul.py.
+#
+# Note that none of these are load-bearing: every one of them would already be
+# refused for not being a MemoryCategory. They exist so the refusal says
+# something useful instead of "unknown category".
+EXCLUDED_KINDS: dict[str, str] = {
+    "raw_message": "raw source material belongs in its source, not in memory",
+    "message": "raw source material belongs in its source, not in memory",
+    "log": "logs record what happened; memory holds what should change a decision",
+    "debug": "temporary diagnostic detail has no bearing on future decisions",
+    "trace": "temporary diagnostic detail has no bearing on future decisions",
+    "stacktrace": "temporary diagnostic detail has no bearing on future decisions",
+    "task_history": "every routine execution is history, not knowledge",
+    "task": "every routine execution is history, not knowledge",
+    "execution": "every routine execution is history, not knowledge",
+    "dedup": "deduplication state belongs to the job that needs it",
+    "dedupe": "deduplication state belongs to the job that needs it",
+    "processed_state": "deduplication state belongs to the job that needs it",
+    "heartbeat_state": "deduplication state belongs to the job that needs it",
+    "fingerprint": "deduplication state belongs to the job that needs it",
+    "reasoning": "a model's working-out is not a conclusion worth retaining",
+    "thinking": "a model's working-out is not a conclusion worth retaining",
+    "chain_of_thought": "a model's working-out is not a conclusion worth retaining",
+    "scratch": "temporary working state does not survive the task that made it",
+    "credential": "secrets are never remembered, under any category",
+    "secret": "secrets are never remembered, under any category",
+}
+
+# Context keys that make a record a secret regardless of what it says. Matched
+# as whole words against the key, so "api_key" and "password" are caught while
+# an innocent "keywords" is not.
+SECRET_CONTEXT_KEYS: frozenset[str] = frozenset(
+    {
+        "password", "passwd", "secret", "token", "api_key", "apikey",
+        "access_token", "refresh_token", "credential", "credentials",
+        "private_key", "client_secret", "authorization", "auth",
+    }
+)
+
+# Content that looks like a credential being written down. Deliberately matches
+# the *shape* of a secret - an assignment, a known key prefix, a PEM block -
+# rather than the bare words, so "we discussed their password policy" is not
+# refused while "password: hunter2" is.
+_SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"sk-[A-Za-z0-9_\-]{12,}"), "an API key"),
+    (re.compile(r"\bghp_[A-Za-z0-9]{20,}"), "an access token"),
+    (re.compile(r"\bAIza[A-Za-z0-9_\-]{20,}"), "an API key"),
+    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"), "a private key"),
+    (re.compile(r"\bBearer\s+[A-Za-z0-9._\-]{16,}"), "a bearer token"),
+    (
+        re.compile(
+            r"\b(password|passwd|secret|api[_\-]?key|access[_\-]?token|"
+            r"refresh[_\-]?token|client[_\-]?secret)\b\s*[:=]\s*\S+",
+            re.IGNORECASE,
+        ),
+        "a credential",
+    ),
+)
+
+# Distilled knowledge is short. A memory far longer than this is almost always
+# a dump of something else - a message body, a log extract, a model's
+# working-out - filed under a category that looked plausible. The bound is what
+# catches those without the policy needing to recognise any of them.
+MAX_CONTENT_CHARS = 1000
+
+
+class ManagerMemoryPolicy(MemoryPolicy):
+    """The Manager's admission rules, as an object rather than a convention.
+
+    Stateless and deterministic: the same record always gets the same verdict,
+    and the policy holds nothing between calls. It can therefore be shared
+    freely, unlike a Memory, which must not be.
+    """
+
+    def __init__(self, max_content_chars: int = MAX_CONTENT_CHARS) -> None:
+        if max_content_chars <= 0:
+            raise ValueError("max_content_chars must be positive")
+        self.max_content_chars = max_content_chars
+
+    def __repr__(self) -> str:
+        return f"<ManagerMemoryPolicy categories={len(self.categories)}>"
+
+    @property
+    def categories(self) -> frozenset[MemoryCategory]:
+        """Every category the Manager retains. The allow-list, in full."""
+        return frozenset(MemoryCategory)
+
+    @property
+    def category_names(self) -> tuple[str, ...]:
+        """The allowed category values, sorted, for display and configuration."""
+        return tuple(sorted(category.value for category in MemoryCategory))
+
+    def describe(self) -> str:
+        """The policy in a form that can be shown to a user."""
+        lines = ["The Manager remembers only:"]
+        for category in sorted(MemoryCategory, key=lambda c: c.value):
+            lines.append(f"  {category.label} - {category.meaning}")
+        lines.append("Everything else - logs, raw messages, routine task history,")
+        lines.append("deduplication state, model working-out, secrets - is refused.")
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # The decision
+    # ------------------------------------------------------------------
+
+    def evaluate(self, record: MemoryRecord) -> PolicyVerdict:
+        """Judge one record against the Manager's rules.
+
+        The checks run cheapest-and-broadest first, and secrets are checked
+        even for records that already failed on category - so the reason given
+        for a refusal never has to mention what the content looked like.
+        """
+        if not isinstance(record, MemoryRecord):
+            return PolicyVerdict(
+                allowed=False,
+                reason=f"only a MemoryRecord can be judged, got {type(record).__name__}",
+            )
+
+        kind = record.kind
+
+        # 1. The named exclusions, purely so the refusal is informative.
+        if kind in EXCLUDED_KINDS:
+            return PolicyVerdict(allowed=False, reason=EXCLUDED_KINDS[kind], category=kind)
+
+        # 2. The rule that actually does the work: a closed allow-list.
+        category = MemoryCategory.of(record)
+        if category is None:
+            allowed = ", ".join(self.category_names)
+            return PolicyVerdict(
+                allowed=False,
+                reason=(
+                    f"'{kind or '(none)'}' is not something the Manager remembers; "
+                    f"allowed categories are: {allowed}"
+                ),
+                category=kind or None,
+            )
+
+        # 3. A secret is refused under every category, including valid ones.
+        secret = self._looks_like_a_secret(record)
+        if secret is not None:
+            return PolicyVerdict(
+                allowed=False,
+                # Names the *kind* of secret, never the value - a rule that
+                # refused a credential must not then quote it into a log.
+                reason=f"refused: the record appears to contain {secret}",
+                category=category.value,
+            )
+
+        # 4. Length, which catches dumps filed under a plausible category.
+        if len(record.content) > self.max_content_chars:
+            return PolicyVerdict(
+                allowed=False,
+                reason=(
+                    f"{len(record.content)} characters is too long to be distilled "
+                    f"knowledge (limit {self.max_content_chars}); this looks like a "
+                    f"dump of something that belongs elsewhere"
+                ),
+                category=category.value,
+            )
+
+        return PolicyVerdict(
+            allowed=True,
+            reason=f"{category.label.lower()} is retained by the Manager",
+            category=category.value,
+        )
+
+    # ------------------------------------------------------------------
+    # Secret detection
+    # ------------------------------------------------------------------
+
+    def _looks_like_a_secret(self, record: MemoryRecord) -> str | None:
+        """What kind of secret this appears to hold, or None.
+
+        Errs toward refusing. A false positive costs one memory that has to be
+        reworded; a false negative writes a credential into a store that gets
+        recalled into prompts. Those are not comparable costs.
+        """
+        for pattern, description in _SECRET_PATTERNS:
+            if pattern.search(record.content):
+                return description
+
+        for tag in record.tags:
+            if tag.replace("-", "_") in SECRET_CONTEXT_KEYS:
+                return "a value tagged as a credential"
+
+        if record.context:
+            for key in record.context:
+                normalised = str(key).strip().lower().replace("-", "_")
+                if normalised in SECRET_CONTEXT_KEYS:
+                    return f"a credential under the '{key}' key"
+
+        return None

@@ -1,0 +1,30 @@
+# Virtual environment
+.venv/
+venv/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Test / tooling caches
+.pytest_cache/
+.mypy_cache/
+
+# Secrets - only .env.example is committed
+.env
+
+# Local data (holds Gmail credentials and token)
+data/*
+!data/.gitkeep
+
+# Personal profile - USER.example.md is the committed structural example
+USER.md
+
+# OAuth secrets - belt and braces, wherever they end up
+# Explicit paths first, so intent is unmistakable even if the broader
+# patterns below are ever edited.
+data/credentials.json
+data/token.json
+*credentials*.json
+*token*.json
+client_secret*.json

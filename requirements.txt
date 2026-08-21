@@ -1,0 +1,14 @@
+# Runtime dependencies: none for the default configuration.
+# The system runs entirely on the standard library with MANAGER_PROVIDER=null.
+
+# Optional - only needed for MANAGER_PROVIDER=anthropic.
+# It is imported lazily, so the project runs without it installed.
+anthropic>=0.69
+
+# Optional - only needed for MANAGER_MAILBOX=gmail (read-only access).
+# Also imported lazily; the full test suite passes without these.
+google-api-python-client>=2.100
+google-auth-oauthlib>=1.2
+
+# Development dependencies:
+pytest>=8.0
