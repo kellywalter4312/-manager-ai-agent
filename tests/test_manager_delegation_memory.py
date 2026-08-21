@@ -861,8 +861,31 @@ class TestThePolicyCannotBeBypassed:
         assert self._methods_calling("memory", "clear") == set()
 
     def test_there_is_exactly_one_place_that_reads_from_memory(self):
-        """Retrieval goes through one method, as writing goes through one."""
-        assert self._methods_calling("memory", "recall") == {"recall_context"}
+        """Retrieval goes through one method, as writing goes through one.
+
+        Retargeted for New Dawn: that one method now reads through the
+        temporal lens, so nothing calls self.memory.recall directly. A direct
+        call would bypass the day filter and return every day's records.
+        """
+        import ast
+
+        import src.manager.manager as module
+
+        tree = ast.parse(open(module.__file__, encoding="utf-8").read())
+        building = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for inner in ast.walk(node):
+                if (
+                    isinstance(inner, ast.Call)
+                    and isinstance(inner.func, ast.Name)
+                    and inner.func.id == "DayView"
+                ):
+                    building.add(node.name)
+
+        assert building == {"recall_context"}
+        assert self._methods_calling("memory", "recall") == set()
 
     def test_a_policy_that_refuses_everything_yields_an_empty_store(self):
         """The behavioural counterpart: no path escapes the gate."""

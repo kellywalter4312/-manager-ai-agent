@@ -607,7 +607,43 @@ class TestTheMemoryAbstractionIsNotBypassed:
         return found
 
     def test_reading_goes_through_one_method(self):
-        assert self._methods_calling("memory", "recall") == {"recall_context"}
+        """Retargeted: retrieval still has exactly one entry point, but it now
+        reads through the temporal lens rather than the store directly."""
+        assert self._methods_building_a_day_view() == {"recall_context"}
+
+    def test_nothing_reads_the_store_behind_the_lens(self):
+        """Stronger than before. A direct self.memory.recall would return
+        every day's records, quietly putting yesterday back into today's
+        context - the exact failure New Dawn exists to prevent."""
+        assert self._methods_calling("memory", "recall") == set()
+
+
+    @staticmethod
+    def _methods_building_a_day_view() -> set[str]:
+        """Methods that wrap self.memory in a DayView.
+
+        Retargeted for New Dawn. Reading no longer calls self.memory.recall
+        directly - it goes through the temporal lens - so the invariant is now
+        expressed as "exactly one method builds a view over the store", which
+        is the same guarantee one level up.
+        """
+        import ast
+
+        import src.manager.manager as module
+
+        tree = ast.parse(open(module.__file__, encoding="utf-8").read())
+        found = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for inner in ast.walk(node):
+                if (
+                    isinstance(inner, ast.Call)
+                    and isinstance(inner.func, ast.Name)
+                    and inner.func.id == "DayView"
+                ):
+                    found.add(node.name)
+        return found
 
     def test_writing_still_goes_through_one_method(self):
         assert self._methods_calling("memory", "remember") == {"_remember_delegation"}

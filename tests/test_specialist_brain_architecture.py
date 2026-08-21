@@ -492,7 +492,7 @@ class TestExistingBehaviourIntact:
     def test_the_cognitive_agent_contract_is_unchanged(self):
         signature = inspect.signature(CognitiveAgent.__init__)
         assert list(signature.parameters) == [
-            "self", "brain", "memory", "memory_policy", "tools"
+            "self", "brain", "memory", "memory_policy", "tools", "calendar"
         ]
 
     def test_the_email_agent_signature_still_accepts_a_brain(self):

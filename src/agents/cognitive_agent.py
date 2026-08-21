@@ -40,6 +40,7 @@ from src.agents.brain import (
 from src.agents.memory_policy import SpecialistMemoryPolicy
 from src.agents.tools.toolset import ToolSet
 from src.core.contracts import Task
+from src.services.memory.day import Calendar, DayView
 from src.services.memory.ephemeral import EphemeralMemory
 from src.services.memory.memory import Memory, MemoryRecord
 from src.services.memory.policy import MemoryPolicy
@@ -71,6 +72,7 @@ class CognitiveAgent(BaseAgent):
         memory: Memory | None = None,
         memory_policy: MemoryPolicy | None = None,
         tools: ToolSet | None = None,
+        calendar: Calendar | None = None,
     ) -> None:
         """Both are injected, and both default to something safe.
 
@@ -114,6 +116,10 @@ class CognitiveAgent(BaseAgent):
             raise TypeError(f"Expected a ToolSet, got {type(tools).__name__}")
         self.tools = tools if tools is not None else ToolSet()
 
+        # The same temporal rules the Manager uses, over this specialist's own
+        # store. Same rules, different memory - never a shared one.
+        self.calendar = calendar if calendar is not None else Calendar.utc()
+
     @property
     def can_reason(self) -> bool:
         """Whether a real reasoning capability was supplied."""
@@ -149,7 +155,8 @@ class CognitiveAgent(BaseAgent):
             return ()
 
         try:
-            records = self.memory.recall(query, limit=limit)
+            # Today only, exactly as the Manager does it.
+            records = DayView(self.memory, self.calendar).today(query, limit=limit)
             return tuple(f"{MEMORY_NOTE_PREFIX}: {record.content}" for record in records)
         except Exception as exc:  # noqa: BLE001 - deliberate boundary catch
             log.exception("could not recall context: %s", type(exc).__name__)

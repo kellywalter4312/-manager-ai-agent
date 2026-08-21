@@ -373,6 +373,7 @@ class TestExistingBehaviourIsUnchanged:
             "brain",
             "memory",
             "memory_policy",
+            "calendar",
         }
 
 

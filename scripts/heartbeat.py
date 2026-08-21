@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.agents.email.analyzers import JobOpportunityAnalyzer  # noqa: E402
 from src.agents.brain_factory import (  # noqa: E402
+    build_opportunity_interpreter,
     build_specialist_brain,
     domain_for,
 )
@@ -51,6 +52,7 @@ from src.providers.factory import (  # noqa: E402
     build_provider,
 )
 from src.registry.agent_registry import AgentRegistry  # noqa: E402
+from src.services.memory.day import Calendar, TimezoneError  # noqa: E402
 from src.services.memory.factory import (  # noqa: E402
     EMAIL_AGENT,
     MANAGER,
@@ -74,6 +76,10 @@ def build_manager_factory(settings: Settings, dry_run: bool) -> Callable[[UserPr
     lazily created API client.
     """
     identity = load_identity(settings.identity_path)
+    # Resolved once and shared across ticks: a calendar is a zone and a clock,
+    # with no per-tick state. Each tick still gets its own memory, which is
+    # what re-reads the store.
+    calendar = Calendar.configured(settings.timezone)
     provider = build_provider(settings)
     router = build_router(settings, provider)
     # Built once and shared across ticks: a brain is stateless by design, so
@@ -88,6 +94,9 @@ def build_manager_factory(settings: Settings, dry_run: bool) -> Callable[[UserPr
     specialist_brain = build_specialist_brain(
         settings, provider, domain_for("email_agent")
     )
+    # Built once and shared across ticks for the same reason the brain is: it
+    # holds a provider and no per-tick state.
+    interpreter = build_opportunity_interpreter(settings, provider)
     mailbox = sample_inbox() if dry_run else build_mailbox(settings)
 
     def build(profile: UserProfile) -> ManagerAgent:
@@ -106,13 +115,20 @@ def build_manager_factory(settings: Settings, dry_run: bool) -> Callable[[UserPr
             brain=brain,
             own_skills=skills,
             memory=build_memory(settings, MANAGER),
+            calendar=calendar,
         )
         manager.register_agent(
             EmailAgent(
                 mailbox,
-                analyzers=[JobOpportunityAnalyzer(profile=profile)],
+                analyzers=[
+                    JobOpportunityAnalyzer(
+                        profile=profile,
+                        interpreter=interpreter,
+                    )
+                ],
                 brain=specialist_brain,
                 memory=build_memory(settings, EMAIL_AGENT),
+                calendar=calendar,
                 fetch_limit=settings.heartbeat_limit,
             )
         )
@@ -169,7 +185,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         check_configuration(settings)
         runner = build_runner(settings, enabled=enabled, dry_run=args.dry_run)
-    except (ConfigurationError, ProviderConfigurationError) as exc:
+    except (ConfigurationError, ProviderConfigurationError, TimezoneError) as exc:
         # Stop before touching the mailbox. An unattended run that silently
         # continued without the configured model would produce reports nobody
         # could tell apart from properly reasoned ones.

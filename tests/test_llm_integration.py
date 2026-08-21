@@ -218,12 +218,34 @@ class TestNoExternalCalls:
         monkeypatch.setattr(socket, "create_connection", explode)
         assert all_of(run(interpreter=interpreter_returning(VALID_RESPONSE)))
 
-    def test_the_deterministic_analyzer_was_not_wired_up(self):
-        """JobOpportunityAnalyzer stays untouched; wiring it is a later step."""
+    def test_the_analyzer_forwards_an_interpreter_without_importing_one(self):
+        """Retargeted. This asserted that JobOpportunityAnalyzer had no
+        interpreter at all - a deliberate placeholder whose own docstring said
+        "wiring it is a later step". That step is done: the analyzer now
+        accepts and forwards one, which is what let the real interpreter reach
+        production instead of being reachable only from tests.
+
+        The guarantee worth keeping is the other half of the original: the
+        detection-only path must not drag the LLM machinery in. So the module
+        may mention an interpreter, but must not import one at module scope.
+        """
+        import ast
+        import inspect
+
         import src.agents.email.analyzers as analyzers
 
-        source = open(analyzers.__file__, encoding="utf-8").read()
-        assert "interpreter" not in source and "llm_" not in source
+        tree = ast.parse(inspect.getsource(analyzers))
+        module_level = []
+        for node in tree.body:
+            if isinstance(node, ast.ImportFrom):
+                module_level.append(node.module or "")
+            elif isinstance(node, ast.Import):
+                module_level.extend(alias.name for alias in node.names)
+
+        assert not any("llm" in name.lower() for name in module_level), module_level
+        assert "interpreter" in inspect.signature(
+            analyzers.JobOpportunityAnalyzer.__init__
+        ).parameters
 
     def test_opportunity_holds_a_reference_not_a_copy(self):
         """Judgement fields must not be duplicated onto Opportunity."""

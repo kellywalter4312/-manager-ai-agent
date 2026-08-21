@@ -22,6 +22,7 @@ from typing import Sequence
 
 from src.agents.brain import SpecialistBrain
 from src.agents.cognitive_agent import CognitiveAgent
+from src.services.memory.day import Calendar
 from src.agents.memory_policy import SpecialistMemoryCategory
 from src.agents.tools.toolset import ToolSet
 from src.agents.email.analyzers import Analyzer, JobOpportunityAnalyzer
@@ -57,6 +58,7 @@ class EmailAgent(CognitiveAgent):
         memory: Memory | None = None,
         memory_policy: MemoryPolicy | None = None,
         tools: ToolSet | None = None,
+        calendar: Calendar | None = None,
     ) -> None:
         """Every collaborator is injected - mailbox, analyzers, outbox.
 
@@ -70,7 +72,14 @@ class EmailAgent(CognitiveAgent):
         behaviour for a specialist nobody has equipped.
         """
         super().__init__(
-            brain=brain, memory=memory, memory_policy=memory_policy, tools=tools
+            brain=brain,
+            memory=memory,
+            memory_policy=memory_policy,
+            tools=tools,
+            # Forwarded, not interpreted. This agent has no opinion about
+            # calendars; it simply lets one be given to the specialist
+            # machinery underneath, the same way brain and memory are.
+            calendar=calendar,
         )
 
         if not isinstance(mailbox, Mailbox):

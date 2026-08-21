@@ -19,7 +19,11 @@ from typing import Sequence
 
 from src.agents.echo_agent import EchoAgent
 from src.agents.email.analyzers import JobOpportunityAnalyzer
-from src.agents.brain_factory import build_specialist_brain, domain_for
+from src.agents.brain_factory import (
+    build_opportunity_interpreter,
+    build_specialist_brain,
+    domain_for,
+)
 from src.agents.email_agent import EmailAgent
 from src.config.coherence import ConfigurationError, check_configuration
 from src.config.settings import Settings
@@ -31,6 +35,7 @@ from src.manager.manager_skills import ManagerSkills
 from src.manager.router_factory import build_router
 from src.providers.factory import ProviderConfigurationError, build_provider
 from src.registry.agent_registry import AgentRegistry
+from src.services.memory.day import Calendar, TimezoneError
 from src.services.memory.factory import EMAIL_AGENT, MANAGER, build_memory
 from src.services.identity.identity import load_identity
 from src.services.email.mailbox_factory import build_mailbox
@@ -83,10 +88,15 @@ def main(argv: Sequence[str] | None = None) -> None:
     # Checked before anything is built: a provider nothing consumes, or an LLM
     # component with no model behind it, are both configurations that run
     # perfectly while doing something other than what was asked.
+    # Which human calendar decides what "today" means. Resolved once, here,
+    # and shared by the Manager and every specialist: same temporal rules,
+    # separate stores. An unusable timezone fails now rather than surfacing
+    # later as memories landing on the wrong side of midnight.
     try:
         check_configuration(settings)
+        calendar = Calendar.configured(settings.timezone)
         provider = build_provider(settings)
-    except (ConfigurationError, ProviderConfigurationError) as exc:
+    except (ConfigurationError, ProviderConfigurationError, TimezoneError) as exc:
         # A misconfiguration, not a failure. Reported as a readable line and a
         # non-zero exit rather than a traceback, and never quietly downgraded
         # to the null provider: silently running without the model someone
@@ -116,6 +126,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         brain=brain,
         own_skills=ManagerSkills(identity, roster=registry.all_agents),
         memory=build_memory(settings, MANAGER),
+        calendar=calendar,
     )
 
     # The mailbox is chosen by configuration and injected into the agent, so
@@ -141,10 +152,18 @@ def main(argv: Sequence[str] | None = None) -> None:
     manager.register_agent(
         EmailAgent(
             mailbox,
-            analyzers=[JobOpportunityAnalyzer(profile=profile)],
+            analyzers=[
+                JobOpportunityAnalyzer(
+                    profile=profile,
+                    # The real interpreter, reaching production. Without
+                    # this it was built by tests and by nothing else.
+                    interpreter=build_opportunity_interpreter(settings, provider),
+                )
+            ],
             brain=email_brain,
             # Its own store, its own file. Never the Manager's.
             memory=build_memory(settings, EMAIL_AGENT),
+            calendar=calendar,
         )
     )
 
@@ -166,6 +185,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     print(f"brain    : {type(brain).__name__}")
     print(f"email br.: {type(email_brain).__name__}")
     print(f"mailbox  : {settings.mailbox} ({type(mailbox).__name__})")
+    print(f"calendar : {settings.timezone} (today is {calendar.today()})")
 
     # Which cognitive capabilities this run actually has. Reported rather than
     # enforced: both modes are valid operating states, and the Manager runs the

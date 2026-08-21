@@ -71,6 +71,7 @@ from src.manager.brain import BrainDecision, ManagerBrain, NullBrain
 from src.manager.memory_policy import ManagerMemoryPolicy, MemoryCategory
 from src.manager.router import CapabilityRouter, Router
 from src.registry.agent_registry import AgentRegistry
+from src.services.memory.day import Calendar, DayView
 from src.services.memory.ephemeral import EphemeralMemory
 from src.services.memory.memory import Memory, MemoryRecord
 from src.services.memory.policy import MemoryPolicy
@@ -141,6 +142,7 @@ class ManagerAgent:
         brain: ManagerBrain | None = None,
         memory: Memory | None = None,
         memory_policy: MemoryPolicy | None = None,
+        calendar: Calendar | None = None,
     ) -> None:
         # Every collaborator is injected but optional. Tests can substitute any
         # of them; ordinary callers get working defaults and need not care.
@@ -190,6 +192,13 @@ class ManagerAgent:
         self.memory_policy = (
             memory_policy if memory_policy is not None else ManagerMemoryPolicy()
         )
+
+        # How this Manager reckons days. Defaults to UTC rather than to the
+        # configured zone, because a Manager built without one has been given
+        # no configuration at all - the composition roots pass the real
+        # calendar. Retention and reasoning are untouched by it: it decides
+        # only which records count as *today* when context is recalled.
+        self.calendar = calendar if calendar is not None else Calendar.utc()
 
     def register_agent(self, agent: BaseAgent) -> None:
         """Convenience passthrough so callers can set up a Manager in one place."""
@@ -384,7 +393,10 @@ class ManagerAgent:
             return ()
 
         try:
-            records = self.memory.recall(query, limit=limit)
+            # Today only. Yesterday's records are still stored and still
+            # retrievable, but they do not drift into today's reasoning
+            # unasked - see DayView.history for the deliberate request.
+            records = DayView(self.memory, self.calendar).today(query, limit=limit)
         except Exception as exc:  # noqa: BLE001 - deliberate boundary catch
             log.exception("could not recall context: %s", type(exc).__name__)
             return ()

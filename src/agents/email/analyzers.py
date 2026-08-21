@@ -189,6 +189,7 @@ class JobOpportunityAnalyzer(Analyzer):
         min_score: int = 2,
         profile: "UserProfile | None" = None,
         top_n: int = 5,
+        interpreter: object | None = None,
     ) -> None:
         """Detection only without a profile; full analysis with one.
 
@@ -196,6 +197,18 @@ class JobOpportunityAnalyzer(Analyzer):
         emails and report them. Passing a profile switches on extraction,
         matching and ranking. Both paths satisfy the same Analyzer interface,
         so nothing upstream has to know which is in use.
+
+        ``interpreter`` is forwarded to analyze_opportunities, which has always
+        accepted one. It is added here because that was the missing link: the
+        seam existed one layer down and the caller had no way to reach it, so
+        the real OpportunityInterpreter could not be supplied from any
+        composition root. Optional and defaulting to None, so the deterministic
+        pipeline is unchanged when no model is configured.
+
+        Typed loosely on purpose. Importing OpportunityInterpreter here would
+        pull the LLM machinery into the detection-only path, which the analyze
+        method is careful to avoid - the duck type is ``interpret(opportunity,
+        profile)``, and analyze_opportunities already guards it.
         """
         if min_score <= 0:
             raise ValueError("min_score must be positive")
@@ -204,6 +217,7 @@ class JobOpportunityAnalyzer(Analyzer):
         self._min_score = min_score
         self._profile = profile
         self._top_n = top_n
+        self._interpreter = interpreter
 
     @property
     def name(self) -> str:
@@ -220,6 +234,16 @@ class JobOpportunityAnalyzer(Analyzer):
     def min_score(self) -> int:
         return self._min_score
 
+    @property
+    def interpreter(self) -> object | None:
+        """The model-backed interpreter, if one was supplied.
+
+        Readable so a test can prove the production composition root actually
+        reached this analyzer, rather than proving only that an interpreter can
+        be constructed by hand.
+        """
+        return self._interpreter
+
     def analyze(self, messages: Sequence[EmailMessage]) -> AnalysisReport:
         if self._profile is not None:
             # Imported here so the detection-only path never loads the
@@ -232,6 +256,7 @@ class JobOpportunityAnalyzer(Analyzer):
                 analyzer_name=self.name,
                 min_score=self._min_score,
                 top_n=self._top_n,
+                interpreter=self._interpreter,
             )
 
         findings: list[Finding] = []

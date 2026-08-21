@@ -75,6 +75,33 @@ _BUILDERS: dict[str, Callable[[Settings, LLMProvider, str], SpecialistBrain]] = 
 }
 
 
+def build_opportunity_interpreter(settings: Settings, provider: LLMProvider):
+    """The email specialist's per-opportunity interpreter, or None.
+
+    Gated on the same setting as the specialist brain rather than on a fourth
+    switch of its own. Both are "the email specialist is allowed to use the
+    model", and splitting them would mean a deployment could turn on one and be
+    surprised by the cost of the other. It also means no new configuration
+    surface for a capability that has no independent reason to vary.
+
+    Returns None for the deterministic default, which is exactly what
+    analyze_opportunities has always expected - the rules run, and no judgement
+    is attached.
+
+    Imported inside the function so the deterministic path never loads the LLM
+    interpreter machinery, matching the lazy import JobOpportunityAnalyzer.
+    analyze already uses for the same reason.
+    """
+    if settings.specialist_brain != "llm":
+        return None
+
+    from src.agents.email.llm_interpreter import OpportunityInterpreter
+
+    interpreter = OpportunityInterpreter(provider)
+    logger.info("opportunity interpreter ready: %s", provider.name)
+    return interpreter
+
+
 def available_specialist_brains() -> list[str]:
     """Every specialist-brain name that can currently be configured."""
     return sorted(_BUILDERS)

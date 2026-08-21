@@ -85,6 +85,13 @@ class Settings:
     # sits, and that should never arrive as a side effect of an upgrade.
     memory: str = "ephemeral"
     memory_dir: str = "data/memory"
+    # Which human calendar decides what "today" means. Storage stays UTC - a
+    # MemoryRecord's created_at is never reinterpreted - and this only decides
+    # which local day an instant fell on. 23:30 UTC is already tomorrow in
+    # Lagos, and it is the person's day that matters when deciding what is
+    # still current. Validated where it is resolved, not here: Settings does
+    # not import the things it configures.
+    timezone: str = "Africa/Lagos"
     model: str = "claude-opus-5"
     mailbox: str = "memory"
     profile_path: str = "USER.md"
@@ -151,6 +158,13 @@ class Settings:
         if not memory_dir:
             raise ValueError("Settings.memory_dir must not be empty")
         object.__setattr__(self, "memory_dir", memory_dir)
+
+        zone = " ".join(self.timezone.split())
+        if not zone:
+            raise ValueError("Settings.timezone must not be empty")
+        # Not lower-cased: IANA names are case-sensitive identifiers owned by
+        # the tz database, the same reasoning that leaves `model` alone.
+        object.__setattr__(self, "timezone", zone)
 
         mailbox = self.mailbox.strip().lower()
         if not mailbox:
@@ -238,7 +252,7 @@ class Settings:
             f"log_level={self.log_level} provider={self.provider} "
             f"router={self.router} brain={self.brain} "
             f"specialist_brain={self.specialist_brain} memory={self.memory} "
-            f"model={self.model} "
+            f"timezone={self.timezone} model={self.model} "
             f"mailbox={self.mailbox} "
             f"api_key={'set' if self.has_api_key else 'unset'}"
         )
