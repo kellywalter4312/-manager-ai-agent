@@ -51,6 +51,11 @@ from src.providers.factory import (  # noqa: E402
     build_provider,
 )
 from src.registry.agent_registry import AgentRegistry  # noqa: E402
+from src.services.memory.factory import (  # noqa: E402
+    EMAIL_AGENT,
+    MANAGER,
+    build_memory,
+)
 from src.services.email.mailbox_factory import build_mailbox  # noqa: E402
 from src.services.email.sample_inbox import sample_inbox  # noqa: E402
 from src.services.identity.identity import load_identity  # noqa: E402
@@ -91,14 +96,23 @@ def build_manager_factory(settings: Settings, dry_run: bool) -> Callable[[UserPr
         registry = AgentRegistry()
         skills = ManagerSkills(identity, roster=registry.all_agents)
 
+        # Built per tick, not once, and that is the point. A persistent store
+        # re-reads its file at construction, so this tick sees what the last
+        # one wrote even though the Manager object itself does not survive.
+        # The Manager needs no lifecycle; its memory does.
         manager = ManagerAgent(
-            registry=registry, router=router, brain=brain, own_skills=skills
+            registry=registry,
+            router=router,
+            brain=brain,
+            own_skills=skills,
+            memory=build_memory(settings, MANAGER),
         )
         manager.register_agent(
             EmailAgent(
                 mailbox,
                 analyzers=[JobOpportunityAnalyzer(profile=profile)],
                 brain=specialist_brain,
+                memory=build_memory(settings, EMAIL_AGENT),
                 fetch_limit=settings.heartbeat_limit,
             )
         )

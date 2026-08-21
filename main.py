@@ -31,6 +31,7 @@ from src.manager.manager_skills import ManagerSkills
 from src.manager.router_factory import build_router
 from src.providers.factory import ProviderConfigurationError, build_provider
 from src.registry.agent_registry import AgentRegistry
+from src.services.memory.factory import EMAIL_AGENT, MANAGER, build_memory
 from src.services.identity.identity import load_identity
 from src.services.email.mailbox_factory import build_mailbox
 from src.services.profile.loader import load_profile
@@ -106,11 +107,15 @@ def main(argv: Sequence[str] | None = None) -> None:
     # handle itself or domain work belonging to a specialist.
     registry = AgentRegistry()
     identity = load_identity(settings.identity_path)
+    # The Manager's own store, separate from every specialist's. With the
+    # default it is ephemeral and behaves exactly as before; with
+    # MANAGER_MEMORY=persistent it outlives this process.
     manager = ManagerAgent(
         registry=registry,
         router=router,
         brain=brain,
         own_skills=ManagerSkills(identity, roster=registry.all_agents),
+        memory=build_memory(settings, MANAGER),
     )
 
     # The mailbox is chosen by configuration and injected into the agent, so
@@ -138,6 +143,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             mailbox,
             analyzers=[JobOpportunityAnalyzer(profile=profile)],
             brain=email_brain,
+            # Its own store, its own file. Never the Manager's.
+            memory=build_memory(settings, EMAIL_AGENT),
         )
     )
 

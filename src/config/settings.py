@@ -77,6 +77,14 @@ class Settings:
     # orchestrator to deliberate while its specialists stay deterministic, or
     # the reverse. One switch for both would make that impossible to express.
     specialist_brain: str = "null"
+    # Where what an agent remembers actually lives. "ephemeral" keeps records
+    # in the process and loses them on exit, which is the behaviour every
+    # caller has today; "persistent" writes them under memory_dir so a rebuilt
+    # Manager - the heartbeat builds one per tick - can recall what the last
+    # one learned. Deliberate opt-in: durability decides where a person's data
+    # sits, and that should never arrive as a side effect of an upgrade.
+    memory: str = "ephemeral"
+    memory_dir: str = "data/memory"
     model: str = "claude-opus-5"
     mailbox: str = "memory"
     profile_path: str = "USER.md"
@@ -133,6 +141,16 @@ class Settings:
         if not specialist_brain:
             raise ValueError("Settings.specialist_brain must not be empty")
         object.__setattr__(self, "specialist_brain", specialist_brain)
+
+        memory = self.memory.strip().lower()
+        if not memory:
+            raise ValueError("Settings.memory must not be empty")
+        object.__setattr__(self, "memory", memory)
+
+        memory_dir = self.memory_dir.strip()
+        if not memory_dir:
+            raise ValueError("Settings.memory_dir must not be empty")
+        object.__setattr__(self, "memory_dir", memory_dir)
 
         mailbox = self.mailbox.strip().lower()
         if not mailbox:
@@ -219,7 +237,8 @@ class Settings:
         return (
             f"log_level={self.log_level} provider={self.provider} "
             f"router={self.router} brain={self.brain} "
-            f"specialist_brain={self.specialist_brain} model={self.model} "
+            f"specialist_brain={self.specialist_brain} memory={self.memory} "
+            f"model={self.model} "
             f"mailbox={self.mailbox} "
             f"api_key={'set' if self.has_api_key else 'unset'}"
         )
