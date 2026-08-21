@@ -2,6 +2,7 @@
 
     python scripts/heartbeat.py --once      one cycle against the configured mailbox
     python scripts/heartbeat.py --dry-run   one cycle against the sample inbox
+                                            (no Gmail; still records state)
     python scripts/heartbeat.py --watch     repeat on an interval, in the foreground
 
 This script SCHEDULES NOTHING. Running it performs exactly one cycle (or, with
@@ -126,7 +127,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="use the built-in sample inbox; makes no Gmail request at all",
+        help=(
+            "use the built-in sample inbox; makes no Gmail request at all. "
+            "Still a real cycle: it records state and may write a report, so "
+            "point MANAGER_STATE_PATH somewhere temporary to keep sample data "
+            "out of your real history."
+        ),
     )
     parser.add_argument("--interval", type=int, default=None, help="minutes between cycles")
     args = parser.parse_args(argv)

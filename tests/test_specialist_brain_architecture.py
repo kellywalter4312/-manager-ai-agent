@@ -512,7 +512,7 @@ class TestTheCompositionRootsWireIt:
     brain actually reaches the agent.
     """
 
-    def _built_agent(self, module, monkeypatch, **overrides):
+    def _built_agent(self, module, monkeypatch, tmp_path, **overrides):
         """Run a composition root and capture the EmailAgent it constructs.
 
         build_provider is replaced with a ScriptedProvider. An earlier version
@@ -531,6 +531,15 @@ class TestTheCompositionRootsWireIt:
             captured["agent"] = agent
             return agent
 
+        # Isolated state and report paths, always. The heartbeat entry point
+        # resolves these from Settings, and their defaults are the real
+        # data/state/processed.json and data/reports - so a test that leaves
+        # them alone runs a genuine cycle against the user's Gmail-derived
+        # state. Baked into the helper rather than passed per test, so the
+        # next test added here inherits the isolation instead of having to
+        # remember it.
+        overrides.setdefault("state_path", str(tmp_path / "state" / "processed.json"))
+        overrides.setdefault("reports_dir", str(tmp_path / "reports"))
         config = settings(log_level="CRITICAL", **overrides)
         monkeypatch.setattr(module, "EmailAgent", capturing)
         monkeypatch.setattr(module.Settings, "from_env", staticmethod(lambda *a, **k: config))
@@ -540,24 +549,24 @@ class TestTheCompositionRootsWireIt:
         )
         return captured
 
-    def test_main_passes_a_brain_to_the_email_agent(self, monkeypatch, capsys):
+    def test_main_passes_a_brain_to_the_email_agent(self, monkeypatch, capsys, tmp_path):
         import main as module
 
-        captured = self._built_agent(module, monkeypatch)
+        captured = self._built_agent(module, monkeypatch, tmp_path)
         module.main([])
         capsys.readouterr()
 
         assert "agent" in captured, "main.py did not construct an EmailAgent"
         assert isinstance(captured["agent"].brain, SpecialistBrain)
 
-    def test_main_passes_the_configured_brain_not_the_default(self, monkeypatch, capsys):
+    def test_main_passes_the_configured_brain_not_the_default(self, monkeypatch, capsys, tmp_path):
         """With specialist_brain=llm the agent must receive an LLM brain. If the
         entry point drops the argument, EmailAgent silently falls back to the
         null brain and this fails."""
         import main as module
 
         captured = self._built_agent(
-            module, monkeypatch, provider="anthropic", specialist_brain="llm", api_key="test-key"
+            module, monkeypatch, tmp_path, provider="anthropic", specialist_brain="llm", api_key="test-key"
         )
         module.main([])
         capsys.readouterr()
@@ -565,18 +574,18 @@ class TestTheCompositionRootsWireIt:
         assert isinstance(captured["agent"].brain, LLMSpecialistBrain)
         assert captured["agent"].brain.provider_name == "scripted"
 
-    def test_main_gives_it_the_email_domain(self, monkeypatch, capsys):
+    def test_main_gives_it_the_email_domain(self, monkeypatch, capsys, tmp_path):
         import main as module
 
         captured = self._built_agent(
-            module, monkeypatch, provider="anthropic", specialist_brain="llm", api_key="test-key"
+            module, monkeypatch, tmp_path, provider="anthropic", specialist_brain="llm", api_key="test-key"
         )
         module.main([])
         capsys.readouterr()
 
         assert "email" in captured["agent"].brain.domain
 
-    def test_the_heartbeat_passes_the_configured_brain_too(self, monkeypatch, capsys):
+    def test_the_heartbeat_passes_the_configured_brain_too(self, monkeypatch, capsys, tmp_path):
         """Wired on the autonomous path as well, or a configured brain would be
         discarded exactly where nobody is watching."""
         import sys
@@ -585,20 +594,18 @@ class TestTheCompositionRootsWireIt:
         import scripts.heartbeat as module
 
         captured = self._built_agent(
-            module, monkeypatch, provider="anthropic", specialist_brain="llm", api_key="test-key"
+            module, monkeypatch, tmp_path, provider="anthropic", specialist_brain="llm", api_key="test-key"
         )
         module.main(["--dry-run"])
         capsys.readouterr()
 
         assert isinstance(captured["agent"].brain, LLMSpecialistBrain)
 
-    def test_the_manager_brain_is_not_handed_to_the_specialist(self, monkeypatch, capsys):
+    def test_the_manager_brain_is_not_handed_to_the_specialist(self, monkeypatch, capsys, tmp_path):
         import main as module
 
         captured = self._built_agent(
-            module,
-            monkeypatch,
-            provider="anthropic",
+            module, monkeypatch, tmp_path, provider="anthropic",
             brain="llm",
             specialist_brain="llm",
             api_key="test-key",

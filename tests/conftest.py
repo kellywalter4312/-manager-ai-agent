@@ -21,16 +21,92 @@ the loud failure rather than being exempted.
 
 from __future__ import annotations
 
+import os
 import socket
 import ssl
+from pathlib import Path
 
 import pytest
 
 from src.providers.base import Completion, LLMProvider
 
+# The real runtime directory: Gmail-derived state, generated reports and the
+# OAuth token all live here. Resolved from this file so it is correct whatever
+# the working directory happens to be when pytest starts.
+PRODUCTION_DATA_DIR = (Path(__file__).resolve().parent.parent / "data").resolve()
+
 # Every variable that could authenticate a real request: this project's own,
 # and the one the vendor SDK finds by itself.
 CREDENTIAL_VARS = ("ANTHROPIC_API_KEY", "MANAGER_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+
+
+def _is_production_data(target: object) -> bool:
+    """Whether a write target lands inside the real data/ directory."""
+    try:
+        resolved = Path(os.fspath(target)).resolve()
+    except (TypeError, ValueError, OSError):
+        return False
+    return resolved == PRODUCTION_DATA_DIR or PRODUCTION_DATA_DIR in resolved.parents
+
+
+@pytest.fixture(autouse=True)
+def _no_production_writes(monkeypatch):
+    """Make writing to the real data/ directory a hard failure in every test.
+
+    This exists because a test already did it. tests/test_specialist_brain_
+    architecture.py drove scripts/heartbeat.py with default settings, which
+    resolve MANAGER_STATE_PATH to data/state/processed.json - so pytest ran a
+    real heartbeat cycle and wrote sample-inbox message ids and fixture
+    opportunities into the user's genuine Gmail-derived state, and filed a
+    report alongside the real ones.
+
+    Fixing that one test would leave the next one free to repeat the mistake.
+    The rule this project applies to the model applies equally here: the wrong
+    thing should be structurally difficult, not merely discouraged. So the
+    write itself is blocked, wherever it comes from.
+
+    Only writes are intercepted. Tests may still *read* production paths - and
+    one of them deliberately does, to prove the state file is untouched.
+    """
+    def guard(operation, target):
+        raise AssertionError(
+            f"test attempted to {operation} inside the production data directory: "
+            f"{target}. "
+            "Heartbeat, state and reporting tests must be given a tmp_path - "
+            "pass state_path/reports_dir through Settings, or inject a "
+            "StateStore(tmp_path / ...) directly."
+        )
+
+    real_write_text = Path.write_text
+    real_open = Path.open
+    real_replace = os.replace
+    real_os_open = os.open
+
+    def write_text(self, *args, **kwargs):
+        if _is_production_data(self):
+            guard("write", self)
+        return real_write_text(self, *args, **kwargs)
+
+    def path_open(self, mode="r", *args, **kwargs):
+        if any(flag in mode for flag in ("w", "a", "x", "+")) and _is_production_data(self):
+            guard("open for writing", self)
+        return real_open(self, mode, *args, **kwargs)
+
+    def replace(src, dst, *args, **kwargs):
+        if _is_production_data(dst) or _is_production_data(src):
+            guard("replace a file", dst)
+        return real_replace(src, dst, *args, **kwargs)
+
+    def os_open(path, flags, *args, **kwargs):
+        writing = flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_APPEND)
+        if writing and _is_production_data(path):
+            guard("open for writing", path)
+        return real_os_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", write_text)
+    monkeypatch.setattr(Path, "open", path_open)
+    monkeypatch.setattr(os, "replace", replace)
+    monkeypatch.setattr(os, "open", os_open)
 
 
 @pytest.fixture(autouse=True)
