@@ -90,8 +90,15 @@ class AgentIdentity:
         return f"{self.name}: {len(self.capabilities)} capability(ies)"
 
 
-def parse_identity(text: str) -> AgentIdentity:
-    """Parse IDENTITY.md. Exposed separately so tests need no file."""
+def parse_sections(text: str) -> dict[str, list[str]]:
+    """Split an identity-style markdown document into its sections.
+
+    Keyed by lower-cased heading; the value is the non-blank lines beneath it.
+    Extracted from parse_identity so the specialist identity document is read
+    by the *same* parser rather than a second one written to look like it.
+    Two parsers drifting apart is how documents that appear to share a format
+    quietly stop doing so.
+    """
     sections: dict[str, list[str]] = {}
     current = ""
 
@@ -107,15 +114,32 @@ def parse_identity(text: str) -> AgentIdentity:
         if current:
             sections.setdefault(current, []).append(line.strip())
 
+    return sections
+
+
+def joined_section(sections: dict[str, list[str]], key: str) -> str:
+    """One section's prose, collapsed onto a single line."""
+    return " ".join(sections.get(key, [])).strip()
+
+
+def listed_section(sections: dict[str, list[str]], key: str) -> list[str]:
+    """One section read as a comma-or-bullet separated list."""
+    values: list[str] = []
+    for line in sections.get(key, []):
+        content = _BULLET.sub(r"\1", line)
+        values.extend(part.strip() for part in content.split(",") if part.strip())
+    return values
+
+
+def parse_identity(text: str) -> AgentIdentity:
+    """Parse IDENTITY.md. Exposed separately so tests need no file."""
+    sections = parse_sections(text)
+
     def joined(key: str) -> str:
-        return " ".join(sections.get(key, [])).strip()
+        return joined_section(sections, key)
 
     def items(key: str) -> list[str]:
-        values: list[str] = []
-        for line in sections.get(key, []):
-            content = _BULLET.sub(r"\1", line)
-            values.extend(part.strip() for part in content.split(",") if part.strip())
-        return values
+        return listed_section(sections, key)
 
     name = joined("name")
     if not name:
@@ -123,11 +147,18 @@ def parse_identity(text: str) -> AgentIdentity:
             "IDENTITY.md has no '## Name' section. It must declare the agent's name."
         )
 
-    # A delegate line reads "email_agent - reading mailboxes"; keep the name.
+    # A delegate line reads "- Arthur - reading mailboxes"; keep the name.
+    #
+    # Bulleted lines only. The section is a list, and a sentence explaining
+    # what the list means is not a delegate - but `or entry.strip()` used to
+    # accept every non-blank line, so any prose written here became a delegate
+    # named after its own first clause. Nothing consumed the field, so nothing
+    # failed; it simply produced quiet nonsense the moment the document said
+    # anything about itself.
     delegates = tuple(
         entry.split(" - ")[0].split(" — ")[0].strip()
         for entry in sections.get("delegates", [])
-        if _BULLET.match(entry) or entry.strip()
+        if _BULLET.match(entry)
     )
 
     return AgentIdentity(

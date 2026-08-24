@@ -97,6 +97,13 @@ class Settings:
     profile_path: str = "USER.md"
     identity_path: str = "IDENTITY.md"
     soul_path: str = "SOUL.md"
+    # Where each specialist's own identity document lives, one file per
+    # specialist, named by the technical key the code knows it by. Separate
+    # from identity_path because these are different agents' documents, not
+    # more of the Manager's: the Manager's identity is one file, and each
+    # specialist owns its own. A missing directory is not an error - a
+    # specialist with no document keeps the name its module declares.
+    identities_dir: str = "identities"
 
     # Heartbeat. Disabled by default: autonomy is opt-in, never a side effect
     # of upgrading. Declared as str because from_env() reads environment

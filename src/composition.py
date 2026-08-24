@@ -44,8 +44,8 @@ from typing import Any, Sequence
 from src.agents.brain_factory import (
     build_opportunity_interpreter,
     build_specialist_brain,
-    domain_for,
 )
+from src.agents.specialists import SpecialistWiring, wiring_for
 from src.agents.base_agent import BaseAgent
 from src.agents.email.analyzers import JobOpportunityAnalyzer
 from src.agents.email_agent import EmailAgent
@@ -63,16 +63,22 @@ from src.registry.agent_registry import AgentRegistry
 from src.services.email.mailbox import Mailbox
 from src.services.identity.identity import AgentIdentity, load_identity
 from src.services.memory.day import Calendar
-from src.services.memory.factory import EMAIL_AGENT, MANAGER, build_memory
+from src.services.memory.factory import EMAIL_AGENT, build_memory
 from src.services.profile.profile import UserProfile
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-# The specialist this project currently ships. Named here so both entry points
-# agree on the owner string that selects a memory file - a typo would give the
-# agent a private store nobody else could find.
-EMAIL_AGENT_NAME = EMAIL_AGENT
+# The *technical key* of the specialist this project currently ships. Not its
+# name: the name is whatever identities/email_agent.md declares, and may be
+# changed without touching a line of code. This key is what selects that
+# document and the built-in reasoning-domain default, and it is stable.
+#
+# Keeping the two apart is what lets a specialist be renamed safely. Keeping
+# the *derivations* together - name, memory owner, brain domain, all from one
+# SpecialistWiring - is what stops them disagreeing. Before that existed the
+# three came from three unrelated constants and nothing compared them.
+EMAIL_AGENT_KEY = EMAIL_AGENT
 
 
 @dataclass(frozen=True)
@@ -96,6 +102,12 @@ class Runtime:
     manager_brain: ManagerBrain
     specialist_brain: SpecialistBrain
     interpreter: Any | None
+    # Who the email specialist is. An identity document describes an *agent*,
+    # not the user, so it has an agent's lifetime: read once, here, alongside
+    # the Manager's own identity. Nothing about it changes between heartbeat
+    # ticks, which is precisely why it belongs in Runtime and the user's
+    # profile does not.
+    email_specialist: SpecialistWiring
 
     def describe(self) -> str:
         """A short line for a startup banner. Never prints a credential."""
@@ -105,6 +117,7 @@ class Runtime:
             f"brain={type(self.manager_brain).__name__} "
             f"specialist_brain={type(self.specialist_brain).__name__} "
             f"interpreter={'yes' if self.interpreter is not None else 'no'} "
+            f"specialist={self.email_specialist.name} "
             f"timezone={self.settings.timezone}"
         )
 
@@ -127,6 +140,16 @@ def build_runtime(settings: Settings) -> Runtime:
     identity = load_identity(settings.identity_path)
     provider = build_provider(settings)
 
+    # Resolved before the specialist brain is built, because the brain's
+    # reasoning domain now comes from it. One identity in, three agreeing
+    # facts out - the name the agent registers under, the store it owns, and
+    # the area it reasons about.
+    email_specialist = wiring_for(
+        EMAIL_AGENT_KEY,
+        fallback_name=EMAIL_AGENT_KEY,
+        identities_dir=settings.identities_dir,
+    )
+
     runtime = Runtime(
         settings=settings,
         calendar=calendar,
@@ -135,9 +158,10 @@ def build_runtime(settings: Settings) -> Runtime:
         router=build_router(settings, provider),
         manager_brain=build_brain(settings, provider),
         specialist_brain=build_specialist_brain(
-            settings, provider, domain_for(EMAIL_AGENT_NAME)
+            settings, provider, email_specialist.brain_domain
         ),
         interpreter=build_opportunity_interpreter(settings, provider),
+        email_specialist=email_specialist,
     )
     logger.info("runtime ready: %s", runtime.describe())
     return runtime
@@ -172,7 +196,12 @@ def build_manager(
         router=runtime.router,
         brain=runtime.manager_brain,
         own_skills=ManagerSkills(runtime.identity, roster=registry.all_agents),
-        memory=build_memory(runtime.settings, MANAGER),
+        # The Manager's store is selected by the Manager's own declared name,
+        # for the same reason the specialist's is selected by his. An agent
+        # that registers under one name and remembers under another is the
+        # divergence this milestone exists to make impossible, and the Manager
+        # is not exempt from it.
+        memory=build_memory(runtime.settings, runtime.identity.name),
         calendar=runtime.calendar,
     )
 
@@ -182,6 +211,10 @@ def build_manager(
         # stays in force for anyone who does not care.
         email_agent_options["fetch_limit"] = fetch_limit
 
+    # One wiring, read three times. The agent is named by it, its store is
+    # selected by it, and the brain it was given was built from it upstream -
+    # so there is no second place where a name could be typed differently.
+    specialist = runtime.email_specialist
     manager.register_agent(
         EmailAgent(
             mailbox,
@@ -189,8 +222,9 @@ def build_manager(
                 JobOpportunityAnalyzer(profile=profile, interpreter=runtime.interpreter)
             ],
             brain=runtime.specialist_brain,
-            memory=build_memory(runtime.settings, EMAIL_AGENT),
+            memory=build_memory(runtime.settings, specialist.memory_owner),
             calendar=runtime.calendar,
+            identity=specialist.identity,
             **email_agent_options,
         )
     )

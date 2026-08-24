@@ -29,12 +29,24 @@ from src.agents.email.analyzers import Analyzer, JobOpportunityAnalyzer
 from src.core.contracts import FINDINGS_KEY, AgentSpec, Task, TaskResult, tokenize
 from src.services.email.mailbox import Mailbox, MailboxError, Outbox
 from src.services.memory.memory import Memory, MemoryRecord
+from src.services.identity.specialist import SpecialistIdentity
 from src.services.memory.policy import MemoryPolicy
 from src.utils.logging import get_logger, task_logger
 
 logger = get_logger(__name__)
 
+# The name this agent answers to when no identity document names it. It is
+# also the key its identity document is filed under, and the owner of its
+# memory store by default - see src/agents/specialists.py, which is the one
+# place those three are derived together.
 AGENT_NAME = "email_agent"
+
+# What the agent says it does when no document says it better. Named rather
+# than inlined so the fallback is visible next to the name it accompanies.
+DEFAULT_DESCRIPTION = (
+    "Reads and analyzes email. Can scan an inbox and identify job "
+    "and opportunity messages. Cannot send or compose mail."
+)
 
 # Capabilities the agent has regardless of which analyzers are registered.
 BASE_CAPABILITIES = frozenset({"email", "emails", "inbox", "mail", "gmail", "messages"})
@@ -59,6 +71,7 @@ class EmailAgent(CognitiveAgent):
         memory_policy: MemoryPolicy | None = None,
         tools: ToolSet | None = None,
         calendar: Calendar | None = None,
+        identity: SpecialistIdentity | None = None,
     ) -> None:
         """Every collaborator is injected - mailbox, analyzers, outbox.
 
@@ -70,6 +83,16 @@ class EmailAgent(CognitiveAgent):
         and the standard specialist policy - so an agent constructed with none
         of them reasons about nothing and retains nothing, which is the honest
         behaviour for a specialist nobody has equipped.
+
+        ``identity`` names this agent. It supplies the name and description
+        only: capabilities are computed below from the analyzers actually
+        registered, and a SpecialistIdentity has no capabilities field for a
+        document to put a claim in. Renaming this agent therefore changes what
+        it is called and nothing about what it can do.
+
+        Optional, and defaulting to the module constants, so an EmailAgent
+        constructed without one behaves exactly as it did before identity
+        documents existed.
         """
         super().__init__(
             brain=brain,
@@ -86,6 +109,13 @@ class EmailAgent(CognitiveAgent):
             raise TypeError(f"Expected a Mailbox, got {type(mailbox).__name__}")
         if fetch_limit <= 0:
             raise ValueError("fetch_limit must be positive")
+
+        self._identity = identity
+        # Resolved once. `spec` rebuilds an AgentSpec on every access and
+        # execute() reports a name several times per task; recomputing the
+        # fallback each time would be wasted work, and worse, would make the
+        # name look like something that could change mid-task.
+        self._name = identity.name if identity is not None else AGENT_NAME
 
         self._mailbox = mailbox
         self._outbox = outbox
@@ -110,19 +140,35 @@ class EmailAgent(CognitiveAgent):
         Capabilities are *computed* from the registered analyzers rather than
         hardcoded, so adding an analyzer automatically widens what the existing
         CapabilityRouter routes here. No routing code changes.
+
+        Note where the identity document reaches and where it stops. It sets
+        the name and may improve the description; the capability set below is
+        assembled from wired collaborators and never consults it. A document
+        claiming this agent can send does not make `send` routable here, and
+        cannot, because there is no path from prose to this set.
         """
         capabilities = set(BASE_CAPABILITIES)
         for analyzer in self._analyzers:
             capabilities |= analyzer.capabilities
 
+        description = DEFAULT_DESCRIPTION
+        if self._identity is not None:
+            description = (
+                self._identity.description
+                or self._identity.role
+                or DEFAULT_DESCRIPTION
+            )
+
         return AgentSpec(
-            name=AGENT_NAME,
-            description=(
-                "Reads and analyzes email. Can scan an inbox and identify job "
-                "and opportunity messages. Cannot send or compose mail."
-            ),
+            name=self._name,
+            description=description,
             capabilities=frozenset(capabilities),
         )
+
+    @property
+    def identity(self) -> SpecialistIdentity | None:
+        """The document this agent was named by, if it was named by one."""
+        return self._identity
 
     @property
     def can_send(self) -> bool:
@@ -160,7 +206,7 @@ class EmailAgent(CognitiveAgent):
             # A mailbox failure is an expected outcome, not a bug: report it as
             # a failed task rather than letting it escape to the Manager.
             log.warning("mailbox unavailable: %s", exc)
-            return TaskResult.failure(task, AGENT_NAME, f"Mailbox error: {exc}")
+            return TaskResult.failure(task, self._name, f"Mailbox error: {exc}")
 
         fetched = len(messages)
         if exclude:
@@ -185,7 +231,7 @@ class EmailAgent(CognitiveAgent):
             # faulty agent must not take down the Manager.
             log.exception("analyzer '%s' failed", analyzer.name)
             return TaskResult.failure(
-                task, AGENT_NAME, f"Analyzer '{analyzer.name}' failed: {exc}"
+                task, self._name, f"Analyzer '{analyzer.name}' failed: {exc}"
             )
 
         log.info(
@@ -208,7 +254,7 @@ class EmailAgent(CognitiveAgent):
 
         return TaskResult.success(
             task,
-            AGENT_NAME,
+            self._name,
             report.summary(),
             payload=self._payload_for(report, messages, insight),
         )
@@ -235,7 +281,7 @@ class EmailAgent(CognitiveAgent):
         return MemoryRecord(
             content=insight.summary,
             kind=SpecialistMemoryCategory.DOMAIN_LESSON.value,
-            tags=(AGENT_NAME,),
+            tags=(self._name,),
             context={
                 # The policy reads confidence from here; the storage contract
                 # has no opinion about it.
@@ -324,12 +370,12 @@ class EmailAgent(CognitiveAgent):
         job-analysis agent that fails at everything else.
         """
         if not messages:
-            return TaskResult.success(task, AGENT_NAME, "Inbox is empty.")
+            return TaskResult.success(task, self._name, "Inbox is empty.")
 
         lines = [f"{len(messages)} message(s) in the inbox, newest first:"]
         # preview() never includes the body - summaries reach logs and consoles.
         lines.extend(f"  - {message.preview()}" for message in messages)
-        return TaskResult.success(task, AGENT_NAME, "\n".join(lines))
+        return TaskResult.success(task, self._name, "\n".join(lines))
 
     def _refuse_to_send(self, task: Task, log) -> TaskResult:
         """Composition is out of scope; say so explicitly rather than guessing.
@@ -348,4 +394,4 @@ class EmailAgent(CognitiveAgent):
                 "An outbox is configured, but sending is not implemented yet."
             )
         log.info("declined a send request: %s", error)
-        return TaskResult.failure(task, AGENT_NAME, error)
+        return TaskResult.failure(task, self._name, error)
