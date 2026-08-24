@@ -240,7 +240,14 @@ def build_manager(
         registry=registry,
         router=runtime.router,
         brain=runtime.manager_brain,
-        own_skills=ManagerSkills(runtime.identity, roster=registry.all_agents),
+        # Alfred is given who he serves as well as who he is. The profile was
+        # already loaded per run for the specialist's analyzer and passed
+        # straight through this function; the orchestrator accountable for the
+        # mission simply never saw it. It arrives per call, like the memory
+        # beside it, so an edit to USER.md takes effect on the next tick.
+        own_skills=ManagerSkills(
+            runtime.identity, roster=registry.all_agents, user=profile
+        ),
         # The Manager's store is selected by the Manager's own declared name,
         # for the same reason the specialist's is selected by his. An agent
         # that registers under one name and remembers under another is the

@@ -40,6 +40,7 @@ from src.manager.capabilities import (
     select_capability,
 )
 from src.services.identity.identity import AgentIdentity
+from src.services.profile.profile import UserProfile
 from src.utils.logging import get_logger, task_logger
 
 logger = get_logger(__name__)
@@ -53,6 +54,7 @@ class ManagerSkills(BaseAgent):
         identity: AgentIdentity,
         roster: Callable[[], Sequence[BaseAgent]] | None = None,
         capabilities: dict[str, ManagerCapability] | None = None,
+        user: UserProfile | None = None,
     ) -> None:
         """``roster`` supplies the currently registered agents.
 
@@ -65,12 +67,25 @@ class ManagerSkills(BaseAgent):
         deployment ships. Injectable for the same reason every other
         collaborator in this project is: so a test can register a capability
         without mutating global state that another test would then inherit.
+
+        ``user`` is who the Manager is serving. Until now the profile passed
+        straight through the composition root into the email specialist's
+        analyzer and the Manager never saw it - so the orchestrator accountable
+        for a mission had no idea who the mission was for. It arrives here at
+        construction, which is per run and per heartbeat tick, so an edit to
+        USER.md is picked up on the next tick exactly as it always has been.
+
+        It is context, never authority. A UserProfile has no field that could
+        be read as a permission, a tool, or a right to reach a specialist. What
+        the user can do is a fact about the user; what the software can do is
+        decided by handlers and wiring.
         """
         self._identity = identity
         self._roster = roster or (lambda: ())
         self._capabilities = (
             MANAGER_CAPABILITIES if capabilities is None else dict(capabilities)
         )
+        self._user = user
 
     @property
     def spec(self) -> AgentSpec:
@@ -103,6 +118,17 @@ class ManagerSkills(BaseAgent):
     def identity(self) -> AgentIdentity:
         return self._identity
 
+    @property
+    def user(self) -> UserProfile | None:
+        """The profile this Manager was built with, or None if there is none.
+
+        Deliberately not merged into ``identity``: one says who the agent is,
+        the other says who it serves, and they have different lifetimes -
+        identity is read once with the runtime, the profile is re-read every
+        run because the person keeps changing.
+        """
+        return self._user
+
     def execute(self, task: Task) -> TaskResult:
         """Pick the handler this task is asking for, and run it.
 
@@ -133,5 +159,8 @@ class ManagerSkills(BaseAgent):
                 # raw declaration - so a handler reporting "what can you do"
                 # cannot advertise a word nothing is able to answer.
                 own_capabilities=tuple(sorted(self.spec.capabilities)),
+                # Handed to every handler as read-only context. A handler that
+                # has no use for it simply does not look.
+                user=self._user,
             )
         )

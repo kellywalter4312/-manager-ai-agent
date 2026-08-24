@@ -55,6 +55,7 @@ from typing import Callable, Sequence
 from src.agents.base_agent import BaseAgent
 from src.core.contracts import Task, TaskResult, tokenize
 from src.services.identity.identity import AgentIdentity
+from src.services.profile.profile import UserProfile
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -75,6 +76,27 @@ class CapabilityRequest:
     roster: Callable[[], Sequence[BaseAgent]]
     own_name: str
     own_capabilities: tuple[str, ...]
+    # Who the Manager is serving, freshly loaded for this run. Read-only
+    # context and nothing more: a UserProfile carries skills, projects,
+    # seniority, targets and hard filters, and has no field a handler could
+    # read as a permission, a tool or a right to reach a specialist. What the
+    # user can do is a fact about the user; what the software can do is
+    # decided by handlers and wiring, and the two never meet.
+    #
+    # None when no profile is configured. main.py degrades to detection-only
+    # rather than stopping, so a handler must be able to say "I do not know
+    # who I am serving" instead of assuming someone.
+    user: UserProfile | None = None
+
+    @property
+    def knows_the_user(self) -> bool:
+        """Whether a usable profile reached this request.
+
+        An empty profile is treated as not knowing: a UserProfile with no
+        skills cannot support honest reasoning about the person, and saying
+        so beats quietly behaving as though it could.
+        """
+        return self.user is not None and not self.user.is_empty
 
     def specialists(self) -> list[BaseAgent]:
         """Everyone registered except the Manager's own skills.
@@ -153,6 +175,18 @@ def report_roster(request: CapabilityRequest) -> TaskResult:
         "specialists": {
             agent.name: tuple(sorted(agent.spec.capabilities)) for agent in others
         },
+        # Who this Manager is serving, as UserProfile.describe() renders it -
+        # counts and seniority, never a skill name, a project or a rate. That
+        # method exists precisely because this kind of summary reaches logs
+        # and consoles, and the profile is the user's, not the system's, to
+        # put on display.
+        #
+        # Added to the payload rather than the rendered text on purpose: the
+        # rendering above is what a person reads, and it did not previously
+        # mention the user. Nothing about the printed report changes.
+        "serving": (
+            request.user.describe() if request.knows_the_user else "no profile configured"
+        ),
     }
     return TaskResult.success(
         request.task, request.own_name, "\n".join(lines), payload=payload
