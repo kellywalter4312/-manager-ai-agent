@@ -48,9 +48,15 @@ def drive(module, monkeypatch, tmp_path, argv=None, llm_provider=None, **overrid
     build_provider is replaced with a ScriptedProvider so the settings can say
     anthropic - exercising the real gating - while nothing goes near a network.
     """
+    # Construction moved to the shared composition root, so the agent and
+    # analyzer classes are intercepted there. The entry point is still driven
+    # end to end - which is the whole point of these tests: they must observe
+    # what production actually builds, wherever it builds it.
+    import src.composition as composition
+
     captured = {}
-    real_email_agent = module.EmailAgent
-    real_analyzer = module.JobOpportunityAnalyzer
+    real_email_agent = composition.EmailAgent
+    real_analyzer = composition.JobOpportunityAnalyzer
 
     def capturing_agent(*args, **kwargs):
         agent = real_email_agent(*args, **kwargs)
@@ -67,12 +73,12 @@ def drive(module, monkeypatch, tmp_path, argv=None, llm_provider=None, **overrid
     overrides.setdefault("memory_dir", str(tmp_path / "memory"))
     config = settings(log_level="CRITICAL", **overrides)
 
-    monkeypatch.setattr(module, "EmailAgent", capturing_agent)
-    monkeypatch.setattr(module, "JobOpportunityAnalyzer", capturing_analyzer)
+    monkeypatch.setattr(composition, "EmailAgent", capturing_agent)
+    monkeypatch.setattr(composition, "JobOpportunityAnalyzer", capturing_analyzer)
     monkeypatch.setattr(module.Settings, "from_env", staticmethod(lambda *a, **k: config))
     monkeypatch.setattr(module, "configure_logging", lambda *a, **k: None)
     scripted = llm_provider if llm_provider is not None else ScriptedProvider(JUDGEMENT)
-    monkeypatch.setattr(module, "build_provider", lambda *a, **k: scripted)
+    monkeypatch.setattr(composition, "build_provider", lambda *a, **k: scripted)
 
     module.main(argv if argv is not None else [])
     return captured

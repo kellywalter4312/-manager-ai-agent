@@ -255,7 +255,13 @@ class TestTheCompositionRootsUseIt:
         def refuse(*args, **kwargs):
             raise AssertionError("a provider was built despite an invalid configuration")
 
-        monkeypatch.setattr(main_module, "build_provider", refuse)
+        import src.composition as composition
+
+        # Patched on src.composition rather than on the entry point. Construction
+        # moved to the shared composition root, so that is where these names now
+        # resolve. The entry point is still driven end to end - only the point of
+        # interception moved.
+        monkeypatch.setattr(composition, "build_provider", refuse)
 
         with pytest.raises(SystemExit):
             main_module.main()

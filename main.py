@@ -18,26 +18,13 @@ import sys
 from typing import Sequence
 
 from src.agents.echo_agent import EchoAgent
-from src.agents.email.analyzers import JobOpportunityAnalyzer
-from src.agents.brain_factory import (
-    build_opportunity_interpreter,
-    build_specialist_brain,
-    domain_for,
-)
-from src.agents.email_agent import EmailAgent
+from src.composition import build_manager, build_runtime
 from src.config.coherence import ConfigurationError, check_configuration
+from src.providers.factory import ProviderConfigurationError
+from src.services.memory.day import TimezoneError
 from src.config.settings import Settings
 from src.core.contracts import Task
-from src.manager.brain_factory import build_brain
 from src.manager.cognition import assess_manager
-from src.manager.manager import ManagerAgent
-from src.manager.manager_skills import ManagerSkills
-from src.manager.router_factory import build_router
-from src.providers.factory import ProviderConfigurationError, build_provider
-from src.registry.agent_registry import AgentRegistry
-from src.services.memory.day import Calendar, TimezoneError
-from src.services.memory.factory import EMAIL_AGENT, MANAGER, build_memory
-from src.services.identity.identity import load_identity
 from src.services.email.mailbox_factory import build_mailbox
 from src.services.profile.loader import load_profile
 from src.services.profile.profile import ProfileError
@@ -92,10 +79,13 @@ def main(argv: Sequence[str] | None = None) -> None:
     # and shared by the Manager and every specialist: same temporal rules,
     # separate stores. An unusable timezone fails now rather than surfacing
     # later as memories landing on the wrong side of midnight.
+    # Everything that outlives a run is built once, here, by the shared
+    # composition root - the same one scripts/heartbeat.py uses, so the two
+    # entry points cannot drift apart the way they did when each wired the
+    # system independently.
     try:
         check_configuration(settings)
-        calendar = Calendar.configured(settings.timezone)
-        provider = build_provider(settings)
+        runtime = build_runtime(settings)
     except (ConfigurationError, ProviderConfigurationError, TimezoneError) as exc:
         # A misconfiguration, not a failure. Reported as a readable line and a
         # non-zero exit rather than a traceback, and never quietly downgraded
@@ -103,31 +93,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         # asked for is worse than refusing to start.
         print(f"configuration error: {exc}")
         raise SystemExit(2) from None
-
-    router = build_router(settings, provider)
-
-    # Set MANAGER_BRAIN=llm to give the Manager a reasoning capability. With the
-    # default null provider it answers an honest "no view" and makes no network
-    # call, so real reasoning needs MANAGER_PROVIDER as well - two deliberate
-    # settings, not one.
-    brain = build_brain(settings, provider)
-
-    # The Manager's own capabilities are registered like any specialist, so the
-    # existing router decides whether a mission is coordination work it should
-    # handle itself or domain work belonging to a specialist.
-    registry = AgentRegistry()
-    identity = load_identity(settings.identity_path)
-    # The Manager's own store, separate from every specialist's. With the
-    # default it is ephemeral and behaves exactly as before; with
-    # MANAGER_MEMORY=persistent it outlives this process.
-    manager = ManagerAgent(
-        registry=registry,
-        router=router,
-        brain=brain,
-        own_skills=ManagerSkills(identity, roster=registry.all_agents),
-        memory=build_memory(settings, MANAGER),
-        calendar=calendar,
-    )
 
     # The mailbox is chosen by configuration and injected into the agent, so
     # switching between the sample inbox and a real Gmail account is an
@@ -138,37 +103,24 @@ def main(argv: Sequence[str] | None = None) -> None:
     # The profile is what turns detection into judgement. Without it the agent
     # still finds job emails, it just cannot say whether they suit you - so a
     # missing USER.md degrades to detection rather than stopping the program.
+    # That choice belongs here rather than in the composition root: the
+    # heartbeat treats the same failure as a reason to stop before any fetch.
     try:
         profile = load_profile(settings.profile_path)
     except ProfileError as exc:
         print(f"note     : {exc}")
         profile = None
 
-    # The specialist's own brain, built from its own setting and given its own
-    # domain. It is not the Manager's brain and never shares one: two calls,
-    # two objects, two areas of responsibility. Its memory is untouched by this
-    # - EmailAgent still constructs its own store, as it always has.
-    email_brain = build_specialist_brain(settings, provider, domain_for("email_agent"))
-    manager.register_agent(
-        EmailAgent(
-            mailbox,
-            analyzers=[
-                JobOpportunityAnalyzer(
-                    profile=profile,
-                    # The real interpreter, reaching production. Without
-                    # this it was built by tests and by nothing else.
-                    interpreter=build_opportunity_interpreter(settings, provider),
-                )
-            ],
-            brain=email_brain,
-            # Its own store, its own file. Never the Manager's.
-            memory=build_memory(settings, EMAIL_AGENT),
-            calendar=calendar,
-        )
+    # One Manager for this process, with the email specialist registered. The
+    # Manager and the specialist get separate memories and the same calendar.
+    manager = build_manager(
+        runtime,
+        mailbox=mailbox,
+        profile=profile,
+        # Still a stand-in - nothing schedules calendars yet, and the
+        # autonomous path deliberately does not register it.
+        extra_agents=[EchoAgent(name="beta_agent", capabilities={"schedule", "calendar"})],
     )
-
-    # Still a stand-in - nothing schedules calendars yet.
-    manager.register_agent(EchoAgent(name="beta_agent", capabilities={"schedule", "calendar"}))
 
     tasks = [
         Task(description="Scan my inbox for job opportunities"),
@@ -180,12 +132,12 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     print(f"settings : {settings.describe()}")
     key_note = "API key set" if settings.has_api_key else "no API key configured"
-    print(f"provider : {provider.name} ({key_note})")
-    print(f"router   : {type(router).__name__}")
-    print(f"brain    : {type(brain).__name__}")
-    print(f"email br.: {type(email_brain).__name__}")
+    print(f"provider : {runtime.provider.name} ({key_note})")
+    print(f"router   : {type(runtime.router).__name__}")
+    print(f"brain    : {type(runtime.manager_brain).__name__}")
+    print(f"email br.: {type(runtime.specialist_brain).__name__}")
     print(f"mailbox  : {settings.mailbox} ({type(mailbox).__name__})")
-    print(f"calendar : {settings.timezone} (today is {calendar.today()})")
+    print(f"calendar : {settings.timezone} (today is {runtime.calendar.today()})")
 
     # Which cognitive capabilities this run actually has. Reported rather than
     # enforced: both modes are valid operating states, and the Manager runs the

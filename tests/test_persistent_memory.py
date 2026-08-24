@@ -464,15 +464,54 @@ class TestManagerRecreation:
         assert len(second.memory.recall("delegated")) == 1
 
     def test_recall_context_sees_the_earlier_run(self, tmp_path):
+        """Pinned to a deterministic clock rather than the wall clock.
+
+        This used to rely on WHEN happening to be the real current date.
+        recall_context returns today's records only - by design - so the day
+        after WHEN the stored record became history and the test failed. That
+        was a time bomb in the test, not a defect in recall_context: the
+        temporal behaviour is exactly right, and weakening it to make a test
+        pass would have thrown away the guarantee New Dawn exists to provide.
+
+        Injecting a Calendar whose clock reports WHEN makes "today" mean the
+        same thing to the test and to the record, on any date it is run.
+        """
         from src.core.contracts import Task
+        from src.services.memory.day import Calendar
 
         config = settings(memory="persistent", memory_dir=str(tmp_path))
-        first = ManagerAgent(memory=build_memory(config, MANAGER))
+        calendar = Calendar(clock=lambda: WHEN)
+
+        first = ManagerAgent(memory=build_memory(config, MANAGER), calendar=calendar)
         first.memory.remember(record("inbox scanning went well", kind="delegation_outcome",
                                      tags={"email_agent"}))
 
-        second = ManagerAgent(memory=build_memory(config, MANAGER))
+        second = ManagerAgent(memory=build_memory(config, MANAGER), calendar=calendar)
         assert second.recall_context(Task(description="scan my inbox")) != ()
+
+    def test_that_test_is_not_tied_to_the_real_date(self, tmp_path):
+        """Guards the fix. The same store must resolve on any wall-clock day,
+        which is what a hard-coded 'today' could not promise."""
+        from datetime import timedelta
+
+        from src.core.contracts import Task
+        from src.services.memory.day import Calendar
+
+        config = settings(memory="persistent", memory_dir=str(tmp_path))
+
+        for offset in (0, 1, 400):
+            moment = WHEN + timedelta(days=offset)
+            calendar = Calendar(clock=lambda m=moment: m)
+            manager = ManagerAgent(
+                memory=build_memory(config, MANAGER), calendar=calendar
+            )
+            manager.memory.remember(
+                record(f"inbox scanning run {offset}", created_at=moment, tags={f"r{offset}"})
+            )
+            rebuilt = ManagerAgent(
+                memory=build_memory(config, MANAGER), calendar=calendar
+            )
+            assert rebuilt.recall_context(Task(description="inbox scanning")) != ()
 
     def test_an_ephemeral_manager_still_forgets(self, tmp_path):
         config = settings(memory_dir=str(tmp_path))

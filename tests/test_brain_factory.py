@@ -282,15 +282,23 @@ class TestTheCompositionRoots:
         """Runs main() for real, intercepting only the Manager constructor."""
         import main as main_module
 
+        import src.composition as composition
+
         captured = {}
-        real_manager = main_module.ManagerAgent
+        # Read from the composition root as well as patched there - the entry
+        # point no longer holds these names at all.
+        real_manager = composition.ManagerAgent
 
         class RecordingManager(real_manager):
             def __init__(self, *args, **kwargs):
                 captured.update(kwargs)
                 super().__init__(*args, **kwargs)
 
-        monkeypatch.setattr(main_module, "ManagerAgent", RecordingManager)
+        # Patched on src.composition rather than on the entry point. Construction
+        # moved to the shared composition root, so that is where these names now
+        # resolve. The entry point is still driven end to end - only the point of
+        # interception moved.
+        monkeypatch.setattr(composition, "ManagerAgent", RecordingManager)
         # A fixed Settings object, so main() reads no environment at all.
         fixed = settings()
         monkeypatch.setattr(
@@ -309,14 +317,20 @@ class TestTheCompositionRoots:
     def test_main_reaches_the_brain_through_the_factory(self, monkeypatch, capsys):
         import main as main_module
 
+        import src.composition as composition
+
         seen = {}
-        real_build = main_module.build_brain
+        real_build = composition.build_brain
 
         def recording_build(config, provider):
             seen["provider"] = provider
             return real_build(config, provider)
 
-        monkeypatch.setattr(main_module, "build_brain", recording_build)
+        # Patched on src.composition rather than on the entry point. Construction
+        # moved to the shared composition root, so that is where these names now
+        # resolve. The entry point is still driven end to end - only the point of
+        # interception moved.
+        monkeypatch.setattr(composition, "build_brain", recording_build)
         # A fixed Settings object, so main() reads no environment at all.
         fixed = settings()
         monkeypatch.setattr(

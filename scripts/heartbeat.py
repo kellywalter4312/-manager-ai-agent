@@ -29,38 +29,19 @@ from typing import Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.agents.email.analyzers import JobOpportunityAnalyzer  # noqa: E402
-from src.agents.brain_factory import (  # noqa: E402
-    build_opportunity_interpreter,
-    build_specialist_brain,
-    domain_for,
-)
-from src.agents.email_agent import EmailAgent  # noqa: E402
 from src.config.coherence import (  # noqa: E402
     ConfigurationError,
     check_configuration,
 )
 from src.config.settings import Settings  # noqa: E402
+from src.composition import build_manager, build_runtime  # noqa: E402
+from src.providers.factory import ProviderConfigurationError  # noqa: E402
+from src.services.memory.day import TimezoneError  # noqa: E402
 from src.heartbeat.runner import HeartbeatRunner, TickStatus  # noqa: E402
 from src.heartbeat.state import StateStore  # noqa: E402
-from src.manager.brain_factory import build_brain  # noqa: E402
 from src.manager.manager import ManagerAgent  # noqa: E402
-from src.manager.manager_skills import ManagerSkills  # noqa: E402
-from src.manager.router_factory import build_router  # noqa: E402
-from src.providers.factory import (  # noqa: E402
-    ProviderConfigurationError,
-    build_provider,
-)
-from src.registry.agent_registry import AgentRegistry  # noqa: E402
-from src.services.memory.day import Calendar, TimezoneError  # noqa: E402
-from src.services.memory.factory import (  # noqa: E402
-    EMAIL_AGENT,
-    MANAGER,
-    build_memory,
-)
 from src.services.email.mailbox_factory import build_mailbox  # noqa: E402
 from src.services.email.sample_inbox import sample_inbox  # noqa: E402
-from src.services.identity.identity import load_identity  # noqa: E402
 from src.services.identity.soul import load_soul  # noqa: E402
 from src.services.profile.loader import load_profile  # noqa: E402
 from src.services.profile.profile import UserProfile  # noqa: E402
@@ -75,64 +56,27 @@ def build_manager_factory(settings: Settings, dry_run: bool) -> Callable[[UserPr
     assembled agent. The mailbox is built once and shared - it holds the
     lazily created API client.
     """
-    identity = load_identity(settings.identity_path)
-    # Resolved once and shared across ticks: a calendar is a zone and a clock,
-    # with no per-tick state. Each tick still gets its own memory, which is
-    # what re-reads the store.
-    calendar = Calendar.configured(settings.timezone)
-    provider = build_provider(settings)
-    router = build_router(settings, provider)
-    # Built once and shared across ticks: a brain is stateless by design, so
-    # there is nothing per-tick about it. When memory arrives it will be the
-    # component with a lifecycle, not this one.
-    brain = build_brain(settings, provider)
-    # Built once and shared for the same reason the Manager's is: a brain holds
-    # no per-tick state. Wired here as well as in main.py so a configured
-    # specialist brain is not silently discarded on the autonomous path - the
-    # exact "built and then thrown away" failure the coherence check exists to
-    # prevent one layer up.
-    specialist_brain = build_specialist_brain(
-        settings, provider, domain_for("email_agent")
-    )
-    # Built once and shared across ticks for the same reason the brain is: it
-    # holds a provider and no per-tick state.
-    interpreter = build_opportunity_interpreter(settings, provider)
+    # Everything that outlives a tick, built once by the shared composition
+    # root - the same one main.py uses. A provider, a router and the brains
+    # hold no per-tick state, so sharing them across ticks is free.
+    runtime = build_runtime(settings)
+
+    # --dry-run substitutes the built-in sample inbox, which is why the mailbox
+    # is chosen here rather than inside the composition root. Built once and
+    # shared: it holds the lazily created API client.
     mailbox = sample_inbox() if dry_run else build_mailbox(settings)
 
     def build(profile: UserProfile) -> ManagerAgent:
-        # Registry first, so the Manager's own skills can report the roster
-        # without holding a reference back to the Manager itself.
-        registry = AgentRegistry()
-        skills = ManagerSkills(identity, roster=registry.all_agents)
-
         # Built per tick, not once, and that is the point. A persistent store
         # re-reads its file at construction, so this tick sees what the last
         # one wrote even though the Manager object itself does not survive.
         # The Manager needs no lifecycle; its memory does.
-        manager = ManagerAgent(
-            registry=registry,
-            router=router,
-            brain=brain,
-            own_skills=skills,
-            memory=build_memory(settings, MANAGER),
-            calendar=calendar,
+        return build_manager(
+            runtime,
+            mailbox=mailbox,
+            profile=profile,
+            fetch_limit=settings.heartbeat_limit,
         )
-        manager.register_agent(
-            EmailAgent(
-                mailbox,
-                analyzers=[
-                    JobOpportunityAnalyzer(
-                        profile=profile,
-                        interpreter=interpreter,
-                    )
-                ],
-                brain=specialist_brain,
-                memory=build_memory(settings, EMAIL_AGENT),
-                calendar=calendar,
-                fetch_limit=settings.heartbeat_limit,
-            )
-        )
-        return manager
 
     return build
 
