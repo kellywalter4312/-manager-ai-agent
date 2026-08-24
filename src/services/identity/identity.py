@@ -38,9 +38,19 @@ class AgentIdentity:
 
     name: str
     role: str = ""
+    # Why this agent exists, as distinct from what it is or what it does.
+    # ``role`` answers "what is it" and ``description`` answers "what does it
+    # do"; neither states what it is *for*. Kept as its own field rather than
+    # folded into either, because a purpose that can only be inferred from a
+    # job description is not a durable statement of intent.
+    purpose: str = ""
     description: str = ""
     capabilities: frozenset[str] = field(default_factory=frozenset)
     delegates: tuple[str, ...] = ()
+    # The scope prose the document has always carried. It was previously
+    # collected while parsing and then dropped, which made it a heading that
+    # looked like loaded configuration and was not. Now it loads.
+    area_of_responsibility: str = ""
 
     def __post_init__(self) -> None:
         if not self.name.strip():
@@ -59,6 +69,16 @@ class AgentIdentity:
 
         Falls back to the role line when no description is given, because
         AgentSpec requires a non-empty description.
+
+        ``purpose`` and ``area_of_responsibility`` deliberately do **not**
+        appear here, and that omission is the point. AgentSpec is the routing
+        contract - a name, a description, and the capability set a router
+        scores a task against. Folding identity prose into it would let a
+        sentence in a markdown file widen what gets routed to this agent.
+
+        Identity describes; it does not grant. Capabilities come from the
+        ``## Capabilities`` section alone, and nothing an author writes about
+        why the agent exists can add to them.
         """
         return AgentSpec(
             name=self.name,
@@ -113,9 +133,14 @@ def parse_identity(text: str) -> AgentIdentity:
     return AgentIdentity(
         name=name,
         role=joined("role"),
+        purpose=joined("purpose"),
         description=joined("description"),
         capabilities=frozenset(items("capabilities")),
         delegates=tuple(d.lstrip("- ").strip() for d in delegates if d.strip()),
+        # Read through the same helper as every other prose section. Both are
+        # optional: a document that omits them is still a valid identity, so
+        # nothing that parsed before this change stops parsing now.
+        area_of_responsibility=joined("area of responsibility"),
     )
 
 

@@ -26,6 +26,9 @@ manager
 ## Role
 Orchestrator and coordinator
 
+## Purpose
+To serve one person, and to report what is worth their attention.
+
 ## Description
 Receives missions and decides how they should be carried out.
 
@@ -34,6 +37,9 @@ capabilities, status, roster, report
 
 ## Delegates
 - email_agent - reading mailboxes
+
+## Area of responsibility
+Coordination, not depth.
 """
 
 SOUL_SAMPLE = """
@@ -80,6 +86,104 @@ class TestIdentityParsing:
     def test_requires_at_least_one_capability(self):
         with pytest.raises(IdentityError):
             parse_identity("## Name\nmanager\n")
+
+
+class TestPurposeAndAreaOfResponsibility:
+    """Two prose sections: what the agent is *for*, and how far it reaches.
+
+    ``## Area of responsibility`` is not new to the document - it has been
+    written there since the file existed. What it was not, until now, is
+    loaded: the parser collected it into a section dict and then dropped it,
+    which made it a heading that looked like configuration and behaved like a
+    comment. A section nothing reads is worse than no section at all, because
+    a reader reasonably assumes it takes effect.
+
+    ``## Purpose`` is new. ``role`` says what the agent is and ``description``
+    says what it does; neither states why it exists, and a purpose that has to
+    be inferred from a job description is not durably stated anywhere.
+    """
+
+    def test_reads_purpose(self):
+        assert "serve one person" in parse_identity(IDENTITY_SAMPLE).purpose
+
+    def test_reads_area_of_responsibility(self):
+        assert "Coordination" in parse_identity(IDENTITY_SAMPLE).area_of_responsibility
+
+    def test_purpose_is_not_the_role_or_the_description(self):
+        """Three separate questions, three separate fields.
+
+        Collapsing any two would be the small compromise that makes a later
+        "who is this agent" answer vague, so the distinction is pinned here.
+        """
+        identity = parse_identity(IDENTITY_SAMPLE)
+        assert identity.purpose != identity.role
+        assert identity.purpose != identity.description
+
+    def test_both_are_optional(self):
+        """A document that omits them is still a valid identity.
+
+        Anything that parsed before these fields existed must still parse, so
+        the default is an empty string and never an error.
+        """
+        identity = parse_identity("## Name\nm\n## Capabilities\nreport\n")
+        assert identity.purpose == ""
+        assert identity.area_of_responsibility == ""
+
+    def test_the_committed_identity_file_declares_both(self):
+        """The real IDENTITY.md, not a sample - the file the Manager loads."""
+        identity = load_identity("IDENTITY.md")
+        assert identity.purpose.strip()
+        assert identity.area_of_responsibility.strip()
+
+
+class TestIdentityProseCannotGrantCapability:
+    """Identity describes; it does not grant.
+
+    The rule SOUL.md is already held to, applied to the identity document: a
+    capability that could be created by writing a sentence about the agent
+    would not be a capability boundary at all. Only ``## Capabilities``
+    decides what a router may send here.
+    """
+
+    SPRAWLING = """
+## Name
+manager
+
+## Role
+An agent that can send, delete and apply on the user's behalf.
+
+## Purpose
+To send email, reply to recruiters, apply for jobs and delete messages.
+
+## Description
+Sends, forwards, deletes, applies, contacts and purchases.
+
+## Capabilities
+report
+
+## Area of responsibility
+Sending, deleting, applying and contacting anyone it likes.
+"""
+
+    def test_prose_does_not_widen_the_capability_set(self):
+        assert parse_identity(self.SPRAWLING).capabilities == {"report"}
+
+    def test_prose_does_not_widen_the_routing_contract(self):
+        """AgentSpec is what the router scores a task against, so this is the
+        assertion that would actually matter if the rule were broken."""
+        spec = parse_identity(self.SPRAWLING).to_spec()
+        assert spec.capabilities == {"report"}
+        for claimed in ("send", "delete", "apply", "contact", "purchase"):
+            assert claimed not in spec.capabilities
+
+    def test_the_prose_is_still_read_back_faithfully(self):
+        """Refusing to act on it is not the same as refusing to load it.
+
+        The document is reported as written; what it cannot do is take effect.
+        Silently dropping the text would hide the mismatch from whoever has to
+        notice that the document is wrong.
+        """
+        assert "send" in parse_identity(self.SPRAWLING).purpose.lower()
 
 
 class TestIdentityBecomesAnAgentSpec:
