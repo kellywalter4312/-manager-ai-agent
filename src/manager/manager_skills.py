@@ -42,6 +42,7 @@ from src.manager.capabilities import (
 from src.manager.recognition import Recognition, recognise
 from src.services.identity.identity import AgentIdentity
 from src.services.profile.profile import UserProfile
+from src.services.schedule.schedule import UserSchedule
 from src.utils.logging import get_logger, task_logger
 
 logger = get_logger(__name__)
@@ -56,6 +57,7 @@ class ManagerSkills(BaseAgent):
         roster: Callable[[], Sequence[BaseAgent]] | None = None,
         capabilities: dict[str, ManagerCapability] | None = None,
         user: UserProfile | None = None,
+        schedule: UserSchedule | None = None,
     ) -> None:
         """``roster`` supplies the currently registered agents.
 
@@ -87,6 +89,15 @@ class ManagerSkills(BaseAgent):
             MANAGER_CAPABILITIES if capabilities is None else dict(capabilities)
         )
         self._user = user
+        # When the user is around. A second document about the same person,
+        # kept apart from the profile because one changes when someone learns
+        # something and the other when someone takes a holiday. Per run, like
+        # the profile beside it - a week is not a fact about the agent.
+        #
+        # Defaults to an unconfigured schedule rather than None, so a handler
+        # can always ask and always get an honest "nothing is known" instead of
+        # having to guard.
+        self._schedule = schedule if schedule is not None else UserSchedule()
 
     @property
     def spec(self) -> AgentSpec:
@@ -135,6 +146,16 @@ class ManagerSkills(BaseAgent):
         return recognise(task, self._user)
 
     @property
+    def schedule(self) -> UserSchedule:
+        """The user's week, or an unconfigured schedule if none was supplied.
+
+        Deliberately not merged into ``user``: what someone can do and when
+        they are around are different facts, arrive from different documents,
+        and change for different reasons.
+        """
+        return self._schedule
+
+    @property
     def user(self) -> UserProfile | None:
         """The profile this Manager was built with, or None if there is none.
 
@@ -181,5 +202,6 @@ class ManagerSkills(BaseAgent):
                 # Computed once per execution, before any handler runs, so two
                 # handlers cannot disagree about what this task named.
                 recognition=self.recognise(task),
+                schedule=self._schedule,
             )
         )

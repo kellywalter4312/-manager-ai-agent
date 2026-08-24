@@ -57,6 +57,7 @@ from src.core.contracts import Task, TaskResult, tokenize
 from src.manager.recognition import Recognition
 from src.services.identity.identity import AgentIdentity
 from src.services.profile.profile import UserProfile
+from src.services.schedule.schedule import UserSchedule
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -96,6 +97,16 @@ class CapabilityRequest:
     # Defaulted so a handler constructed by hand in a test still works, and so
     # a request built without a profile carries an honest "nothing is known".
     recognition: Recognition = field(default_factory=Recognition)
+    # When the user is around, as they wrote it down. Context in exactly the
+    # sense `user` above is context: it describes a person, and there is no
+    # field on a UserSchedule in which a capability, tool, permission, scope or
+    # brain mode could be expressed.
+    #
+    # Note what it is not. It is not the Calendar, which decides which day a
+    # memory fell on; it resolves no instants and starts nothing. A handler
+    # that wants to know whether now is a quiet hour cannot ask this, and that
+    # is deliberate - answering it needs a clock, and clocks belong to day.py.
+    schedule: UserSchedule = field(default_factory=UserSchedule)
 
     @property
     def knows_the_user(self) -> bool:
@@ -201,6 +212,10 @@ def report_roster(request: CapabilityRequest) -> TaskResult:
         # named skills exist on request.recognition for a handler that needs
         # them; they do not belong in a payload that reaches a console.
         "recognised": request.recognition.describe(),
+        # Counts only, the same rule as "serving" and "recognised" above. A
+        # schedule says where somebody is on a Tuesday, and that is theirs
+        # rather than the system's to print.
+        "scheduled": request.schedule.describe(),
     }
     return TaskResult.success(
         request.task, request.own_name, "\n".join(lines), payload=payload

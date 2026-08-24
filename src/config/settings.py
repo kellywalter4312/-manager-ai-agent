@@ -95,6 +95,11 @@ class Settings:
     model: str = "claude-opus-5"
     mailbox: str = "memory"
     profile_path: str = "USER.md"
+    # Where the user's schedule document lives. Separate from profile_path
+    # because they describe different things about the same person: one what
+    # they can do, the other when they are around. A missing file is not an
+    # error - most people will never write one.
+    schedule_path: str = "SCHEDULE.md"
     identity_path: str = "IDENTITY.md"
     soul_path: str = "SOUL.md"
     # Where each specialist's own identity document lives, one file per

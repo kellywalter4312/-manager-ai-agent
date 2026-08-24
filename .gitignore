@@ -20,6 +20,9 @@ data/*
 # Personal profile - USER.example.md is the committed structural example
 USER.md
 
+# Personal schedule - SCHEDULE.example.md is the committed structural example
+SCHEDULE.md
+
 # OAuth secrets - belt and braces, wherever they end up
 # Explicit paths first, so intent is unmistakable even if the broader
 # patterns below are ever edited.

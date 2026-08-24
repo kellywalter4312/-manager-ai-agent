@@ -68,6 +68,7 @@ from src.services.identity.identity import AgentIdentity, load_identity
 from src.services.memory.day import Calendar
 from src.services.memory.factory import EMAIL_AGENT, build_memory
 from src.services.profile.profile import UserProfile
+from src.services.schedule.schedule import UserSchedule
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -215,6 +216,7 @@ def build_manager(
     *,
     mailbox: Mailbox,
     profile: UserProfile | None,
+    schedule: UserSchedule | None = None,
     fetch_limit: int | None = None,
     extra_agents: Sequence[BaseAgent] = (),
 ) -> ManagerAgent:
@@ -246,7 +248,14 @@ def build_manager(
         # mission simply never saw it. It arrives per call, like the memory
         # beside it, so an edit to USER.md takes effect on the next tick.
         own_skills=ManagerSkills(
-            runtime.identity, roster=registry.all_agents, user=profile
+            runtime.identity,
+            roster=registry.all_agents,
+            user=profile,
+            # A second per-run document about the same person. Passed here and
+            # never held in Runtime: a schedule read once at startup would
+            # leave every later heartbeat tick reasoning about a week the user
+            # has since changed, which is the same trap the profile avoids.
+            schedule=schedule,
         ),
         # The Manager's store is selected by the Manager's own declared name,
         # for the same reason the specialist's is selected by his. An agent
