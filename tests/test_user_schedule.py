@@ -415,8 +415,12 @@ yes
             own_capabilities=(),
             schedule=parse_schedule(self.HOSTILE),
         )
-        for forbidden in ("manager", "registry", "router", "assessor", "memory", "brain", "tools"):
+        for forbidden in ("manager", "registry", "router", "assessor", "memory", "brain"):
             assert not hasattr(request, forbidden), forbidden
+        # `tools` is the capability axis and is meant to exist - what matters
+        # is that context put nothing in it. An empty ToolSet is the stronger
+        # claim: not "there is no way to hold a tool" but "this granted none".
+        assert len(request.tools) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -533,13 +537,15 @@ class TestSurroundingArchitectureIsUntouched:
         assert "memory recall" in profile.capabilities
 
     def test_alfreds_full_brain_semantics_are_unchanged(self):
+        from src.core.contracts import Task as _Task
         from src.manager.cognition import CognitiveMode, assess_cognition
         from src.manager.llm_brain import LLMManagerBrain
         from tests.test_llm_manager_brain import ScriptedProvider
 
-        assert assess_cognition(
-            LLMManagerBrain(ScriptedProvider("{}"))
-        ).mode is CognitiveMode.FULL_BRAIN
+        # Verified first: Full Brain now means the model actually answered.
+        brain = LLMManagerBrain(ScriptedProvider("{}"))
+        brain.deliberate(_Task(description="warm up"))
+        assert assess_cognition(brain).mode is CognitiveMode.FULL_BRAIN
 
     def test_arthurs_half_brain_semantics_are_unchanged(self):
         from src.agents.brain import NullSpecialistBrain

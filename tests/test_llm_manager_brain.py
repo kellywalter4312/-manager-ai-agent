@@ -497,10 +497,21 @@ class TestExistingBehaviourIsUntouched:
         assert provider.prompts[0] == provider.prompts[1]
 
     def test_the_brain_holds_no_state_between_calls(self):
+        """No conversation, no history, no accumulated context.
+
+        ``_availability`` is excluded deliberately. It records whether the last
+        call to the model succeeded, which is an observation about the
+        *provider* rather than state about the conversation: nothing in
+        deliberate() reads it, so it cannot change an answer. Recording it is
+        what stops Full Brain being claimed for a model nobody has managed to
+        reach.
+        """
+        ignored = {"_availability"}
         brain = brain_returning(answer())
-        before = dict(vars(brain))
+        before = {k: v for k, v in vars(brain).items() if k not in ignored}
         brain.deliberate(a_task(), ROSTER)
-        assert vars(brain) == before
+        after = {k: v for k, v in vars(brain).items() if k not in ignored}
+        assert after == before
 
 
 # ----------------------------------------------------------------------
@@ -702,7 +713,15 @@ class TestTheProviderIsTrulyInjected:
         return open(module.__file__, encoding="utf-8").read().lower()
 
     def test_it_depends_on_the_abstraction_only(self):
-        """One provider import, and it is the interface."""
+        """The interface and value types - never a concrete provider.
+
+        The rule being protected is that the brain cannot reach a vendor: it
+        holds an ``LLMProvider`` and knows nothing about who implements it.
+        ``availability`` is a frozen record describing what the last call did,
+        with no client, no credential and no vendor in it, so importing it
+        does not weaken that - importing anthropic_provider or null_provider
+        would, and this fails if either ever appears.
+        """
         import src.manager.llm_brain as module
 
         source = open(module.__file__, encoding="utf-8").read()
@@ -711,7 +730,10 @@ class TestTheProviderIsTrulyInjected:
             for line in source.splitlines()
             if line.startswith(("import ", "from ")) and "providers" in line
         ]
-        assert provider_imports == ["from src.providers.base import LLMProvider"]
+        assert "from src.providers.base import LLMProvider" in provider_imports
+        for line in provider_imports:
+            assert "_provider" not in line, line
+            assert "anthropic" not in line.lower(), line
 
     def test_the_factory_supplies_the_provider(self):
         """The composition root injects; the brain never reaches for one."""

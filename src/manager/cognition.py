@@ -26,6 +26,15 @@ question - "was a brain injected?" - and gets this one wrong:
 A brain with no model behind it is a reasoning shell. Capability has to be read
 through the brain to its provider, which is what happens below.
 
+**Configured is not available.** A provider name, an API key and a
+constructed brain prove that somebody intended model reasoning; none of them
+proves any is obtainable. Anthropic publishes no quota endpoint, so a balance
+with nothing left in it looks exactly like a healthy one right up until a call
+is made. Full Brain is therefore reported only after a real reasoning call has
+succeeded - the call the system was going to make anyway, never an extra one
+made to ask. Until then the honest answer is Half Brain, which is not a
+degraded state: every deterministic capability below is still present.
+
 Two sources of model cognition are considered, because either can supply it:
 
     the brain      MANAGER_BRAIN=llm   - deliberation
@@ -44,6 +53,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
+
+from src.providers.availability import Availability, availability_of
 
 # The provider name meaning "no model". Compared as a string for the same
 # reason coherence.py does it: asking the provider registry would couple this
@@ -102,10 +113,26 @@ class CognitiveProfile:
     brain_provider: str | None = None
     router_provider: str | None = None
     degraded: Any | None = None
+    # What was last observed about the model itself, as opposed to what was
+    # configured. Carried so a caller can tell an unproven claim from a
+    # verified one without re-deriving it - see the `verified` property.
+    availability: Availability = Availability()
 
     @property
     def is_full_brain(self) -> bool:
         return self.mode is CognitiveMode.FULL_BRAIN
+
+    @property
+    def verified(self) -> bool:
+        """Whether a call to the model has actually succeeded.
+
+        Supporting state, not the mode itself: FULL_BRAIN already implies this,
+        because an unverified provider is reported as Half Brain. It is exposed
+        so a caller can distinguish *why* a Half Brain is a Half Brain - no
+        model configured, one configured but unproven, or one proven broken -
+        without re-deriving it from the reason string.
+        """
+        return self.availability.is_usable
 
     @property
     def is_degraded(self) -> bool:
@@ -131,7 +158,15 @@ class CognitiveProfile:
 
     def describe(self) -> str:
         """One line for a log or a startup banner. Never carries a credential:
-        it reports provider *names*, which are configuration, not secrets."""
+        it reports provider *names*, which are configuration, not secrets.
+
+        Full Brain is only ever reported once a call has actually succeeded,
+        so the label itself is the claim - there is no unverified Full Brain to
+        annotate. An API key and a constructed object are evidence that someone
+        intended model reasoning, not that any is available, and a banner that
+        could not tell those apart is how an exhausted credit balance goes
+        unnoticed for a week.
+        """
         parts = [self.mode.label, f"({self.reason})"]
         if self.is_degraded:
             parts.append("[degraded]")
@@ -160,6 +195,41 @@ def _has_model(provider: str | None) -> bool:
     return provider is not None and provider != NO_MODEL
 
 
+def _chain(component: Any, depth: int = 0) -> list[Availability]:
+    """Every availability record reachable through nested composite routers.
+
+    Follows ``primary`` the same way _provider_name does, and with the same
+    bound: FallbackRouter holds a primary that may itself be composite, and a
+    reading that stopped at the first level would miss the model in a
+    router-wrapped-in-a-router wiring - reporting Half Brain for a model that
+    had just answered.
+    """
+    if component is None or depth > _MAX_ROUTER_DEPTH:
+        return []
+    return [availability_of(component)] + _chain(
+        getattr(component, "primary", None), depth + 1
+    )
+
+
+def _availability(brain: Any, router: Any) -> Availability:
+    """The strongest evidence any component can offer about the model.
+
+    A known failure outranks everything: if anything has actually been told the
+    model is unusable, that is the fact, and a second component that has simply
+    never tried does not soften it. A verified success outranks silence for the
+    same reason in the other direction.
+    """
+    found = _chain(brain) + _chain(router)
+
+    for candidate in found:
+        if candidate.is_known_broken:
+            return candidate
+    for candidate in found:
+        if candidate.is_usable:
+            return candidate
+    return Availability()
+
+
 def assess_cognition(brain: Any, router: Any = None) -> CognitiveProfile:
     """Classify the cognitive capability of an assembled Manager.
 
@@ -180,6 +250,12 @@ def assess_cognition(brain: Any, router: Any = None) -> CognitiveProfile:
 
     configured = [p for p in (brain_provider, router_provider) if _has_model(p)]
 
+    # What the model itself last did, from whichever component has been used.
+    # The router's degradation record only ever caught the router's failures;
+    # a brain whose provider ran out of credit reported nothing at all, and the
+    # system went on calling itself Full Brain.
+    availability = _availability(brain, router)
+
     if degraded is not None and configured:
         detail = getattr(degraded, "error_type", None) or "provider failure"
         return CognitiveProfile(
@@ -189,15 +265,59 @@ def assess_cognition(brain: Any, router: Any = None) -> CognitiveProfile:
             brain_provider=brain_provider,
             router_provider=router_provider,
             degraded=degraded,
+            availability=availability,
         )
 
-    if configured:
+    # A model that has been tried and failed is unavailable, whatever the
+    # configuration says. Checked before anything else for the same reason the
+    # degradation check is: a configured-but-unusable model must never be
+    # reported as full reasoning.
+    if availability.is_known_broken and configured:
         return CognitiveProfile(
-            mode=CognitiveMode.FULL_BRAIN,
-            reason=f"model available via {', '.join(sorted(set(configured)))}",
+            mode=CognitiveMode.HALF_BRAIN,
+            reason=f"the model is configured but unusable: {availability.describe()}",
             brain_name=brain_name,
             brain_provider=brain_provider,
             router_provider=router_provider,
+            degraded=degraded,
+            availability=availability,
+        )
+
+    if configured and availability.is_usable:
+        via = ", ".join(sorted(set(configured)))
+        return CognitiveProfile(
+            mode=CognitiveMode.FULL_BRAIN,
+            reason=f"model reasoning verified usable via {via}",
+            brain_name=brain_name,
+            brain_provider=brain_provider,
+            router_provider=router_provider,
+            availability=availability,
+        )
+
+    if configured:
+        # Configured, and never yet proven. **This is Half Brain**, and that is
+        # the whole correction: a key that exists, a model name that parses and
+        # an LLMManagerBrain that was constructed are evidence that somebody
+        # intended model reasoning, not that any is available. Anthropic
+        # publishes no quota endpoint, so an exhausted balance is
+        # indistinguishable from a healthy one until a call is made - and a
+        # mode that cannot tell those apart is a label, not a fact.
+        #
+        # Nothing here makes a request to find out. The evidence is the real
+        # reasoning call the system was going to make anyway; until it happens
+        # the honest answer is that full reasoning is unproven, and the
+        # deterministic capabilities below are what the Manager actually has.
+        via = ", ".join(sorted(set(configured)))
+        return CognitiveProfile(
+            mode=CognitiveMode.HALF_BRAIN,
+            reason=(
+                f"model configured via {via} but not yet verified usable; "
+                "reasoning deterministically until a call succeeds"
+            ),
+            brain_name=brain_name,
+            brain_provider=brain_provider,
+            router_provider=router_provider,
+            availability=availability,
         )
 
     # No model anywhere. Two shapes of this, reported differently because they

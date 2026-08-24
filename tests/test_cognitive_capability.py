@@ -79,52 +79,131 @@ def llm_router_over(provider) -> FallbackRouter:
     return FallbackRouter(primary=LLMRouter(provider), fallback=CapabilityRouter())
 
 
+def verified_brain(text="{}"):
+    """A brain whose model has actually been used, successfully.
+
+    Full Brain is evidence, not configuration. An API key that exists, a model
+    name that parses and a constructed LLMManagerBrain prove that somebody
+    intended model reasoning - never that any is obtainable. Anthropic
+    publishes no quota endpoint, so a balance with nothing left in it looks
+    exactly like a healthy one until a call is made, which is why a test
+    claiming Full Brain has to make one.
+
+    Nothing extra is requested: this is the ordinary reasoning call, wrapped so
+    that it is observed, used as its own evidence.
+    """
+    brain = LLMManagerBrain((ScriptedProvider(text)))
+    brain.deliberate(Task(description="warm up"))
+    return brain
+
+
+def verified_router(answer="alpha_agent"):
+    """A model-driven router whose provider has actually answered.
+
+    Cognition can arrive through routing as well as deliberation, so routing
+    has to be able to supply the evidence too - otherwise a deployment whose
+    only model use is model-driven routing could never honestly reach Full
+    Brain.
+    """
+    router = llm_router_over((ScriptedProvider(answer)))
+    router.route(Task(description="anything"), agents())
+    return router
+
+
 # ----------------------------------------------------------------------
-# (a) LLM available -> Full Brain
+# (a) LLM verified usable -> Full Brain
 # ----------------------------------------------------------------------
 
 
 class TestFullBrain:
-    def test_a_brain_with_a_model_is_full_brain(self):
-        profile = assess_cognition(LLMManagerBrain(ScriptedProvider("{}")))
+    """Full Brain means the model was used and answered - nothing weaker.
+
+    Every test here verifies its model first, because that is what the claim
+    now means. Configured-but-unproven is Half Brain, pinned below.
+    """
+
+    def test_a_brain_whose_model_answered_is_full_brain(self):
+        profile = assess_cognition(verified_brain())
         assert profile.mode is CognitiveMode.FULL_BRAIN
         assert profile.is_full_brain
+        assert profile.verified
 
     def test_a_model_driven_router_alone_is_full_brain(self):
         """Cognition can arrive through routing as well as deliberation."""
-        profile = assess_cognition(NullBrain(), llm_router_over(ScriptedProvider("alpha_agent")))
+        profile = assess_cognition(NullBrain(), verified_router())
         assert profile.mode is CognitiveMode.FULL_BRAIN
 
     def test_both_sources_together_are_full_brain(self):
-        profile = assess_cognition(
-            LLMManagerBrain(ScriptedProvider("{}")),
-            llm_router_over(ScriptedProvider("alpha_agent")),
-        )
+        profile = assess_cognition(verified_brain(), verified_router())
         assert profile.mode is CognitiveMode.FULL_BRAIN
 
     def test_it_names_the_provider_supplying_cognition(self):
-        profile = assess_cognition(LLMManagerBrain(ScriptedProvider("{}")))
-        assert "scripted" in profile.reason
+        assert "scripted" in assess_cognition(verified_brain()).reason
 
     def test_full_brain_has_the_model_capabilities(self):
-        profile = assess_cognition(LLMManagerBrain(ScriptedProvider("{}")))
+        profile = assess_cognition(verified_brain())
         for capability in MODEL_CAPABILITIES:
             assert capability in profile.capabilities
 
     def test_full_brain_keeps_every_core_capability(self):
         """The model adds; it never replaces."""
-        profile = assess_cognition(LLMManagerBrain(ScriptedProvider("{}")))
+        profile = assess_cognition(verified_brain())
         for capability in CORE_CAPABILITIES:
             assert capability in profile.capabilities
 
     def test_full_brain_is_missing_nothing(self):
-        assert assess_cognition(LLMManagerBrain(ScriptedProvider("{}"))).missing == ()
+        assert assess_cognition(verified_brain()).missing == ()
 
     def test_it_is_not_marked_degraded(self):
-        assert not assess_cognition(LLMManagerBrain(ScriptedProvider("{}"))).is_degraded
+        assert not assess_cognition(verified_brain()).is_degraded
 
     def test_the_description_says_full_brain(self):
-        assert "FULL BRAIN" in assess_cognition(LLMManagerBrain(ScriptedProvider("{}"))).describe()
+        assert "FULL BRAIN" in assess_cognition(verified_brain()).describe()
+
+
+class TestConfiguredIsNotAvailable:
+    """A key is not a capability, and a constructed object is not a model.
+
+    This is the correction Step 9 makes. Before it, an API key with an
+    exhausted credit balance reported full model reasoning, confidently and
+    indefinitely, until somebody asked a question and got nothing back.
+    """
+
+    def test_a_configured_but_unused_model_is_half_brain(self):
+        profile = assess_cognition(LLMManagerBrain(ScriptedProvider("{}")))
+        assert profile.mode is CognitiveMode.HALF_BRAIN
+        assert profile.verified is False
+
+    def test_it_says_why_rather_than_pretending_no_model_exists(self):
+        """Three different Half Brains, told apart: none configured, one
+        configured but unproven, one proven broken."""
+        profile = assess_cognition(LLMManagerBrain(ScriptedProvider("{}")))
+        assert "not yet verified" in profile.reason
+        assert "scripted" in profile.reason
+
+    def test_an_unverified_model_still_keeps_every_core_capability(self):
+        """Unproven reasoning removes depth, never function."""
+        profile = assess_cognition(LLMManagerBrain(ScriptedProvider("{}")))
+        for capability in CORE_CAPABILITIES:
+            assert capability in profile.capabilities
+
+    def test_assessing_makes_no_call_of_its_own(self):
+        """The observer stays read-only. Evidence comes from the reasoning call
+        the system was going to make anyway, never from a probe."""
+        calls = []
+
+        class Counting(ScriptedProvider):
+            def complete(self, prompt, *, system=None):
+                calls.append(1)
+                return super().complete(prompt, system=system)
+
+        assess_cognition(LLMManagerBrain(Counting("{}")))
+        assert calls == []
+
+    def test_verification_survives_being_asked_twice(self):
+        brain = verified_brain()
+        assert assess_cognition(brain).mode is CognitiveMode.FULL_BRAIN
+        assert assess_cognition(brain).mode is CognitiveMode.FULL_BRAIN
 
 
 # ----------------------------------------------------------------------
@@ -333,7 +412,10 @@ class TestNothingIsCalled:
             def deliberate(self, *args, **kwargs):
                 raise AssertionError("deliberation was triggered by an assessment")
 
-        assert assess_cognition(ExplodingBrain()).mode is CognitiveMode.FULL_BRAIN
+        # Half Brain, because nothing has used this model. The point of the
+        # test is that assessing did not deliberate to find out - which is
+        # exactly what an unverified reading proves.
+        assert assess_cognition(ExplodingBrain()).mode is CognitiveMode.HALF_BRAIN
 
     def test_assessing_never_routes(self):
         class ExplodingRouter(CapabilityRouter):
@@ -349,7 +431,10 @@ class TestNothingIsCalled:
         monkeypatch.setattr(socket, "socket", explode)
         monkeypatch.setattr(socket, "create_connection", explode)
 
-        assert assess_cognition(LLMManagerBrain(ScriptedProvider("{}"))).is_full_brain
+        # The brain is verified *before* sockets are blocked, so the
+        # assessment itself is the only thing that could reach the network -
+        # and it does not.
+        assert assess_cognition(verified_brain()).is_full_brain
 
     def test_no_vendor_sdk_is_imported(self):
         import sys
@@ -388,8 +473,11 @@ class TestExistingBehaviourIntact:
         )
         manager = manager_with(brain=brain)
 
-        assert assess_manager(manager).is_full_brain
+        # Half Brain until the model has answered, Full Brain after - which is
+        # the corrected rule stated as a transition rather than a snapshot.
+        assert not assess_manager(manager).is_full_brain
         assert manager.deliberate(Task(description="anything")).is_decided
+        assert assess_manager(manager).is_full_brain
 
     def test_full_brain_routing_still_works(self):
         manager = manager_with(router=llm_router_over(ScriptedProvider("beta_agent")))
@@ -448,7 +536,7 @@ class TestRobustness:
         assert assess_cognition(Blank()).mode is CognitiveMode.HALF_BRAIN
 
     def test_nested_composite_routers_are_followed(self):
-        inner = llm_router_over(ScriptedProvider("alpha_agent"))
+        inner = verified_router()
         outer = FallbackRouter(primary=inner, fallback=CapabilityRouter())
         assert assess_cognition(NullBrain(), outer).mode is CognitiveMode.FULL_BRAIN
 

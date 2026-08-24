@@ -42,6 +42,7 @@ from src.agents.brain_prompts import (
 )
 from src.core.contracts import Task
 from src.providers.base import LLMProvider
+from src.providers.availability import Availability, AvailabilityState
 from src.utils.logging import get_logger, task_logger
 
 logger = get_logger(__name__)
@@ -67,6 +68,8 @@ class LLMSpecialistBrain(SpecialistBrain):
         specialists without any of them being named here.
         """
         self._provider = provider
+        # UNKNOWN until a call is actually made.
+        self._availability = Availability()
         self._domain = " ".join(str(domain).split())
 
     @property
@@ -76,6 +79,24 @@ class LLMSpecialistBrain(SpecialistBrain):
     @property
     def provider_name(self) -> str:
         return self._provider.name
+
+    @property
+    def provider_availability(self) -> Availability:
+        """What was observed the last time this component used the model.
+
+        Read-only, and the only honest evidence there is. Full Brain claims
+        that model reasoning is obtainable; no provider this project speaks to
+        publishes a quota endpoint, so an exhausted balance looks exactly like
+        a healthy one until a call is made. UNKNOWN until then - a real answer
+        rather than a placeholder, because constructing a provider proves
+        intent, never availability.
+
+        Recorded here rather than in a wrapper because this is the component
+        that actually makes the call, and it already wraps that call in a
+        boundary catch. Observing costs nothing extra and works for every
+        provider, including a test double nobody thought to wrap.
+        """
+        return self._availability
 
     @property
     def domain(self) -> str:
@@ -94,6 +115,16 @@ class LLMSpecialistBrain(SpecialistBrain):
         try:
             completion = self._provider.complete(prompt, system=SPECIALIST_SYSTEM_PROMPT)
         except Exception as exc:  # noqa: BLE001 - deliberate boundary catch
+            # Recorded before the existing handling, which is unchanged.
+            # A failure here is the evidence that the model is not usable -
+            # an exhausted balance, a bad key, an unreachable host - and it
+            # is what stops assess_cognition reporting FULL BRAIN for a
+            # model that cannot answer.
+            self._availability = Availability(
+                state=AvailabilityState.UNAVAILABLE,
+                reason=str(exc) or type(exc).__name__,
+                error_type=type(exc).__name__,
+            )
             # The same fault-isolation rule the agent applies to its brain and
             # the Manager applies to its agents: a failing dependency degrades
             # this to "no view", it does not propagate upward.
@@ -107,6 +138,13 @@ class LLMSpecialistBrain(SpecialistBrain):
                 source=self.name,
             )
 
+
+        # A response arrived, so the model is reachable and the account can
+        # buy tokens. Whether the *content* is usable is decided below; a
+        # garbled body does not mean the model is unavailable.
+        self._availability = Availability(
+            state=AvailabilityState.AVAILABLE, reason="a call succeeded"
+        )
         log.debug("model consulted (%s)", completion.describe())
 
         source = f"llm:{completion.model or completion.provider}"

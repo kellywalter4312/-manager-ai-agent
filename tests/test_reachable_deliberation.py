@@ -199,16 +199,23 @@ class TestFullBrainProducesAdvice:
 
     def test_such_a_manager_reads_as_full_brain(self):
         manager = manager_with(brain=LLMManagerBrain(ScriptedProvider(ADVICE)))
+        # Verified first: Full Brain now means the model actually answered.
+        manager.deliberate(Task(description="check my email"))
         assert assess_manager(manager).mode is CognitiveMode.FULL_BRAIN
 
     def test_full_brain_is_no_longer_an_unexercised_claim(self):
         """The gap this milestone closes: a Full Brain Manager can now be
         asked for judgement through a real caller, not only through a test."""
         manager = manager_with(brain=LLMManagerBrain(ScriptedProvider(ADVICE)))
-        profile = assess_manager(manager)
 
-        assert "deliberation" in profile.capabilities
+        # Half Brain until asked, Full Brain once the model has answered - the
+        # claim is now earned by the very call that makes it worth having.
+        assert assess_manager(manager).mode is CognitiveMode.HALF_BRAIN
         assert manager.deliberate(Task(description="check my email")).is_decided
+
+        profile = assess_manager(manager)
+        assert profile.mode is CognitiveMode.FULL_BRAIN
+        assert "deliberation" in profile.capabilities
 
 
 # ----------------------------------------------------------------------

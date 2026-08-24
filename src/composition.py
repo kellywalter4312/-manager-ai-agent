@@ -52,6 +52,7 @@ from src.agents.specialists import (
     wiring_for,
 )
 from src.agents.base_agent import BaseAgent
+from src.agents.tools.toolset import ToolSet
 from src.agents.brain import SpecialistBrain
 from src.config.settings import Settings
 from src.manager.brain import ManagerBrain
@@ -217,6 +218,7 @@ def build_manager(
     mailbox: Mailbox,
     profile: UserProfile | None,
     schedule: UserSchedule | None = None,
+    tools: ToolSet | None = None,
     fetch_limit: int | None = None,
     extra_agents: Sequence[BaseAgent] = (),
 ) -> ManagerAgent:
@@ -256,6 +258,11 @@ def build_manager(
             # leave every later heartbeat tick reasoning about a week the user
             # has since changed, which is the same trap the profile avoids.
             schedule=schedule,
+            # What Alfred is equipped to do himself. Empty until a real tool
+            # exists: the architecture makes room for one and refuses to
+            # pretend any is installed, so an ordinary request is answered
+            # with the name of the missing capability rather than a guess.
+            tools=tools,
         ),
         # The Manager's store is selected by the Manager's own declared name,
         # for the same reason the specialist's is selected by his. An agent

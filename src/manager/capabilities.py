@@ -53,6 +53,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Sequence
 
 from src.agents.base_agent import BaseAgent
+from src.agents.tools.toolset import ToolSet
 from src.core.contracts import Task, TaskResult, tokenize
 from src.manager.recognition import Recognition
 from src.services.identity.identity import AgentIdentity
@@ -107,6 +108,19 @@ class CapabilityRequest:
     # that wants to know whether now is a quiet hour cannot ask this, and that
     # is deliberate - answering it needs a clock, and clocks belong to day.py.
     schedule: UserSchedule = field(default_factory=UserSchedule)
+    # What the Manager is actually equipped to do, as opposed to how deeply he
+    # can reason about it. Two axes, kept apart on purpose:
+    #
+    #     tools  what can I do?          membership in this set
+    #     brain  how deeply can I think? FULL or HALF
+    #
+    # Neither implies the other. A Half Brain Alfred with a working tool can
+    # still do the work; a Full Brain Alfred without one still cannot, and must
+    # say so rather than reason his way to an answer he cannot fetch.
+    #
+    # Empty by default, because a Manager nobody equipped can do nothing - the
+    # same rule every specialist's ToolSet already lives under.
+    tools: ToolSet = field(default_factory=ToolSet)
 
     @property
     def knows_the_user(self) -> bool:
@@ -255,6 +269,132 @@ ROSTER_REPORT = ManagerCapability(
 )
 
 
+# ---------------------------------------------------------------------------
+# The general capability floor: ordinary work Alfred does himself
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class GeneralCapability:
+    """One ordinary kind of help, and the tool it needs to actually do it.
+
+    Named by *kind of work*, never by subject. There is no entry here for a
+    football club, a film, a company or a war, and there must never be: the
+    subject of a request is data that arrives in the task, and a capability
+    that had to be extended for each new subject would not be a general
+    capability at all. "Tell me about X" is one capability for every X.
+    """
+
+    kind: str
+    words: frozenset[str]
+    tool: str
+    describes: str
+
+
+# The ordinary work a Manager is expected to be able to attempt. Each entry
+# names the tool that would actually do it - and none of those tools exists in
+# this repository yet, which is the honest position: the architecture makes
+# room for them and refuses to pretend they are installed.
+GENERAL_CAPABILITIES: tuple[GeneralCapability, ...] = (
+    GeneralCapability(
+        kind="research",
+        words=frozenset(
+            {"research", "search", "lookup", "find", "about", "overview", "information"}
+        ),
+        tool="web_search",
+        describes="looking something up",
+    ),
+    GeneralCapability(
+        kind="coding",
+        words=frozenset({"code", "coding", "script", "function", "debug"}),
+        tool="code_assistant",
+        describes="writing or explaining code",
+    ),
+)
+
+
+def _general_kind_for(tokens: frozenset[str]) -> GeneralCapability | None:
+    """Which ordinary kind of help this task is asking for, if any."""
+    best, best_score = None, 0
+    for capability in GENERAL_CAPABILITIES:
+        score = len(capability.words & tokens)
+        if score > best_score:
+            best, best_score = capability, score
+    return best
+
+
+def general_assistance(request: CapabilityRequest) -> TaskResult:
+    """Attempt ordinary work, or say precisely why it cannot be attempted.
+
+    This exists because of a defect measured during the Step 9 audit: every
+    ordinary request - look something up, explain something, write a small
+    function - returned ``no_agent_found``. That answer conflated two entirely
+    different facts, "nobody is registered for this" and "the system cannot do
+    this", and it made the Manager a router that refuses anything no specialist
+    claims. A Manager who cannot attempt ordinary work is not a Manager.
+
+    So the outcomes here are deliberately four, not two:
+
+        the tool is present and works   -> Alfred does the work himself
+        the tool is present and fails   -> the failure is reported as its own
+        the tool is absent              -> the missing *capability* is named
+        the request is not ordinary     -> the default handler answers
+
+    What it never does is fabricate. With no search tool installed there is no
+    result to give, and inventing one - or answering from whatever the model
+    happens to remember - would be worse than saying nothing. It reports what
+    is missing, by name, so the gap is fixable rather than mysterious.
+
+    And note what is absent from the refusal: "I am only the Manager." That
+    sentence is the thing this handler exists to make impossible to say.
+    """
+    capability = _general_kind_for(tokenize(request.task.description))
+    if capability is None:
+        return report_roster(request)
+
+    if not request.tools.permits(capability.tool):
+        equipped = ", ".join(request.tools.names()) or "none"
+        return TaskResult.failure(
+            request.task,
+            request.own_name,
+            (
+                f"I can take on {capability.describes}, but the underlying "
+                f"'{capability.tool}' capability is not installed, so I cannot "
+                f"do it yet rather than guess at an answer. "
+                f"Currently equipped: {equipped}."
+            ),
+        )
+
+    outcome = request.tools.invoke(capability.tool, {"query": request.task.description})
+    if not outcome.ok:
+        return TaskResult.failure(
+            request.task,
+            request.own_name,
+            f"the '{capability.tool}' capability failed: {outcome.error}",
+        )
+
+    return TaskResult.success(
+        request.task,
+        request.own_name,
+        outcome.output,
+        payload={
+            "handled_by": "general_assistance",
+            "kind": capability.kind,
+            "tool": capability.tool,
+        },
+    )
+
+
+GENERAL_ASSISTANCE = ManagerCapability(
+    name="general_assistance",
+    capabilities=frozenset(
+        word for capability in GENERAL_CAPABILITIES for word in capability.words
+    ),
+    handle=general_assistance,
+    description="Ordinary information and coding work the Manager attempts himself.",
+)
+
+
 # Every Manager capability handler, keyed by handler name.
 #
 # **This is the extension point.** A future Manager capability is registered
@@ -263,6 +403,7 @@ ROSTER_REPORT = ManagerCapability(
 # capability is. They route to an agent; this decides what that agent does.
 MANAGER_CAPABILITIES: dict[str, ManagerCapability] = {
     ROSTER_REPORT.name: ROSTER_REPORT,
+    GENERAL_ASSISTANCE.name: GENERAL_ASSISTANCE,
 }
 
 # Used when a task reaches the Manager without matching any handler's words.

@@ -149,8 +149,10 @@ class TestExistingBehaviourIsPreserved:
 
 
 class TestHandlersAreSelectedThroughTheRegistry:
-    def test_the_shipped_registry_holds_one_handler(self):
-        assert available_capabilities() == ["roster_report"]
+    def test_the_shipped_registry_holds_its_handlers(self):
+        """Two: the roster report, and the general capability floor Step 9
+        added so ordinary work is attempted rather than refused."""
+        assert available_capabilities() == ["general_assistance", "roster_report"]
 
     def test_selection_scores_words_against_handlers(self):
         registry = {ROSTER_REPORT.name: ROSTER_REPORT, WEATHER.name: WEATHER}

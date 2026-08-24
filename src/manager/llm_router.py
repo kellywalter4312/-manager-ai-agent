@@ -37,6 +37,7 @@ from src.manager.prompts import (
 )
 from src.manager.router import Router, RoutingUnavailable
 from src.providers.base import LLMProvider
+from src.providers.availability import Availability, AvailabilityState
 from src.utils.logging import get_logger, task_logger
 
 logger = get_logger(__name__)
@@ -52,10 +53,30 @@ class LLMRouter(Router):
 
     def __init__(self, provider: LLMProvider) -> None:
         self._provider = provider
+        # UNKNOWN until a call is actually made.
+        self._availability = Availability()
 
     @property
     def provider_name(self) -> str:
         return self._provider.name
+
+    @property
+    def provider_availability(self) -> Availability:
+        """What was observed the last time this component used the model.
+
+        Read-only, and the only honest evidence there is. Full Brain claims
+        that model reasoning is obtainable; no provider this project speaks to
+        publishes a quota endpoint, so an exhausted balance looks exactly like
+        a healthy one until a call is made. UNKNOWN until then - a real answer
+        rather than a placeholder, because constructing a provider proves
+        intent, never availability.
+
+        Recorded here rather than in a wrapper because this is the component
+        that actually makes the call, and it already wraps that call in a
+        boundary catch. Observing costs nothing extra and works for every
+        provider, including a test double nobody thought to wrap.
+        """
+        return self._availability
 
     def route(self, task: Task, agents: Sequence[BaseAgent]) -> RoutingDecision | None:
         log = task_logger(logger, task.id)
@@ -71,6 +92,16 @@ class LLMRouter(Router):
         try:
             completion = self._provider.complete(prompt, system=ROUTING_SYSTEM_PROMPT)
         except Exception as exc:  # noqa: BLE001 - deliberate boundary catch
+            # Recorded before the existing handling, which is unchanged.
+            # A failure here is the evidence that the model is not usable -
+            # an exhausted balance, a bad key, an unreachable host - and it
+            # is what stops assess_cognition reporting FULL BRAIN for a
+            # model that cannot answer.
+            self._availability = Availability(
+                state=AvailabilityState.UNAVAILABLE,
+                reason=str(exc) or type(exc).__name__,
+                error_type=type(exc).__name__,
+            )
             # Previously this returned None, which made a failing provider
             # indistinguishable from a model that simply had no opinion. The
             # boundary catch stays - a vendor exception must not escape into
@@ -86,6 +117,13 @@ class LLMRouter(Router):
                 f"provider '{self.provider_name}' failed: {type(exc).__name__}: {exc}"
             ) from exc
 
+
+        # A response arrived, so the model is reachable and the account can
+        # buy tokens. Whether the *content* is usable is decided below; a
+        # garbled body does not mean the model is unavailable.
+        self._availability = Availability(
+            state=AvailabilityState.AVAILABLE, reason="a call succeeded"
+        )
         log.debug("model consulted (%s)", completion.describe())
 
         valid_names = {agent.spec.name for agent in agents}

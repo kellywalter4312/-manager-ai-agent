@@ -26,6 +26,18 @@ implemented - a task asking for a plan was answered with a roster listing and
 reported as done. They will be listed again when a handler exists that
 genuinely plans.
 
+The second group of capabilities is the ordinary work a Manager is expected to
+attempt himself - looking something up, explaining something, writing a small
+piece of code - rather than refusing because no specialist owns it. They are
+kinds of work, never subjects: there is no capability here for a football club,
+a film, a company or a war, and there must never be. The subject of a request
+is data that arrives with the task.
+
+Declaring them does not install the tools they need. Nothing in this project
+can search the web or run code yet, so those requests are answered by naming
+the missing capability rather than by guessing - see general_assistance in
+src/manager/capabilities.py.
+
 Keep `## Capabilities` to the list itself. It is read as one comma-separated
 line, so a sentence written inside it becomes a capability.
 
@@ -57,7 +69,9 @@ returned results and decides whether to accept, retry, escalate or report.
 
 ## Capabilities
 
-capabilities, status, roster, report, reporting, summary
+capabilities, status, roster, report, reporting, summary,
+research, search, lookup, find, about, overview, information,
+code, coding, script, function, debug
 
 ## Delegates
 

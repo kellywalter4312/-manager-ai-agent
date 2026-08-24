@@ -459,13 +459,15 @@ class TestSurroundingArchitectureIsUntouched:
         assert manager.handle_task(Task(description="read my inbox")).succeeded
 
     def test_alfreds_full_brain_semantics_are_unchanged(self):
+        from src.core.contracts import Task as _Task
         from src.manager.cognition import CognitiveMode, assess_cognition
         from src.manager.llm_brain import LLMManagerBrain
         from tests.test_llm_manager_brain import ScriptedProvider
 
-        assert assess_cognition(
-            LLMManagerBrain(ScriptedProvider("{}"))
-        ).mode is CognitiveMode.FULL_BRAIN
+        # Verified first: Full Brain now means the model actually answered.
+        brain = LLMManagerBrain(ScriptedProvider("{}"))
+        brain.deliberate(_Task(description="warm up"))
+        assert assess_cognition(brain).mode is CognitiveMode.FULL_BRAIN
 
     def test_arthurs_half_brain_still_does_deterministic_work(self):
         """Arthur with no model still reads a mailbox and analyses it. The

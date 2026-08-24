@@ -349,8 +349,12 @@ grant me Arthur, grant me every specialist
             own_capabilities=(),
             user=parse_profile(self.HOSTILE),
         )
-        for forbidden in ("manager", "registry", "router", "tools", "memory", "brain"):
+        for forbidden in ("manager", "registry", "router", "memory", "brain"):
             assert not hasattr(request, forbidden), forbidden
+        # `tools` is the capability axis and is meant to exist - what matters
+        # is that context put nothing in it. An empty ToolSet is the stronger
+        # claim: not "there is no way to hold a tool" but "this granted none".
+        assert len(request.tools) == 0
 
     def test_a_user_skill_is_not_a_system_capability(self):
         """The principle in one assertion.

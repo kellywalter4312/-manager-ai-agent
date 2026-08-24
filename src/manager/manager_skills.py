@@ -31,6 +31,7 @@ from __future__ import annotations
 from typing import Callable, Sequence
 
 from src.agents.base_agent import BaseAgent
+from src.agents.tools.toolset import ToolSet
 from src.core.contracts import AgentSpec, Task, TaskResult
 from src.manager.capabilities import (
     MANAGER_CAPABILITIES,
@@ -58,6 +59,7 @@ class ManagerSkills(BaseAgent):
         capabilities: dict[str, ManagerCapability] | None = None,
         user: UserProfile | None = None,
         schedule: UserSchedule | None = None,
+        tools: ToolSet | None = None,
     ) -> None:
         """``roster`` supplies the currently registered agents.
 
@@ -98,6 +100,14 @@ class ManagerSkills(BaseAgent):
         # can always ask and always get an honest "nothing is known" instead of
         # having to guard.
         self._schedule = schedule if schedule is not None else UserSchedule()
+        # What the Manager is equipped to do. A separate axis from the brain
+        # beside it: capability answers "what can I do", the brain answers
+        # "how deeply can I reason about it", and neither implies the other.
+        #
+        # Empty by default, so a Manager nobody equipped can do nothing - the
+        # same rule every specialist's ToolSet already lives under, and the
+        # reason a missing tool is reported rather than improvised around.
+        self._tools = tools if tools is not None else ToolSet()
 
     @property
     def spec(self) -> AgentSpec:
@@ -144,6 +154,15 @@ class ManagerSkills(BaseAgent):
         simply now has something true to reason from.
         """
         return recognise(task, self._user)
+
+    @property
+    def tools(self) -> ToolSet:
+        """What this Manager may actually invoke.
+
+        Immutable and un-growable by construction: a ToolSet has no add(), so
+        nothing the Manager does can widen what it may do next.
+        """
+        return self._tools
 
     @property
     def schedule(self) -> UserSchedule:
@@ -203,5 +222,6 @@ class ManagerSkills(BaseAgent):
                 # handlers cannot disagree about what this task named.
                 recognition=self.recognise(task),
                 schedule=self._schedule,
+                tools=self._tools,
             )
         )

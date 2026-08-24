@@ -391,9 +391,13 @@ no
             user=parse_profile(self.HOSTILE),
         )
         for forbidden in (
-            "manager", "registry", "router", "assessor", "memory", "brain", "tools",
+            "manager", "registry", "router", "assessor", "memory", "brain",
         ):
             assert not hasattr(request, forbidden), forbidden
+        # `tools` is the capability axis and is meant to exist - what matters
+        # is that context put nothing in it. An empty ToolSet is the stronger
+        # claim: not "there is no way to hold a tool" but "this granted none".
+        assert len(request.tools) == 0
 
     def test_hostile_content_cannot_change_brain_mode(self):
         from src.manager.cognition import CognitiveMode, assess_manager
@@ -578,13 +582,15 @@ class TestBrainInvariants:
     def test_full_brain_is_still_reported_as_full_brain(self):
         """Recognition supplies evidence to a model-backed brain; it does not
         change how that brain is classified."""
+        from src.core.contracts import Task as _Task
         from src.manager.cognition import CognitiveMode, assess_cognition
         from src.manager.llm_brain import LLMManagerBrain
         from tests.test_llm_manager_brain import ScriptedProvider
 
-        assert assess_cognition(
-            LLMManagerBrain(ScriptedProvider("{}"))
-        ).mode is CognitiveMode.FULL_BRAIN
+        # Verified first: Full Brain now means the model actually answered.
+        brain = LLMManagerBrain(ScriptedProvider("{}"))
+        brain.deliberate(_Task(description="warm up"))
+        assert assess_cognition(brain).mode is CognitiveMode.FULL_BRAIN
 
     def test_recognition_produces_the_same_result_in_either_mode(self):
         """It is deterministic, so the mode cannot influence it. That is what

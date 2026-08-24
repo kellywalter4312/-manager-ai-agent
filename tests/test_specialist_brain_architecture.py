@@ -159,6 +159,8 @@ class TestAnExplicitBrainIsAccepted:
 class TestCapabilityReflectsARealModel:
     def test_a_model_backed_brain_is_full_brain(self):
         brain = build_specialist_brain(settings(specialist_brain="llm"), ScriptedProvider(INSIGHT))
+        # Verified first: Full Brain now means the model actually answered.
+        brain.consider(Task(description="warm up"))
         assert assess_cognition(brain).mode is CognitiveMode.FULL_BRAIN
 
     def test_an_llm_brain_over_the_null_provider_is_half_brain(self):
@@ -179,8 +181,14 @@ class TestCapabilityReflectsARealModel:
     def test_the_same_assessment_serves_both_layers(self):
         """No parallel mechanism: the Manager's cognition layer classifies a
         specialist brain unchanged, because it reads provider_name."""
-        manager_full = assess_cognition(LLMManagerBrain(ScriptedProvider(INSIGHT)))
-        specialist_full = assess_cognition(LLMSpecialistBrain(ScriptedProvider(INSIGHT)))
+        manager_brain = LLMManagerBrain(ScriptedProvider(INSIGHT))
+        specialist_brain = LLMSpecialistBrain(ScriptedProvider(INSIGHT))
+        # Verified first: Full Brain now means the model actually answered.
+        manager_brain.deliberate(Task(description="warm up"))
+        specialist_brain.consider(Task(description="warm up"))
+
+        manager_full = assess_cognition(manager_brain)
+        specialist_full = assess_cognition(specialist_brain)
         assert manager_full.mode is specialist_full.mode is CognitiveMode.FULL_BRAIN
 
     def test_full_brain_keeps_the_deterministic_capabilities(self):
