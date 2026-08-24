@@ -37,6 +37,7 @@ from src.heartbeat.state import (
 from src.manager.manager import ManagerAgent, MissionOutcome
 from src.services.identity.soul import BehaviourPolicy
 from src.services.profile.profile import ProfileError, UserProfile
+from src.services.schedule.schedule import UserSchedule
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -123,9 +124,10 @@ class HeartbeatRunner:
 
     def __init__(
         self,
-        build_manager: Callable[[UserProfile], ManagerAgent],
+        build_manager: Callable[..., ManagerAgent],
         profile_loader: Callable[[], UserProfile],
         state_store: StateStore,
+        schedule_loader: Callable[[], UserSchedule] | None = None,
         policy: BehaviourPolicy | None = None,
         enabled: bool = False,
         fetch_limit: int = 25,
@@ -140,9 +142,22 @@ class HeartbeatRunner:
         restart - and the profile is baked into the analyzer at construction
         time. Rebuilding through an injected factory keeps that promise honest
         while leaving this class ignorant of how agents are assembled.
+
+        ``schedule_loader`` is the same arrangement for SCHEDULE.md, and it is
+        optional for a reason: a schedule is optional, so a runner built
+        without one behaves exactly as every runner did before schedules
+        existed. When supplied it is called once per wake, beside the profile,
+        so an edit to either document takes effect on the next tick.
+
+        The schedule is context handed onward and never read here. Nothing in
+        this class inspects its contents, and nothing in it can decide whether
+        a tick happens: the enabled flag and the lock do that, exactly as
+        before. A document describing a person's week must never become the
+        thing that starts or stops a run.
         """
         self._build_manager = build_manager
         self._profile_loader = profile_loader
+        self._schedule_loader = schedule_loader
         self._state_store = state_store
         self._policy = policy or BehaviourPolicy()
         self._enabled = enabled
@@ -189,6 +204,36 @@ class HeartbeatRunner:
             # survives, and the stale timeout is what recovers from that.
             self._lock.release()
 
+    def _build_manager_for(self, profile: UserProfile) -> ManagerAgent:
+        """Assemble this tick's Manager, with a schedule when one is configured.
+
+        The call shape follows the wiring rather than the other way round. A
+        runner built without a schedule_loader calls the factory exactly as
+        every runner has since the heartbeat existed, so a one-argument factory
+        - which is what most test doubles are - keeps working untouched. Only a
+        runner that was given a schedule passes one.
+
+        A schedule that cannot be read is not a reason to skip a wake. The
+        heartbeat's job is to check the inbox, and not knowing what someone's
+        Tuesday looks like does not prevent that - so a failure degrades to "no
+        schedule configured" and is logged rather than raised. Contrast the
+        profile, which stops the tick before any mailbox access: without one
+        there is nothing to match against, so the access would have no possible
+        benefit.
+        """
+        if self._schedule_loader is None:
+            return self._build_manager(profile)
+
+        try:
+            schedule = self._schedule_loader()
+        except Exception as exc:  # noqa: BLE001 - deliberate boundary catch
+            logger.warning(
+                "could not read the schedule, continuing without it: %s", exc
+            )
+            schedule = UserSchedule()
+
+        return self._build_manager(profile, schedule)
+
     def _locked_tick(self) -> TickResult:
         """One cycle, with the lock already held."""
         now = self._clock()
@@ -203,7 +248,7 @@ class HeartbeatRunner:
             return TickResult(status=TickStatus.PROFILE_ERROR, error=str(exc))
 
         state = self._state_store.load()
-        manager = self._build_manager(profile)
+        manager = self._build_manager_for(profile)
 
         mission = Task(
             description=MISSION,

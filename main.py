@@ -6,9 +6,12 @@ Note that this file, not the Manager, decides which agents exist. Wiring
 concrete implementations together at the entry point (the "composition root")
 keeps that decision in one visible place and keeps the Manager reusable.
 
-The EmailAgent below is a real agent doing real work; beta_agent is still a
-stand-in. Both are registered the same way, and the Manager cannot tell them
-apart - which is the whole point of the BaseAgent contract.
+The email specialist registered below is a real agent doing real work;
+beta_agent is still a stand-in. Both are registered the same way, and the
+Manager cannot tell them apart - which is the whole point of the BaseAgent
+contract. Note that this file names neither of them: which specialists exist
+is the registry's decision, and this entry point only supplies what a run
+needs.
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ from src.manager.cognition import assess_manager
 from src.services.email.mailbox_factory import build_mailbox
 from src.services.profile.loader import load_profile
 from src.services.profile.profile import ProfileError
+from src.services.schedule.loader import load_schedule
 from src.utils.logging import configure_logging
 
 
@@ -111,12 +115,19 @@ def main(argv: Sequence[str] | None = None) -> None:
         print(f"note     : {exc}")
         profile = None
 
+    # When the user is around. A second, separate document about the same
+    # person, read the same way and at the same point in the run. A missing
+    # SCHEDULE.md is not an error - most people will never write one - so
+    # there is nothing to degrade from and nothing to report.
+    schedule = load_schedule(settings.schedule_path)
+
     # One Manager for this process, with the email specialist registered. The
     # Manager and the specialist get separate memories and the same calendar.
     manager = build_manager(
         runtime,
         mailbox=mailbox,
         profile=profile,
+        schedule=schedule,
         # Still a stand-in - nothing schedules calendars yet, and the
         # autonomous path deliberately does not register it.
         extra_agents=[EchoAgent(name="beta_agent", capabilities={"schedule", "calendar"})],
@@ -138,6 +149,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     print(f"email br.: {type(runtime.specialist_brain).__name__}")
     print(f"mailbox  : {settings.mailbox} ({type(mailbox).__name__})")
     print(f"calendar : {settings.timezone} (today is {runtime.calendar.today()})")
+    print(f"schedule : {settings.schedule_path} ({schedule.describe()})")
 
     # Which cognitive capabilities this run actually has. Reported rather than
     # enforced: both modes are valid operating states, and the Manager runs the

@@ -305,19 +305,24 @@ class TestDeclaringACapabilityDoesNotCreateOne:
 
 
 class TestAddingACapabilityTouchesNoOrchestration:
+    # The entry points are deliberately absent. Freezing them here
+    # over-reached: the claim is "adding a capability changes no
+    # orchestration", not "main.py never changes". Step 8 wires a per-run
+    # document into both, which is a legitimate evolution a change-detector
+    # would have forbidden while proving nothing extra. The sharper assertion
+    # is below: an entry point may grow, but never grow a capability handler.
     ORCHESTRATION = (
         "src/manager/manager.py",
         "src/manager/router.py",
         "src/manager/assessor.py",
-        "main.py",
-        "scripts/heartbeat.py",
     )
+    ENTRY_POINTS = ("main.py", "scripts/heartbeat.py")
 
     def test_orchestration_files_are_byte_identical_to_head(self):
         """A measurement, not a promise.
 
         If giving the Manager a capability architecture had required a line in
-        ManagerAgent, the router or either entry point, this fails.
+        ManagerAgent, the router or the assessor, this fails.
         """
         result = subprocess.run(
             ["git", "diff", "--name-only", "HEAD", "--", *self.ORCHESTRATION],
@@ -331,6 +336,25 @@ class TestAddingACapabilityTouchesNoOrchestration:
             "adding a capability must not change orchestration, but these "
             f"files differ from HEAD: {result.stdout.strip()}"
         )
+
+    def test_the_entry_points_know_no_capability_handler(self):
+        """The sharper form of the claim the byte-freeze used to make.
+
+        An entry point may grow - Step 8 gives both a schedule to load - but
+        it must never grow a *capability*. Neither may name a handler, the
+        registry, or the selection machinery: what the Manager can do is
+        decided by IDENTITY.md and src/manager/capabilities.py, and an entry
+        point that started deciding it would be a second source of truth.
+        """
+        forbidden = (
+            "ManagerCapability", "CapabilityRequest", "MANAGER_CAPABILITIES",
+            "select_capability", "offered_capabilities", "report_roster",
+            "ROSTER_REPORT",
+        )
+        for entry_point in self.ENTRY_POINTS:
+            source = (REPO_ROOT / entry_point).read_text(encoding="utf-8")
+            for name in forbidden:
+                assert name not in source, (entry_point, name)
 
     def test_a_new_capability_runs_end_to_end_through_the_real_manager(self):
         """Registered and declared, then driven through handle_task - so the

@@ -3,8 +3,8 @@
 The claim Step 3 exists to make good on:
 
     a future specialist joins by adding one entry to SPECIALISTS and shipping
-    an identity document - and nothing in manager.py, router.py, assessor.py,
-    main.py or scripts/heartbeat.py is touched
+    an identity document - and nothing in manager.py, router.py or assessor.py
+    is touched, while the entry points learn nothing about it
 
 That is easy to assert in prose and easy to be wrong about, so the decisive
 test here does not take anyone's word for it. It registers a second specialist
@@ -42,13 +42,23 @@ from src.services.email.in_memory_mailbox import InMemoryMailbox
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # The files that must never need editing to accept a new specialist.
+#
+# The two entry points are deliberately absent. They were frozen here until
+# Step 8, and that over-reached: the claim is "adding a specialist changes no
+# orchestration", not "the entry points never change for any reason". Wiring a
+# per-run document into them is a legitimate evolution, and a change-detector
+# would forbid it while proving nothing extra. The sharper assertion is that
+# they carry no specialist name and no knowledge of how one is built - which is
+# what test_the_entry_points_know_no_specialist checks below.
 ORCHESTRATION = (
     "src/manager/manager.py",
     "src/manager/router.py",
     "src/manager/assessor.py",
-    "main.py",
-    "scripts/heartbeat.py",
 )
+
+# Checked by content instead of by byte-equality: an entry point may grow, but
+# never grow a specialist.
+ENTRY_POINTS = ("main.py", "scripts/heartbeat.py")
 
 SECOND_KEY = "ledger_agent"
 
@@ -168,8 +178,8 @@ class TestASecondSpecialistNeedsNoOrchestrationChange:
         """Not a promise - a measurement.
 
         If accepting a second specialist had required a line in the Manager,
-        the router or either entry point, this fails. Hashing beats asserting
-        in a docstring, because a docstring cannot notice being wrong.
+        the router or the assessor, this fails. Hashing beats asserting in a
+        docstring, because a docstring cannot notice being wrong.
         """
         result = subprocess.run(
             ["git", "diff", "--name-only", "HEAD", "--", *ORCHESTRATION],
@@ -183,6 +193,32 @@ class TestASecondSpecialistNeedsNoOrchestrationChange:
             "adding a specialist should not have changed orchestration, but "
             f"these files differ from HEAD: {result.stdout.strip()}"
         )
+
+    def test_the_entry_points_know_no_specialist(self):
+        """The sharper form of the claim the byte-freeze used to make.
+
+        An entry point may grow - Step 8 gives both a schedule to load - but
+        it must never grow a *specialist*. Neither may name one, import an
+        agent class, or know how one is assembled: that is the registry's job,
+        and the whole point of Step 3 was that a new specialist reaches
+        production without either file learning it exists.
+        """
+        forbidden = (
+            "EmailAgent", "JobOpportunityAnalyzer", "SpecialistContext",
+            "SPECIALISTS", "build_email_specialist", "Arthur", SECOND_KEY,
+            "Testing Specialist",
+        )
+        for entry_point in ENTRY_POINTS:
+            source = (REPO_ROOT / entry_point).read_text(encoding="utf-8")
+            for name in forbidden:
+                assert name not in source, (entry_point, name)
+
+    def test_the_entry_points_route_nothing_themselves(self):
+        """Registration and routing stay behind the composition root."""
+        for entry_point in ENTRY_POINTS:
+            source = (REPO_ROOT / entry_point).read_text(encoding="utf-8")
+            for name in ("register_agent", "AgentRegistry", "CapabilityRouter"):
+                assert name not in source, (entry_point, name)
 
     def test_both_specialists_are_registered(self, two_specialists):
         _, manager = two_specialists
