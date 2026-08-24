@@ -39,6 +39,7 @@ from src.manager.capabilities import (
     offered_capabilities,
     select_capability,
 )
+from src.manager.recognition import Recognition, recognise
 from src.services.identity.identity import AgentIdentity
 from src.services.profile.profile import UserProfile
 from src.utils.logging import get_logger, task_logger
@@ -118,6 +119,21 @@ class ManagerSkills(BaseAgent):
     def identity(self) -> AgentIdentity:
         return self._identity
 
+    def recognise(self, task: Task) -> Recognition:
+        """Which of the user's declared abilities this work names.
+
+        Alfred's own faculty, not a specialist's and not a second brain. It
+        reasons about nothing: it reads the profile he was built with and
+        reports what the task named, deterministically and identically in
+        Full Brain and Half Brain.
+
+        The result is evidence. ``Recognition.notes()`` renders it as inert
+        strings for the ``deliberate(task, notes=...)`` channel Alfred's Brain
+        has always accepted, so nothing about how he reasons changes - he
+        simply now has something true to reason from.
+        """
+        return recognise(task, self._user)
+
     @property
     def user(self) -> UserProfile | None:
         """The profile this Manager was built with, or None if there is none.
@@ -162,5 +178,8 @@ class ManagerSkills(BaseAgent):
                 # Handed to every handler as read-only context. A handler that
                 # has no use for it simply does not look.
                 user=self._user,
+                # Computed once per execution, before any handler runs, so two
+                # handlers cannot disagree about what this task named.
+                recognition=self.recognise(task),
             )
         )

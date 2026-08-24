@@ -49,11 +49,12 @@ question; it does not get to orchestrate.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Sequence
 
 from src.agents.base_agent import BaseAgent
 from src.core.contracts import Task, TaskResult, tokenize
+from src.manager.recognition import Recognition
 from src.services.identity.identity import AgentIdentity
 from src.services.profile.profile import UserProfile
 from src.utils.logging import get_logger
@@ -87,6 +88,14 @@ class CapabilityRequest:
     # rather than stopping, so a handler must be able to say "I do not know
     # who I am serving" instead of assuming someone.
     user: UserProfile | None = None
+    # What this task named from the user's declared context, computed
+    # deterministically before any handler runs. Structured evidence, not a
+    # judgement: Recognition has no score, band or coverage, and no field in
+    # which a capability, tool or permission could be expressed.
+    #
+    # Defaulted so a handler constructed by hand in a test still works, and so
+    # a request built without a profile carries an honest "nothing is known".
+    recognition: Recognition = field(default_factory=Recognition)
 
     @property
     def knows_the_user(self) -> bool:
@@ -187,6 +196,11 @@ def report_roster(request: CapabilityRequest) -> TaskResult:
         "serving": (
             request.user.describe() if request.knows_the_user else "no profile configured"
         ),
+        # What this task named from the user's context, as counts. Same rule as
+        # "serving" above and for the same reason: how much, never what. The
+        # named skills exist on request.recognition for a handler that needs
+        # them; they do not belong in a payload that reaches a console.
+        "recognised": request.recognition.describe(),
     }
     return TaskResult.success(
         request.task, request.own_name, "\n".join(lines), payload=payload
