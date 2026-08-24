@@ -523,12 +523,15 @@ class TestTheCompositionRootsWireIt:
         coherence rules under test are exercised unchanged; only the object
         behind them is offline.
         """
-        # Intercepted on the shared composition root, where the entry
-        # points now construct agents.
+        # Intercepted inside the email specialist's builder, where the entry
+        # points now construct the agent. Step 3 moved construction there so a
+        # new specialist is a registry entry rather than another hardcoded
+        # block in build_manager.
+        import src.agents.specialists as specialists
         import src.composition as composition
 
         captured = {}
-        real = composition.EmailAgent
+        real = specialists.EmailAgent
 
         def capturing(*args, **kwargs):
             agent = real(*args, **kwargs)
@@ -545,7 +548,7 @@ class TestTheCompositionRootsWireIt:
         overrides.setdefault("state_path", str(tmp_path / "state" / "processed.json"))
         overrides.setdefault("reports_dir", str(tmp_path / "reports"))
         config = settings(log_level="CRITICAL", **overrides)
-        monkeypatch.setattr(composition, "EmailAgent", capturing)
+        monkeypatch.setattr(specialists, "EmailAgent", capturing)
         monkeypatch.setattr(module.Settings, "from_env", staticmethod(lambda *a, **k: config))
         monkeypatch.setattr(module, "configure_logging", lambda *a, **k: None)
         monkeypatch.setattr(

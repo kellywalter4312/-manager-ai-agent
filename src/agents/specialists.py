@@ -38,16 +38,33 @@ records are still on disk under the old name.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any, Callable
 
+from src.agents.base_agent import BaseAgent
+from src.agents.brain import SpecialistBrain
 from src.agents.brain_factory import domain_for
+from src.agents.email.analyzers import JobOpportunityAnalyzer
+from src.agents.email_agent import EmailAgent
+from src.config.settings import Settings
+from src.providers.base import LLMProvider
+from src.services.email.mailbox import Mailbox
 from src.services.identity.specialist import (
     DEFAULT_IDENTITIES_DIR,
     SpecialistIdentity,
     load_specialist_identity,
 )
+from src.services.memory.day import Calendar
+from src.services.memory.factory import EMAIL_AGENT, build_memory
+from src.services.memory.memory import Memory
+from src.services.profile.profile import UserProfile
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+# The stable technical key of the specialist this project ships. Not its name:
+# the name is whatever identities/email_agent.md declares. This key selects
+# that document, the built-in reasoning-domain default, and the builder below.
+EMAIL_AGENT_KEY = EMAIL_AGENT
 
 
 @dataclass(frozen=True)
@@ -126,3 +143,128 @@ def wiring_for(
     )
     logger.info("specialist wiring: %s", wiring.describe())
     return wiring
+
+
+# ---------------------------------------------------------------------------
+# The registry: which specialists exist, and how each one is built
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SpecialistContext:
+    """Everything a specialist builder is given to work with.
+
+    Frozen, and assembled fresh for each build - so a builder can read it and
+    cannot use it to reach back into the system that made it.
+
+    ``mailbox``, ``fetch_limit`` and ``interpreter`` are the resources the
+    entry points happen to supply for the one specialist this project ships.
+    They are named honestly rather than hidden behind a generic bag of
+    options, and this shape is expected to be revisited when a second
+    specialist needs something different. Guessing now at what that specialist
+    might want would build a plugin framework for an audience of one.
+
+    Note what a builder does *not* receive: the Manager, the registry, the
+    router, or any other agent. A specialist is constructed with its own
+    equipment and handed nothing it could use to reach a peer.
+    """
+
+    settings: Settings
+    calendar: Calendar
+    provider: LLMProvider
+    # Who this specialist is, and therefore what it registers, remembers and
+    # reasons as. Resolved once by build_runtime; see SpecialistWiring above.
+    wiring: SpecialistWiring
+    # This specialist's own brain, built from its own domain. Never shared
+    # with the Manager and never shared with another specialist.
+    brain: SpecialistBrain
+    profile: UserProfile | None = None
+    mailbox: Mailbox | None = None
+    fetch_limit: int | None = None
+    interpreter: Any | None = None
+
+    def memory(self) -> Memory:
+        """This specialist's own store, selected by its own name.
+
+        A method rather than a field, because a memory has a per-run lifetime:
+        calling it is what re-reads a persistent file, and that has to happen
+        per tick rather than once when the context was defined.
+        """
+        return build_memory(self.settings, self.wiring.memory_owner)
+
+
+# A builder turns a context into a registered-ready agent. Callables rather
+# than classes so a specialist can be assembled however it needs to be - the
+# same reasoning as every other small registry in this project.
+SpecialistBuilder = Callable[[SpecialistContext], BaseAgent]
+
+
+def build_email_specialist(context: SpecialistContext) -> BaseAgent:
+    """Assemble the email specialist - Arthur, unless his document says otherwise.
+
+    Moved here from the composition root so that adding a second specialist is
+    a new entry in SPECIALISTS rather than another hardcoded construction in
+    build_manager. The composition root still decides *when* this runs and
+    what it is given; it no longer needs to know how an EmailAgent goes
+    together.
+
+    Nothing about the Gmail boundary is decided here. No Outbox is passed
+    because none exists to pass, so the agent that comes out of this function
+    has no object with a send method on it - the same structural refusal it
+    has always had.
+    """
+    if context.mailbox is None:
+        raise ValueError(
+            "the email specialist needs a mailbox; the composition root "
+            "chooses which one, because --dry-run substitutes a sample inbox"
+        )
+
+    options: dict[str, Any] = {}
+    if context.fetch_limit is not None:
+        # Only forwarded when a caller asks, so the agent's own default stays
+        # in force for anyone who does not care.
+        options["fetch_limit"] = context.fetch_limit
+
+    return EmailAgent(
+        context.mailbox,
+        analyzers=[
+            JobOpportunityAnalyzer(
+                # The profile arrives per run, freshly loaded. A skill the
+                # user learned since the last tick is already in it.
+                profile=context.profile,
+                interpreter=context.interpreter,
+            )
+        ],
+        brain=context.brain,
+        memory=context.memory(),
+        calendar=context.calendar,
+        identity=context.wiring.identity,
+        **options,
+    )
+
+
+# Every specialist this project ships, keyed by its stable technical key.
+#
+# **This is the extension point.** A future specialist joins by adding one
+# entry here and shipping identities/<key>.md - and nothing in the Manager,
+# the router, the assessor, main.py or scripts/heartbeat.py is touched. The
+# Manager learns a specialist exists the way it always has: because something
+# registered one, and the router scores its declared capabilities like any
+# other's.
+#
+# A dict of callables rather than a conditional, for the same reason the
+# provider, router, brain and memory factories are: a switch statement grows a
+# branch per specialist in a file that should not care how many there are.
+#
+# Deliberately not auto-discovered from the identities/ directory. Dropping a
+# markdown file into a folder must not be able to register an agent - that
+# would let a document grant something again, one level up from the capability
+# rule it already cannot break. Registration stays explicit and in code.
+SPECIALISTS: dict[str, SpecialistBuilder] = {
+    EMAIL_AGENT_KEY: build_email_specialist,
+}
+
+
+def available_specialists() -> list[str]:
+    """Every specialist key that can currently be built."""
+    return sorted(SPECIALISTS)

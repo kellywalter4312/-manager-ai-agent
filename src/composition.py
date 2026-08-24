@@ -39,16 +39,19 @@ so a Control Center may construct all of this simply to look at it.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 from src.agents.brain_factory import (
     build_opportunity_interpreter,
     build_specialist_brain,
 )
-from src.agents.specialists import SpecialistWiring, wiring_for
+from src.agents.specialists import (
+    SPECIALISTS,
+    SpecialistContext,
+    SpecialistWiring,
+    wiring_for,
+)
 from src.agents.base_agent import BaseAgent
-from src.agents.email.analyzers import JobOpportunityAnalyzer
-from src.agents.email_agent import EmailAgent
 from src.agents.brain import SpecialistBrain
 from src.config.settings import Settings
 from src.manager.brain import ManagerBrain
@@ -69,16 +72,31 @@ from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-# The *technical key* of the specialist this project currently ships. Not its
-# name: the name is whatever identities/email_agent.md declares, and may be
-# changed without touching a line of code. This key is what selects that
-# document and the built-in reasoning-domain default, and it is stable.
-#
-# Keeping the two apart is what lets a specialist be renamed safely. Keeping
-# the *derivations* together - name, memory owner, brain domain, all from one
-# SpecialistWiring - is what stops them disagreeing. Before that existed the
-# three came from three unrelated constants and nothing compared them.
+# The technical key of the specialist this project ships. Defined beside the
+# registry that uses it and re-exported here, because callers already reach
+# for it from the composition root.
 EMAIL_AGENT_KEY = EMAIL_AGENT
+
+
+@dataclass(frozen=True)
+class SpecialistRuntime:
+    """One specialist's long-lived half, resolved once at startup.
+
+    Everything here is either identity or a stateless collaborator, which is
+    what makes sharing it across heartbeat ticks correct. Note what is absent:
+    the agent itself and its memory. Those are per-tick and are produced by
+    the builder, not stored here - a specialist held in Runtime would be a
+    singleton whose persistent store never re-read its file.
+    """
+
+    key: str
+    wiring: SpecialistWiring
+    brain: SpecialistBrain
+    build: Any
+
+    @property
+    def name(self) -> str:
+        return self.wiring.name
 
 
 @dataclass(frozen=True)
@@ -100,14 +118,35 @@ class Runtime:
     provider: LLMProvider
     router: Router
     manager_brain: ManagerBrain
-    specialist_brain: SpecialistBrain
     interpreter: Any | None
-    # Who the email specialist is. An identity document describes an *agent*,
-    # not the user, so it has an agent's lifetime: read once, here, alongside
-    # the Manager's own identity. Nothing about it changes between heartbeat
-    # ticks, which is precisely why it belongs in Runtime and the user's
-    # profile does not.
-    email_specialist: SpecialistWiring
+    # Every specialist this project ships, keyed by its technical key, each
+    # with its own identity and its own brain. Plural because there is no
+    # architectural reason for there to be one - the fact that this project
+    # currently ships a single specialist is a fact about the project, not a
+    # shape the composition root should be built around.
+    #
+    # An identity document describes an *agent*, not the user, so it has an
+    # agent's lifetime: read once, here. Nothing in it changes between
+    # heartbeat ticks, which is precisely why it belongs in Runtime and the
+    # user's profile does not.
+    specialists: Mapping[str, SpecialistRuntime]
+
+    # ------------------------------------------------------------------
+    # Named accessors for the one specialist this project ships.
+    #
+    # The mapping above is the source of truth; these are conveniences for
+    # callers that already know they mean the email specialist - a startup
+    # banner, a test. They read from the mapping rather than holding a second
+    # copy, so there is nothing here that could fall out of step with it.
+    # ------------------------------------------------------------------
+
+    @property
+    def email_specialist(self) -> SpecialistWiring:
+        return self.specialists[EMAIL_AGENT_KEY].wiring
+
+    @property
+    def specialist_brain(self) -> SpecialistBrain:
+        return self.specialists[EMAIL_AGENT_KEY].brain
 
     def describe(self) -> str:
         """A short line for a startup banner. Never prints a credential."""
@@ -115,9 +154,8 @@ class Runtime:
             f"provider={self.provider.name} "
             f"router={type(self.router).__name__} "
             f"brain={type(self.manager_brain).__name__} "
-            f"specialist_brain={type(self.specialist_brain).__name__} "
+            f"specialists={','.join(s.name for s in self.specialists.values())} "
             f"interpreter={'yes' if self.interpreter is not None else 'no'} "
-            f"specialist={self.email_specialist.name} "
             f"timezone={self.settings.timezone}"
         )
 
@@ -140,15 +178,23 @@ def build_runtime(settings: Settings) -> Runtime:
     identity = load_identity(settings.identity_path)
     provider = build_provider(settings)
 
-    # Resolved before the specialist brain is built, because the brain's
-    # reasoning domain now comes from it. One identity in, three agreeing
-    # facts out - the name the agent registers under, the store it owns, and
-    # the area it reasons about.
-    email_specialist = wiring_for(
-        EMAIL_AGENT_KEY,
-        fallback_name=EMAIL_AGENT_KEY,
-        identities_dir=settings.identities_dir,
-    )
+    # One pass over the registry: every specialist gets its identity resolved
+    # and its own brain built from its own domain. The loop is what makes a
+    # second specialist a data change rather than a code change - nothing
+    # below counts them, names them, or is written for exactly one.
+    specialists = {
+        key: SpecialistRuntime(
+            key=key,
+            wiring=(wiring := wiring_for(
+                key, fallback_name=key, identities_dir=settings.identities_dir
+            )),
+            # Its own brain, from its own domain. Two specialists get two
+            # brains; neither gets the Manager's.
+            brain=build_specialist_brain(settings, provider, wiring.brain_domain),
+            build=build,
+        )
+        for key, build in SPECIALISTS.items()
+    }
 
     runtime = Runtime(
         settings=settings,
@@ -157,11 +203,8 @@ def build_runtime(settings: Settings) -> Runtime:
         provider=provider,
         router=build_router(settings, provider),
         manager_brain=build_brain(settings, provider),
-        specialist_brain=build_specialist_brain(
-            settings, provider, email_specialist.brain_domain
-        ),
         interpreter=build_opportunity_interpreter(settings, provider),
-        email_specialist=email_specialist,
+        specialists=specialists,
     )
     logger.info("runtime ready: %s", runtime.describe())
     return runtime
@@ -187,8 +230,10 @@ def build_manager(
     for the same reason - main.py registers a calendar stand-in that the
     autonomous path deliberately does not.
 
-    The Manager and the specialist receive **separate** memories, selected by
-    owner, and the **same** calendar. Same temporal rules, different stores.
+    The Manager and every specialist receive **separate** memories, selected
+    by owner, and the **same** calendar. Same temporal rules, different
+    stores. A specialist's memory is built inside its builder, per call, which
+    is what lets a persistent store re-read its file each tick.
     """
     registry = AgentRegistry()
     manager = ManagerAgent(
@@ -205,29 +250,33 @@ def build_manager(
         calendar=runtime.calendar,
     )
 
-    email_agent_options: dict[str, Any] = {}
-    if fetch_limit is not None:
-        # Only passed when a caller asks for it, so the agent's own default
-        # stays in force for anyone who does not care.
-        email_agent_options["fetch_limit"] = fetch_limit
-
-    # One wiring, read three times. The agent is named by it, its store is
-    # selected by it, and the brain it was given was built from it upstream -
-    # so there is no second place where a name could be typed differently.
-    specialist = runtime.email_specialist
-    manager.register_agent(
-        EmailAgent(
-            mailbox,
-            analyzers=[
-                JobOpportunityAnalyzer(profile=profile, interpreter=runtime.interpreter)
-            ],
-            brain=runtime.specialist_brain,
-            memory=build_memory(runtime.settings, specialist.memory_owner),
-            calendar=runtime.calendar,
-            identity=specialist.identity,
-            **email_agent_options,
+    # Every registered specialist, built and registered the same way. This
+    # loop is the whole of Step 3: before it, adding a specialist meant
+    # writing another construction here; now it means adding an entry to
+    # SPECIALISTS and shipping an identity document.
+    #
+    # Iterating the *resolved* mapping rather than the registry directly is
+    # deliberate - the registry was consulted once at startup, so a specialist
+    # cannot appear here without a brain and an identity having been built for
+    # it, and there is no lookup that could miss.
+    for entry in runtime.specialists.values():
+        manager.register_agent(
+            entry.build(
+                SpecialistContext(
+                    settings=runtime.settings,
+                    calendar=runtime.calendar,
+                    provider=runtime.provider,
+                    wiring=entry.wiring,
+                    brain=entry.brain,
+                    # Per-run, every run. A profile freshly loaded this tick
+                    # is what lets a skill learned since the last one count.
+                    profile=profile,
+                    mailbox=mailbox,
+                    fetch_limit=fetch_limit,
+                    interpreter=runtime.interpreter,
+                )
+            )
         )
-    )
 
     for agent in extra_agents:
         manager.register_agent(agent)
