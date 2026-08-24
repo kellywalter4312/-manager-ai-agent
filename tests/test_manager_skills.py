@@ -19,7 +19,7 @@ IDENTITY = AgentIdentity(
     name="manager",
     role="Orchestrator",
     description="Coordinates missions and reports on capabilities.",
-    capabilities=frozenset({"capabilities", "status", "roster", "report", "plan"}),
+    capabilities=frozenset({"capabilities", "status", "roster", "report"}),
 )
 
 
@@ -48,8 +48,31 @@ class TestManagerSkillsIsAnOrdinaryAgent:
         assert "roster" in spec.capabilities
 
     def test_editing_identity_changes_the_spec(self):
-        other = AgentIdentity(name="boss", description="d", capabilities=frozenset({"plan"}))
-        assert ManagerSkills(other).spec.capabilities == {"plan"}
+        """What the Manager takes on is still a document edit, not a code change.
+
+        Stated with `roster` rather than `plan`: a declared word is offered
+        only if some registered handler answers it, and nothing has ever
+        implemented planning. The intent of this test is unchanged - editing
+        the document changes the spec - and the companion below covers the
+        half of the rule that a single declaration cannot show.
+        """
+        other = AgentIdentity(name="boss", description="d", capabilities=frozenset({"roster"}))
+        assert ManagerSkills(other).spec.capabilities == {"roster"}
+
+    def test_declaring_an_unhandled_capability_does_not_add_it(self):
+        """The other half: a word with no handler behind it is dropped.
+
+        `plan` and `coordinate` sat in IDENTITY.md from the first commit with
+        nothing implementing them, and a task asking for a plan was answered
+        with a roster listing and reported as done. Declaring a capability
+        does not create one.
+        """
+        other = AgentIdentity(
+            name="boss",
+            description="d",
+            capabilities=frozenset({"roster", "plan", "coordinate"}),
+        )
+        assert ManagerSkills(other).spec.capabilities == {"roster"}
 
     def test_it_is_registered_like_any_specialist(self):
         manager = build()

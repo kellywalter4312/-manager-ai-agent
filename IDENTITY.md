@@ -16,6 +16,19 @@ Editing this file changes what the Manager takes on. No code change is needed -
 but only the `## Capabilities` section does that. The prose sections describe
 the agent; they cannot grant it anything.
 
+Nor does that section grant on its own. Every word in it needs a handler behind
+it in `src/manager/capabilities.py`; a word with nothing to answer it is
+dropped rather than offered, and a warning names it. Declaring a capability
+does not create one.
+
+`plan` and `coordinate` were listed here from the first commit and were never
+implemented - a task asking for a plan was answered with a roster listing and
+reported as done. They will be listed again when a handler exists that
+genuinely plans.
+
+Keep `## Capabilities` to the list itself. It is read as one comma-separated
+line, so a sentence written inside it becomes a capability.
+
 ## Name
 
 Alfred
@@ -44,7 +57,7 @@ returned results and decides whether to accept, retry, escalate or report.
 
 ## Capabilities
 
-capabilities, status, roster, report, reporting, summary, plan, coordinate
+capabilities, status, roster, report, reporting, summary
 
 ## Delegates
 

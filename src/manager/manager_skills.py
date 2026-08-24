@@ -10,8 +10,20 @@ Its area of responsibility is coordination: knowing what it and its specialists
 can do, and reporting on that. It does not attempt a specialist's work - and it
 is not obliged to delegate merely because a specialist exists.
 
-The spec comes from IDENTITY.md, so what the Manager takes on itself is a
-document edit rather than a code change.
+**What it offers is a declaration and a handler, together.** IDENTITY.md says
+what the author intends the Manager to take on; src/manager/capabilities.py
+holds the handlers that can actually answer. The spec below offers only their
+intersection, which cuts both ways: a word added to the document with nothing
+behind it grants nothing, and a handler registered in code does not widen the
+Manager until the document declares it too.
+
+So editing IDENTITY.md still changes what the Manager takes on - within what
+the code can do. That last clause is the part this class exists to enforce,
+and it is the same rule specialist identity documents already live under.
+
+Note what stays out of ManagerAgent: everything. Choosing a handler and running
+it happens here, in an ordinary registered agent. The orchestrator still holds
+no algorithm and grows no branch when a capability is added.
 """
 
 from __future__ import annotations
@@ -20,6 +32,13 @@ from typing import Callable, Sequence
 
 from src.agents.base_agent import BaseAgent
 from src.core.contracts import AgentSpec, Task, TaskResult
+from src.manager.capabilities import (
+    MANAGER_CAPABILITIES,
+    CapabilityRequest,
+    ManagerCapability,
+    offered_capabilities,
+    select_capability,
+)
 from src.services.identity.identity import AgentIdentity
 from src.utils.logging import get_logger, task_logger
 
@@ -33,6 +52,7 @@ class ManagerSkills(BaseAgent):
         self,
         identity: AgentIdentity,
         roster: Callable[[], Sequence[BaseAgent]] | None = None,
+        capabilities: dict[str, ManagerCapability] | None = None,
     ) -> None:
         """``roster`` supplies the currently registered agents.
 
@@ -40,42 +60,78 @@ class ManagerSkills(BaseAgent):
         object *into* the registry, so holding the registry directly would be a
         cycle. A late-bound callable keeps the dependency one-way and lets the
         roster answer reflect agents registered after construction.
+
+        ``capabilities`` is the handler registry, defaulting to the one every
+        deployment ships. Injectable for the same reason every other
+        collaborator in this project is: so a test can register a capability
+        without mutating global state that another test would then inherit.
         """
         self._identity = identity
         self._roster = roster or (lambda: ())
+        self._capabilities = (
+            MANAGER_CAPABILITIES if capabilities is None else dict(capabilities)
+        )
 
     @property
     def spec(self) -> AgentSpec:
-        return self._identity.to_spec()
+        """Declared and handled, never merely declared.
+
+        AgentSpec is what the router scores against, so this is where the
+        intersection has to be applied - offering a capability nothing can
+        answer would route work here that would then be answered by the
+        fallback, which is the silent-wrong-behaviour outcome this project
+        refuses everywhere else.
+        """
+        return AgentSpec(
+            name=self._identity.name,
+            description=(
+                self._identity.description
+                or self._identity.role
+                or f"{self._identity.name} agent"
+            ),
+            capabilities=offered_capabilities(
+                self._identity.capabilities, self._capabilities
+            ),
+        )
+
+    @property
+    def capabilities(self) -> dict[str, ManagerCapability]:
+        """The handler registry this instance answers from."""
+        return dict(self._capabilities)
 
     @property
     def identity(self) -> AgentIdentity:
         return self._identity
 
     def execute(self, task: Task) -> TaskResult:
+        """Pick the handler this task is asking for, and run it.
+
+        Selection is the same scoring the router used one level up: match the
+        task's words against what each handler declares, strongest wins. With
+        a single handler registered - which is what this project ships today -
+        the answer is always that handler, and the behaviour is exactly what
+        it was before a registry existed.
+
+        No branch here grows when a capability is added. That is the point:
+        this method reads the same with one handler or with twenty.
+        """
         log = task_logger(logger, task.id)
-        log.debug("manager handling '%s' itself", task.description)
+        capability = select_capability(task, self._capabilities)
+        log.debug(
+            "manager handling '%s' itself via '%s'",
+            task.description,
+            capability.name,
+        )
 
-        others = [a for a in self._roster() if a.name != self.name]
-        own = sorted(self.spec.capabilities)
-
-        lines = [
-            f"{self._identity.name}: {self._identity.role or 'orchestrator'}",
-            f"  handles directly : {', '.join(own)}",
-        ]
-        if others:
-            lines.append(f"  specialists ({len(others)}):")
-            for agent in sorted(others, key=lambda a: a.name):
-                caps = ", ".join(sorted(agent.spec.capabilities))
-                lines.append(f"    - {agent.name}: {caps}")
-        else:
-            lines.append("  specialists      : none registered")
-
-        payload = {
-            "identity": self._identity.name,
-            "own_capabilities": tuple(own),
-            "specialists": {
-                agent.name: tuple(sorted(agent.spec.capabilities)) for agent in others
-            },
-        }
-        return TaskResult.success(task, self.name, "\n".join(lines), payload=payload)
+        return capability.handle(
+            CapabilityRequest(
+                task=task,
+                identity=self._identity,
+                roster=self._roster,
+                own_name=self.name,
+                # What this Manager actually offers - the intersection, not the
+                # raw declaration - so a handler reporting "what can you do"
+                # cannot advertise a word nothing is able to answer.
+                own_capabilities=tuple(sorted(self.spec.capabilities)),
+            )
+        )
