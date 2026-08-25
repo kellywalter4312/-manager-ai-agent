@@ -171,6 +171,41 @@ class EmailAgent(CognitiveAgent):
         return self._identity
 
     @property
+    def interface(self):
+        """How this specialist would like to be interacted with.
+
+        A description of shape, never a grant. Declaring a mailbox surface adds
+        no permission: the Gmail scope is still readonly, no Outbox exists, and
+        sending is still refused. All this changes is what a screen may offer.
+
+        Chat and activity are marked implemented because the Control Center
+        renders both today. The mailbox and opportunity surfaces are declared
+        and not yet implemented, which is the honest state - this agent really
+        does read a mailbox and really does produce ranked findings, and the
+        interface for looking through them directly has not been built. Saying
+        so beats either hiding the shape of the work or pretending a screen
+        exists.
+        """
+        from src.control_center.interfaces import InterfaceDescriptor, InterfaceFeature
+
+        return InterfaceDescriptor(
+            agent=self._name,
+            display_name=self._name,
+            features=frozenset(
+                {
+                    InterfaceFeature.CHAT,
+                    InterfaceFeature.ACTIVITY,
+                    InterfaceFeature.MAILBOX,
+                    InterfaceFeature.OPPORTUNITIES,
+                }
+            ),
+            implemented=frozenset(
+                {InterfaceFeature.CHAT, InterfaceFeature.ACTIVITY}
+            ),
+            summary="reads a mailbox and ranks what it finds against your profile",
+        )
+
+    @property
     def can_send(self) -> bool:
         """Whether a send channel is wired up. False in this milestone."""
         return self._outbox is not None
