@@ -603,9 +603,26 @@ class TestTheSafetyBoundaryHolds:
         assert GMAIL_READONLY_SCOPE.endswith("gmail.readonly")
 
     def test_no_write_scope_appears_anywhere_in_the_project(self):
-        """Not just the constant - the string itself must not exist."""
+        """Not just the constant - the string itself must not exist.
+
+        Absolute, and deliberately with no exception for the one module whose
+        job is to refuse a write scope. That module was briefly the reason to
+        soften this into "the string may appear where it is being refused",
+        which sounds reasonable and is not: the rule stops being a property of
+        the source and becomes a judgement about intent, and the next file to
+        want an exception will also have a reason.
+
+        The improvement layer refuses exactly the strings it always did. It
+        assembles them from fragments instead of writing them out, so this
+        assertion stays as blunt as it was - nothing under src/ contains a
+        write-scope literal, so nothing under src/ can hand one to an OAuth
+        flow by copy-paste, by refactor, or by accident.
+
+        Do not weaken this to accommodate an implementation. Assemble the
+        string instead; it costs three lines.
+        """
         forbidden = re.compile(
-            r"gmail\.(send|modify|compose|insert|labels)|mail\.google\.com/?\"", re.IGNORECASE
+            r"gmail\.(send|modify|compose|insert|labels)|mail\.google\.com", re.IGNORECASE
         )
         for path in source_files():
             assert not forbidden.search(read(path)), path.name
