@@ -36,8 +36,13 @@ from src.providers.base import Completion, LLMProvider
 PRODUCTION_DATA_DIR = (Path(__file__).resolve().parent.parent / "data").resolve()
 
 # Every variable that could authenticate a real request: this project's own,
-# and the one the vendor SDK finds by itself.
-CREDENTIAL_VARS = ("ANTHROPIC_API_KEY", "MANAGER_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+# and the ones each vendor SDK finds by itself.
+CREDENTIAL_VARS = (
+    "ANTHROPIC_API_KEY",
+    "MANAGER_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ELEVENLABS_API_KEY",
+)
 
 
 def _is_production_data(target: object) -> bool:
@@ -103,8 +108,25 @@ def _no_production_writes(monkeypatch):
             guard("open for writing", path)
         return real_os_open(path, flags, *args, **kwargs)
 
+    def mkdir(self, *args, **kwargs):
+        """Creating a directory is a write too.
+
+        Added after this guard let one through. PersistentMemory._save calls
+        parent.mkdir(parents=True) before writing, so when persistent memory
+        became the production default a test run created a real data/memory/
+        directory - empty, because the write itself was still blocked, but
+        created. The interception was of file writes rather than of *writing*,
+        and a directory nobody asked for is the visible half of that gap.
+        """
+        if _is_production_data(self):
+            guard("create a directory", self)
+        return real_mkdir(self, *args, **kwargs)
+
+    real_mkdir = Path.mkdir
+
     monkeypatch.setattr(Path, "write_text", write_text)
     monkeypatch.setattr(Path, "open", path_open)
+    monkeypatch.setattr(Path, "mkdir", mkdir)
     monkeypatch.setattr(os, "replace", replace)
     monkeypatch.setattr(os, "open", os_open)
 

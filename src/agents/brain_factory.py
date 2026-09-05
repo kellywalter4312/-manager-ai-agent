@@ -36,6 +36,7 @@ from src.agents.brain import NullSpecialistBrain, SpecialistBrain
 from src.agents.llm_brain import LLMSpecialistBrain
 from src.config.settings import Settings
 from src.providers.base import LLMProvider
+from src.services.identity.personality import AgentPersonality
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -69,9 +70,13 @@ def domain_for(agent_name: str) -> str:
 
 # Factory callables rather than instances, so a brain is only built when it is
 # actually selected - the same reasoning as every other registry here.
-_BUILDERS: dict[str, Callable[[Settings, LLMProvider, str], SpecialistBrain]] = {
-    "null": lambda settings, provider, domain: NullSpecialistBrain(),
-    "llm": lambda settings, provider, domain: LLMSpecialistBrain(provider, domain=domain),
+_BUILDERS: dict[
+    str, Callable[[Settings, LLMProvider, str, "AgentPersonality | None"], SpecialistBrain]
+] = {
+    "null": lambda settings, provider, domain, personality: NullSpecialistBrain(),
+    "llm": lambda settings, provider, domain, personality: LLMSpecialistBrain(
+        provider, domain=domain, personality=personality
+    ),
 }
 
 
@@ -108,7 +113,11 @@ def available_specialist_brains() -> list[str]:
 
 
 def build_specialist_brain(
-    settings: Settings, provider: LLMProvider, domain: str = ""
+    settings: Settings,
+    provider: LLMProvider,
+    domain: str = "",
+    *,
+    personality: AgentPersonality | None = None,
 ) -> SpecialistBrain:
     """Construct the specialist brain named by ``settings.specialist_brain``.
 
@@ -122,6 +131,12 @@ def build_specialist_brain(
     unless a provider was also configured deliberately. Turning on real
     specialist reasoning takes two settings and a credential, never one.
 
+    ``personality`` (0.2 Final Surgical Pass) is optional and additive,
+    reaching only ``LLMSpecialistBrain.converse``'s prompt - never
+    ``consider()``'s domain-analysis one, see that class's own docstring
+    for why. ``NullSpecialistBrain`` ignores it entirely, the same shape
+    every other optional collaborator in this project already has.
+
     Fails fast on an unknown name, listing the valid options - a typo should
     stop the program with a readable message rather than surface later as a
     specialist that mysteriously never has a view.
@@ -134,7 +149,7 @@ def build_specialist_brain(
             f"Available specialist brains: {', '.join(available_specialist_brains())}"
         ) from None
 
-    brain = builder(settings, provider, domain)
+    brain = builder(settings, provider, domain, personality)
     logger.info(
         "specialist brain ready: %s (%s)",
         settings.specialist_brain,

@@ -237,14 +237,31 @@ class TestExistingHeartbeatBehaviourIsUnchanged:
             "rejected", "locked", "report_failed", "state_failed",
         }
 
-    def test_locking_state_and_dedup_are_untouched(self):
-        """Step 8 added a document to read, not a change to how a wake works."""
+    def test_locking_is_untouched(self):
+        """Step 8 added a document to read, not a change to how a wake works.
+
+        `state.py` was dropped from this freeze by the governed-evolution
+        milestone (src/core/versioning.py): that work gave persisted
+        heartbeat state a real migration seam, which is now a permanent,
+        legitimate reason for this file to keep changing as future schema
+        versions gain real migrations - see test_heartbeat_state.py's own
+        version-mismatch tests for the guarantee that actually matters now.
+
+        `reporting.py` was dropped from this freeze the same way, by the
+        Stage 12 closure pass: a genuine proactive-milestone report
+        (``render_proactive_report``) and a backward-compatible ``suffix``
+        parameter on ``write_report`` are a legitimate, additive reason for
+        that file to change - see ``tests/test_stage12_proactive_milestones.py``
+        for the guarantee that actually matters now (every existing
+        opportunity-report caller renders byte-identical output).
+
+        Locking has no such reason and stays frozen.
+        """
         import subprocess
 
         result = subprocess.run(
             ["git", "diff", "--name-only", "HEAD", "--",
-             "src/heartbeat/lock.py", "src/heartbeat/state.py",
-             "src/heartbeat/reporting.py"],
+             "src/heartbeat/lock.py"],
             cwd=REPO_ROOT, capture_output=True, text=True,
         )
         if result.returncode != 0:  # pragma: no cover - only if git is absent

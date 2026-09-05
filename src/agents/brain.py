@@ -140,6 +140,29 @@ class SpecialistBrain(ABC):
         anything.
         """
 
+    def converse(self, task: Task, notes: Sequence[str] = ()) -> Insight:
+        """Compose an open-ended, conversational answer - never a
+        judgement about this specialist's own domain work.
+
+        A genuinely different question from ``consider()``'s ("what do I
+        make of this piece of work") - this one is "what is the actual
+        answer to this", for a remark that named none of this
+        specialist's own domain vocabulary and needs a real, general
+        answer instead. See ``CognitiveAgent.general_conversation`` for
+        the one, reusable place this is called from - shared by every
+        specialist rather than reimplemented per agent, the identical
+        role ``ManagerBrain.converse`` plays for the orchestrator.
+
+        Concrete, not abstract, and defaulting to an honest "no view" -
+        the same reason ``ManagerBrain.converse`` defaults this way, so
+        every existing ``SpecialistBrain`` implementation and test double
+        keeps working unchanged. Only a brain that can genuinely converse
+        needs to override this (see ``LLMSpecialistBrain.converse``).
+        """
+        return Insight.none(
+            reason="no reasoning capability is configured", source=self.name
+        )
+
 
 class NullSpecialistBrain(SpecialistBrain):
     """The default: no reasoning capability configured.

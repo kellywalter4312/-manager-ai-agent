@@ -519,7 +519,11 @@ class TestExistingBehaviourIsUnchanged:
         assert result.status is TaskStatus.COMPLETED
 
     def test_the_provider_factory_was_not_modified(self):
+        """'Not modified' means 'not modified for the specialist brain's
+        sake' - the actual property under test. The registry has since
+        legitimately grown (Phase 1.4: openai, xai), which is exactly the
+        kind of change this test must still tolerate rather than pin."""
         import src.providers.factory as factory
 
-        assert factory.available_providers() == ["anthropic", "null"]
+        assert {"anthropic", "null"} <= set(factory.available_providers())
         assert "specialist" not in code_of(factory)

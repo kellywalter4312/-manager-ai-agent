@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from src.core.contracts import AgentSpec
+from src.services.identity.personality import AgentPersonality, parse_personality
+from src.services.identity.voice import VoiceActivation, VoiceProfile, parse_voice
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -51,6 +53,30 @@ class AgentIdentity:
     # collected while parsing and then dropped, which made it a heading that
     # looked like loaded configuration and was not. Now it loads.
     area_of_responsibility: str = ""
+    # How this agent sounds. Loaded, not decorative: a `## Voice` section is
+    # parsed into this field, and it was added to the parser in the same
+    # change that added it to the document - this project has twice been
+    # bitten by a heading that looked like configuration and behaved like a
+    # comment, and a third time would be a choice.
+    #
+    # Describes, never grants. A voice changes what an agent sounds like and
+    # nothing about what it may do.
+    voice: VoiceProfile | None = None
+    # How this agent is recognized as being addressed by voice - a distinct
+    # fact from voice above (see src/services/identity/voice.py's module
+    # docstring). A `## Voice Activation` section is parsed into this field;
+    # None means the document declared no phrases of its own, and a caller
+    # falls back to a name-derived default (`default_activation`) rather
+    # than requiring every document to declare one explicitly.
+    activation: VoiceActivation | None = None
+    # How this agent tends to communicate - a distinct dimension from voice
+    # above (see src/services/identity/personality.py's module docstring:
+    # voice is how it sounds, personality is how it tends to express
+    # itself). A `## Personality` section is parsed into this field; None
+    # means the document declared none, and a caller falls back to a
+    # name-derived, unconfigured default (`default_personality`) rather
+    # than requiring every document to declare one explicitly.
+    personality: AgentPersonality | None = None
 
     def __post_init__(self) -> None:
         if not self.name.strip():
@@ -131,6 +157,48 @@ def listed_section(sections: dict[str, list[str]], key: str) -> list[str]:
     return values
 
 
+def bulleted_section(sections: dict[str, list[str]], key: str) -> list[str]:
+    """One section read as bulleted lines only, everything else ignored.
+
+    Unlike ``listed_section``, a non-bulleted line is dropped rather than
+    treated as list content - the same rule ``## Delegates`` parsing
+    already applies inline, pulled out here so a second section can use it
+    without copying it. What that makes possible: a section can carry
+    explanatory prose *before* its list, the same way ``## Voice`` and
+    ``## Delegates`` already do, without that prose being mistaken for an
+    entry - a mistake ``listed_section`` would make, because it has no way
+    to tell a sentence from an item.
+    """
+    return [
+        _BULLET.match(line).group(1).strip()
+        for line in sections.get(key, [])
+        if _BULLET.match(line)
+    ]
+
+
+def parse_activation(sections: dict[str, list[str]], key: str) -> VoiceActivation | None:
+    """Read a ``## Voice Activation`` section into an activation identity,
+    or None when the document declares no phrases of its own.
+
+    Shared by both AgentIdentity and SpecialistIdentity - see
+    src/services/identity/specialist.py - for the same reason the section
+    parser itself is shared: two documents that appear to have one format
+    must not quietly acquire two. One phrase per bulleted line, exactly the
+    shape ``## Delegates`` already uses - a phrase list benefits from the
+    same explanatory prose that section carries, so this reads bulleted
+    lines only rather than every line in the section.
+
+    None rather than an empty VoiceActivation on purpose - "no phrases
+    declared" and "a caller should fall back to a name-derived default" are
+    the same fact here, and the caller (which knows the agent's name) is
+    what actually produces that default; see ``default_activation``.
+    """
+    phrases = bulleted_section(sections, "voice activation")
+    if not phrases:
+        return None
+    return VoiceActivation(key=key, phrases=tuple(phrases))
+
+
 def parse_identity(text: str) -> AgentIdentity:
     """Parse IDENTITY.md. Exposed separately so tests need no file."""
     sections = parse_sections(text)
@@ -172,6 +240,11 @@ def parse_identity(text: str) -> AgentIdentity:
         # optional: a document that omits them is still a valid identity, so
         # nothing that parsed before this change stops parsing now.
         area_of_responsibility=joined("area of responsibility"),
+        # Keyed on the agent's own name unless the document says otherwise,
+        # so two agents cannot collide on a voice key by omission.
+        voice=parse_voice(sections.get("voice", []), key=name),
+        activation=parse_activation(sections, key=name),
+        personality=parse_personality(sections.get("personality", []), key=name),
     )
 
 

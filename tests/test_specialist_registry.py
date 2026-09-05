@@ -22,7 +22,7 @@ able to bring an agent into existence, one level up from the rule saying it
 cannot grant that agent a capability.
 """
 
-import subprocess
+import ast
 from pathlib import Path
 
 import pytest
@@ -55,6 +55,27 @@ ORCHESTRATION = (
     "src/manager/router.py",
     "src/manager/assessor.py",
 )
+
+
+def docstring_nodes(tree):
+    """Every string Constant that is actually a docstring.
+
+    Identified by position rather than by value, the same way
+    tests/test_control_center.py does it: a docstring is the first statement
+    of a module, class or function. Prose may name an agent; code may not.
+    """
+    found = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef)):
+            continue
+        body = getattr(node, "body", None)
+        if not body:
+            continue
+        first = body[0]
+        if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant):
+            if isinstance(first.value.value, str):
+                found.add(id(first.value))
+    return found
 
 # Checked by content instead of by byte-equality: an entry point may grow, but
 # never grow a specialist.
@@ -174,25 +195,88 @@ class TestTheRegistry:
 
 
 class TestASecondSpecialistNeedsNoOrchestrationChange:
-    def test_orchestration_files_are_byte_identical_to_head(self):
-        """Not a promise - a measurement.
+    def test_orchestration_knows_no_specialist(self):
+        """The sharper form of the claim a byte-freeze used to make here.
 
-        If accepting a second specialist had required a line in the Manager,
-        the router or the assessor, this fails. Hashing beats asserting in a
-        docstring, because a docstring cannot notice being wrong.
+        This was `git diff HEAD` over the three orchestration files, and it
+        over-reached in exactly the way the entry-point freeze above it did.
+        The claim is "adding a specialist changes no orchestration", not
+        "orchestration never changes for any reason" - and a change-detector
+        cannot tell those apart. It forbade Alfred emitting a delegation event,
+        which has nothing to do with specialists, while proving nothing extra;
+        and being diff-against-HEAD, it went quiet again the moment anything
+        was committed, so it never protected what it claimed to.
+
+        So the rule is now the property itself. Orchestration may evolve -
+        Alfred may gain a decision, an event, a way to coordinate. What it may
+        never gain is a *specialist*: it must not import an agent
+        implementation, reference a construction helper, or name an agent in
+        executable code. Discovery belongs to the registry and construction to
+        the factory, and that is what lets a new specialist reach production
+        without a line here changing.
+
+        Parsed rather than searched, for the reason TestTheThreeAxesNeverMerge
+        gives: these files discuss specialists constantly in prose - the
+        Manager's whole docstring is about delegating to them - and a substring
+        search would find the explanation instead of the rule.
         """
-        result = subprocess.run(
-            ["git", "diff", "--name-only", "HEAD", "--", *ORCHESTRATION],
-            cwd=REPO_ROOT,
-            capture_output=True,
-            text=True,
+        forbidden_modules = (
+            "src.agents.email_agent",
+            "src.agents.email",
+            "src.agents.specialists",
+            "src.composition",
+            "src.services.identity.specialist",
         )
-        if result.returncode != 0:  # pragma: no cover - only if git is absent
-            pytest.skip("git unavailable")
-        assert result.stdout.strip() == "", (
-            "adding a specialist should not have changed orchestration, but "
-            f"these files differ from HEAD: {result.stdout.strip()}"
-        )
+        forbidden_names = {
+            "EmailAgent", "JobOpportunityAnalyzer", "SpecialistContext",
+            "SpecialistWiring", "SpecialistRuntime", "SPECIALISTS",
+            "build_email_specialist", "available_specialists", "wiring_for",
+            "build_manager", "build_runtime",
+        }
+        forbidden_strings = ("arthur", "email_agent", SECOND_KEY, "testing specialist")
+
+        for relative in ORCHESTRATION:
+            path = REPO_ROOT / relative
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            docstrings = docstring_nodes(tree)
+
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.module:
+                    for module in forbidden_modules:
+                        assert not node.module.startswith(module), (relative, node.module)
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        for module in forbidden_modules:
+                            assert not alias.name.startswith(module), (relative, alias.name)
+                if isinstance(node, ast.Name):
+                    assert node.id not in forbidden_names, (relative, node.id)
+                if isinstance(node, ast.Attribute):
+                    assert node.attr not in forbidden_names, (relative, node.attr)
+                # A live string naming an agent is a dependency on that agent.
+                # Prose may name one; code may not.
+                if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                    if id(node) in docstrings:
+                        continue
+                    for name in forbidden_strings:
+                        assert name not in node.value.lower(), (relative, node.value[:40])
+
+    def test_orchestration_still_works_through_the_abstractions(self):
+        """The other half, so the rule above cannot drift into "import nothing".
+
+        Forbidding specialist *implementations* is only correct while the
+        abstractions remain. The Manager reaches agents through BaseAgent and
+        finds them through AgentRegistry; if those disappeared, orchestration
+        would not have become purer, it would have stopped orchestrating.
+        """
+        source = (REPO_ROOT / "src" / "manager" / "manager.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        imported = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                imported.update(alias.name for alias in node.names)
+
+        assert "BaseAgent" in imported
+        assert "AgentRegistry" in imported
 
     def test_the_entry_points_know_no_specialist(self):
         """The sharper form of the claim the byte-freeze used to make.

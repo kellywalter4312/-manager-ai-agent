@@ -54,20 +54,54 @@ from src.agents.specialists import (
 from src.agents.base_agent import BaseAgent
 from src.agents.tools.toolset import ToolSet
 from src.agents.brain import SpecialistBrain
+from src.channels.channel import Channel, VoiceChannel
+from src.channels.speech import SpeechAdapter
 from src.config.settings import Settings
+from src.conversation.conversation import (
+    Conversation,
+    Participant,
+    ParticipantKind,
+)
+from src.manager.activity_session import ActivityBrainOps
 from src.manager.brain import ManagerBrain
 from src.manager.brain_factory import build_brain
 from src.manager.manager import ManagerAgent
 from src.manager.manager_skills import ManagerSkills
+from src.manager.memory_policy import ManagerMemoryPolicy
 from src.manager.router import Router
 from src.manager.router_factory import build_router
+from src.providers.avatar import AvatarProvider
+from src.providers.avatar_factory import build_avatar_provider
+from src.providers.environment import EnvironmentProvider
+from src.providers.environment_factory import build_environment_provider
 from src.providers.base import LLMProvider
+from src.providers.calendar_events import CalendarEventProvider
+from src.providers.calendar_events_factory import build_calendar_event_provider
+from src.providers.celebration import CelebrationProvider
+from src.providers.celebration_factory import build_celebration_provider
+from src.providers.communication import CommunicationProvider
+from src.providers.communication_factory import build_communication_provider
+from src.providers.connection import Connection
+from src.providers.connection_factory import build_connection
 from src.providers.factory import build_provider
+from src.services.credentials.account import CredentialStore, ProviderAccount
+from src.providers.knowledge import KnowledgeSourceProvider
+from src.providers.knowledge_factory import build_knowledge_provider
+from src.providers.live_info import LiveInfoProvider
+from src.providers.live_info_factory import build_live_info_provider
+from src.providers.media.factory import MediaTools, build_media
+from src.providers.speech_factory import build_speech
 from src.registry.agent_registry import AgentRegistry
 from src.services.email.mailbox import Mailbox
 from src.services.identity.identity import AgentIdentity, load_identity
+from src.services.identity.presence import PresenceRegistry
 from src.services.memory.day import Calendar
-from src.services.memory.factory import EMAIL_AGENT, build_memory
+from src.services.memory.factory import (
+    EMAIL_AGENT,
+    MANAGER,
+    adopt_legacy_manager_memory,
+    build_memory,
+)
 from src.services.profile.profile import UserProfile
 from src.services.schedule.schedule import UserSchedule
 from src.utils.logging import get_logger
@@ -133,6 +167,103 @@ class Runtime:
     # user's profile does not.
     specialists: Mapping[str, SpecialistRuntime]
 
+    # How this installation can hear and speak, decided once, here.
+    #
+    # The *adapter* belongs in Runtime and the *channel* does not, and the line
+    # between them is lifetime. An adapter holds an engine and a record of what
+    # that engine last did; it has no Manager and nothing per-run, so building
+    # it once and sharing it is correct in exactly the way sharing the provider
+    # is. A Channel holds a Manager, and the Manager is rebuilt every heartbeat
+    # tick - a Channel kept here would go on pointing at the first tick's
+    # Manager forever, which is the same trap SpecialistRuntime documents for
+    # specialists and their memories. See build_channel below.
+    #
+    # Nothing here knows how speech is done. Runtime holds the interface; what
+    # is behind it is a composition decision, made by build_speech from
+    # settings.speech (Stage 10) - "none" (NoSpeech, honestly UNAVAILABLE) is
+    # the only shipped option today, and remains what a default configuration
+    # gets, exactly as an unconfigured provider stays "null".
+    speech: SpeechAdapter
+
+    # Stage 14: where Alfred's current-information tool actually reaches
+    # for real evidence, selected by name exactly as `provider` above -
+    # see build_live_info_provider. "null" (honestly empty) is what an
+    # unconfigured installation gets, the same default `provider` itself
+    # already uses.
+    live_info: LiveInfoProvider
+
+    # Creative-media checkpoint: the real narration/image/video
+    # collaborators media_production is built from, selected by name
+    # exactly as `live_info` above already is. "null" (honestly
+    # unavailable) is what an unconfigured installation gets; "local"
+    # is genuine, offline production - no vendor credential, ever.
+    media: MediaTools
+
+    # Stage 15: where Alfred's governed communication tools actually
+    # reach for a real phone/messaging connection, selected by name
+    # exactly as `live_info` above already is. "null" (honestly
+    # unavailable) is what an unconfigured installation gets.
+    communication: CommunicationProvider
+
+    # Stage 18: where Alfred's knowledge tool reaches for the documents,
+    # books and notes the *user* supplied - selected by name exactly as
+    # `live_info` above already is, and a deliberately separate axis from
+    # it. One says what the world looks like now; this says what the
+    # person actually handed over. An installation can have either, both
+    # or neither, and all four states are describable rather than guessed.
+    knowledge: KnowledgeSourceProvider
+
+    # Stage 12 closure: the single, shared source every agent's own
+    # milestone-celebration presentation reaction comes from, selected by
+    # name exactly as every provider above already is. "default"
+    # (DefaultCelebrationProvider, genuinely working - see that module's
+    # own docstring for why there is no "null" variant) is what an
+    # unconfigured installation gets, unlike live_info/communication's own
+    # honestly-empty defaults.
+    celebration: CelebrationProvider
+
+    # Stage 12 closure: where Alfred's temporal-event engine reaches for
+    # named, recurring calendar occasions, selected by name exactly as
+    # every provider above already is. "default" (genuinely computed,
+    # not a placeholder - see that module's own docstring) is what an
+    # unconfigured installation gets, the same choice celebration above
+    # already makes.
+    calendar_events: CalendarEventProvider
+
+    # Stage 16: where Alfred's governed connection tools reach for a
+    # real external, authenticated service (Gmail today; a future
+    # calendar/commerce/travel connection tomorrow, added through this
+    # exact same seam), selected by name exactly as every provider
+    # above already is. "null" (honestly unavailable) is what an
+    # unconfigured installation gets - unlike celebration/calendar_events,
+    # a connection is consequential, the same reasoning communication
+    # above already follows.
+    connection: Connection
+
+    # Stage 17: where every agent's presence reaches for its avatar
+    # catalog and deterministic default, selected by name exactly as
+    # every provider above already is. One shared provider, never one
+    # per agent - the identical reasoning celebration above already
+    # follows.
+    avatar_provider: AvatarProvider
+
+    # Universal Ecosystem checkpoint: where an agent's presence reaches
+    # for its scene description, selected by name exactly as
+    # avatar_provider above already is, and a genuinely independent
+    # axis from it - see src/providers/environment.py's own docstring.
+    # "default" (deterministic, no-network) is what an unconfigured
+    # installation gets, the same choice avatar_provider already makes.
+    environment_provider: EnvironmentProvider
+
+    # Stage 17.2: the one live, in-process record of what a real caller
+    # currently has genuine evidence of an agent doing (today: SPEAKING,
+    # written only by VoiceChannel.deliver() around a real, blocking
+    # speak() call). Not a second Memory - it remembers nothing once a
+    # state ends. One shared instance so the channel that asserts a
+    # state and the Control Center that reads it are looking at the
+    # same signal, the way Runtime already shares one avatar_provider.
+    presence_registry: PresenceRegistry
+
     # ------------------------------------------------------------------
     # Named accessors for the one specialist this project ships.
     #
@@ -154,6 +285,16 @@ class Runtime:
         """A short line for a startup banner. Never prints a credential."""
         return (
             f"provider={self.provider.name} "
+            f"speech={self.speech.name} "
+            f"live_info={self.live_info.name} "
+            f"media={self.media.name} "
+            f"communication={self.communication.name} "
+            f"knowledge={self.knowledge.name} "
+            f"celebration={self.celebration.name} "
+            f"calendar_events={self.calendar_events.name} "
+            f"connection={self.connection.name} "
+            f"avatar_provider={self.avatar_provider.name} "
+            f"environment_provider={self.environment_provider.name} "
             f"router={type(self.router).__name__} "
             f"brain={type(self.manager_brain).__name__} "
             f"specialists={','.join(s.name for s in self.specialists.values())} "
@@ -162,7 +303,16 @@ class Runtime:
         )
 
 
-def build_runtime(settings: Settings) -> Runtime:
+def build_runtime(
+    settings: Settings,
+    *,
+    accounts: CredentialStore | None = None,
+    specialist_accounts: Mapping[str, ProviderAccount] | None = None,
+    video_generation_account: ProviderAccount | None = None,
+    speech_account: ProviderAccount | None = None,
+    communication_account: ProviderAccount | None = None,
+    connection_adapter_version: str = "1",
+) -> Runtime:
     """Build everything that outlives a single run.
 
     Raises rather than degrades. A timezone that cannot be resolved or a
@@ -175,10 +325,57 @@ def build_runtime(settings: Settings) -> Runtime:
     policy about whether a combination of settings makes sense, and the entry
     points already run it before anything is built; calling it again here would
     make constructing a system for inspection illegal.
+
+    ``accounts``/``specialist_accounts`` (Phase 1.5) are optional, additive
+    seams onto the credential layer (``src/services/credentials/account.py``):
+    when given, ``accounts.active(settings.provider)`` names exactly which
+    account authorises the Manager's own provider, and
+    ``specialist_accounts[key]`` names one for the specialist registered
+    under ``key``. ``video_generation_account`` (AI video-generation
+    checkpoint) is the identical seam applied to
+    ``build_media``'s own AI video-generation vendor, entirely
+    independent of which LLM account authorises the Brain.
+    ``speech_account`` (Universal Ecosystem checkpoint) is the same
+    seam again, applied to whichever of ``build_speech``'s own engines
+    currently needs a credential - Runtime holds no opinion about which
+    that is (see ``build_speech``'s own module for that).
+    ``communication_account`` (universal provider/connection management
+    repair) is the identical seam applied to
+    ``build_communication_provider``'s own backend - closing the one
+    real asymmetry CHECK found between this category and its siblings:
+    every other credentialed category already had this parameter, and
+    this one did not, purely because no credentialed communication
+    backend existed yet to need it. None of the five is required -
+    every existing caller that omits all of them reproduces this
+    function's prior, environment-based behaviour exactly, unchanged.
+
+    **What this parameter does not do.** Accepting
+    ``communication_account`` here is the construction-time half of the
+    repair; it does not by itself make a Control Center account
+    selection take effect on an already-running process; see
+    ``scripts/control_center.py::build``'s own docstring for the other
+    half (loading the persisted store and passing it in here), and that
+    module's own note on the live-activation gap that remains.
+
+    Each specialist's provider is its own, independently constructed
+    ``build_provider(...)`` call - never the Manager's own provider object
+    reused. Before Phase 1.5 this loop passed the single ``provider`` built
+    above to every specialist brain, which meant Alfred and every
+    specialist shared one literal ``LLMProvider`` instance (and therefore
+    one credential) by construction, not merely by today's coincidence of
+    there being only one configured account - the opposite of the
+    independence this project's own architecture already documents for
+    Brain, Memory and Voice. A specialist now receiving its own instance
+    (defaulting to the identical Settings/environment-resolved credential
+    when no override is given, so today's single-account behaviour is
+    byte-for-byte unchanged) is what makes a future specialist's own,
+    independently authorised account a matter of passing one in here,
+    never a change to Brain, Memory, Voice or any agent's own code.
     """
     calendar = Calendar.configured(settings.timezone)
     identity = load_identity(settings.identity_path)
-    provider = build_provider(settings)
+    manager_account = accounts.active(settings.provider) if accounts is not None else None
+    provider = build_provider(settings, account=manager_account)
 
     # One pass over the registry: every specialist gets its identity resolved
     # and its own brain built from its own domain. The loop is what makes a
@@ -190,9 +387,19 @@ def build_runtime(settings: Settings) -> Runtime:
             wiring=(wiring := wiring_for(
                 key, fallback_name=key, identities_dir=settings.identities_dir
             )),
-            # Its own brain, from its own domain. Two specialists get two
-            # brains; neither gets the Manager's.
-            brain=build_specialist_brain(settings, provider, wiring.brain_domain),
+            # Its own brain, from its own domain, built from its own,
+            # independently constructed provider. Two specialists get two
+            # brains and two provider instances; neither gets the
+            # Manager's own.
+            brain=build_specialist_brain(
+                settings,
+                build_provider(
+                    settings,
+                    account=(specialist_accounts or {}).get(key),
+                ),
+                wiring.brain_domain,
+                personality=wiring.personality,
+            ),
             build=build,
         )
         for key, build in SPECIALISTS.items()
@@ -204,12 +411,122 @@ def build_runtime(settings: Settings) -> Runtime:
         identity=identity,
         provider=provider,
         router=build_router(settings, provider),
-        manager_brain=build_brain(settings, provider),
+        manager_brain=build_brain(settings, provider, identity.personality),
         interpreter=build_opportunity_interpreter(settings, provider),
         specialists=specialists,
+        # Selected by name from settings.speech (Stage 10), the same pattern
+        # build_provider already uses for the model - see
+        # src/providers/speech_factory.py. What matters is that the decision
+        # is made *here* rather than at a screen: before this, the Control
+        # Center constructed its own NoSpeech, so it reported a hardcoded fact
+        # rather than the system's.
+        speech=build_speech(settings, account=speech_account),
+        # Stage 14: selected by name from settings.live_info_provider,
+        # the identical pattern build_provider/build_speech already use -
+        # "null" (honestly empty) unless a real backend was deliberately
+        # configured.
+        live_info=build_live_info_provider(settings),
+        media=build_media(settings, video_generation_account=video_generation_account),
+        # Stage 15: selected by name from settings.communication_provider,
+        # the identical pattern live_info above already uses - "null"
+        # (honestly unavailable) unless a real connection was deliberately
+        # configured. Universal provider/connection management repair:
+        # now also accepts communication_account, the identical
+        # optional seam video_generation_account/speech_account already
+        # give their own categories above.
+        communication=build_communication_provider(settings, account=communication_account),
+        # Stage 18: selected by name from settings.knowledge_provider, the
+        # identical pattern live_info above already uses - "documents"
+        # (a local folder, honestly empty until the user puts something in
+        # it) is what an unconfigured installation gets.
+        knowledge=build_knowledge_provider(settings),
+        # Stage 12 closure: selected by name from settings.celebration_provider,
+        # the identical pattern every provider above already uses - "default"
+        # (genuinely working, not a placeholder) unless a future
+        # implementation is deliberately configured.
+        celebration=build_celebration_provider(settings),
+        # Stage 12 closure: selected by name from settings.calendar_event_provider,
+        # the identical pattern celebration above already uses.
+        calendar_events=build_calendar_event_provider(settings),
+        # Stage 16: selected by name from settings.connection_provider,
+        # the identical pattern communication above already uses -
+        # "null" (honestly unavailable) unless a real connection was
+        # deliberately configured. Full Alfred OS Ecosystem Evolution:
+        # connection_adapter_version is the identical optional,
+        # additive seam every other account parameter above already is,
+        # applied to which real *implementation* a builder with more
+        # than one (today, only Gmail) should use - never the
+        # account/credential, which stays exactly what `accounts` above
+        # already governs.
+        connection=build_connection(settings, adapter_version=connection_adapter_version),
+        # Stage 17: selected by name from settings.avatar_provider, the
+        # identical pattern celebration above already uses.
+        avatar_provider=build_avatar_provider(settings),
+        # Universal Ecosystem checkpoint: selected by name from
+        # settings.environment_provider, the identical pattern
+        # avatar_provider above already uses - a genuinely independent
+        # axis, never derived from it.
+        environment_provider=build_environment_provider(settings),
+        # Stage 17.2: one fresh, empty registry per runtime - never
+        # configured by settings, because there is nothing to choose
+        # between (this is not a provider seam; it is in-process,
+        # per-run runtime state, the same non-configurable role
+        # AgentRegistry() already plays a few lines below).
+        presence_registry=PresenceRegistry(),
     )
     logger.info("runtime ready: %s", runtime.describe())
     return runtime
+
+
+def build_channel(runtime: Runtime, manager: ManagerAgent) -> Channel:
+    """The door this installation offers onto one assembled Manager.
+
+    Per-run, like the Manager it wraps, and for the same reason: a channel
+    built once would keep answering through whichever Manager happened to exist
+    when it was made.
+
+    Always a VoiceChannel, which is not a claim that voice works. A
+    VoiceChannel with no usable engine *is* a text channel - it falls back to
+    typing to receive, still prints every answer, and reports spoken=False -
+    and building one unconditionally means the day an engine is installed,
+    nothing here changes. Choosing between two channel types based on whether
+    speech happens to be available would put a decision in the composition root
+    that VoiceChannel already makes, better, at the point of use.
+
+    Stage 17.2: the same ``runtime.presence_registry`` every agent's
+    presence is already read through (see ``ControlCenter``) is handed
+    to the channel too, so a real ``deliver()`` call and a real
+    snapshot read are looking at one shared, live signal - never two.
+    """
+    return VoiceChannel(manager, speech=runtime.speech, presence=runtime.presence_registry)
+
+
+def build_conversation(manager: ManagerAgent, person: str = "you") -> Conversation:
+    """One room, opened with the person and the Manager in it.
+
+    Per-run, like the Manager and the channel: a conversation is the record of
+    *this* session, and one built once and shared would carry a previous run's
+    transcript into the next.
+
+    **Specialists are not put in the room here, and that is the design.** A
+    conversation is not a roster - it is who is actually taking part. Alfred
+    brings a specialist in when the work needs one, so the room starts as a
+    person and their Manager, and grows. Pre-populating it from the registry
+    would make "bring Research into this" meaningless, because Research would
+    already have been sitting there.
+
+    Nothing about how a specialist is built is known here or there. A
+    participant is a name and a kind, so joining costs a name.
+    """
+    return Conversation(
+        participants=(
+            Participant(person, ParticipantKind.PERSON),
+            Participant(
+                manager.own_skills.name if manager.own_skills else "manager",
+                ParticipantKind.AGENT,
+            ),
+        )
+    )
 
 
 def build_manager(
@@ -219,6 +536,10 @@ def build_manager(
     profile: UserProfile | None,
     schedule: UserSchedule | None = None,
     tools: ToolSet | None = None,
+    # What each specialist may reach, keyed by its technical key. Separate from
+    # ``tools`` above, which equips the Manager: an integration granted to
+    # Alfred is not thereby granted to anybody else, and vice versa.
+    specialist_tools: Mapping[str, ToolSet] | None = None,
     fetch_limit: int | None = None,
     extra_agents: Sequence[BaseAgent] = (),
 ) -> ManagerAgent:
@@ -240,6 +561,96 @@ def build_manager(
     is what lets a persistent store re-read its file each tick.
     """
     registry = AgentRegistry()
+
+    # The Manager's memory owner is his stable technical key, MANAGER -
+    # never runtime.identity.name, which is only whatever IDENTITY.md's
+    # declared name currently is ("Alfred", today). A specialist's store is
+    # deliberately still selected by its own declared name - see
+    # src/agents/specialists.py and ARCHITECTURE.md's entry on this: that is
+    # an honest, tested, *different* policy this composition root does not
+    # change, made for a specialist's own reasons. The Manager gets the
+    # stable rule because he already has an unused stable key sitting right
+    # here for exactly this purpose, and because he is the one agent whose
+    # continuity this whole system is least able to afford losing by
+    # accident. adopt_legacy_manager_memory() is the one-time bridge: if a
+    # store already exists under an old, display-name-derived file (most
+    # likely "alfred.json", from before this rule existed), it is carried
+    # forward into the stable file the first time this runs after the fix -
+    # never merged into or overwritten once a real "manager.json" exists.
+    adopt_legacy_manager_memory(runtime.settings, runtime.identity.name)
+
+    # Built here, as local values, rather than inside the ManagerAgent(...)
+    # call below - ManagerSkills needs a bound way to read/forget this
+    # Manager's own records (Stage 12) before the ManagerAgent that would
+    # normally own the Memory exists. Passed to both collaborators below,
+    # so there is exactly one Memory and one MemoryPolicy instance for
+    # this Manager, never two. Writing is deliberately not threaded
+    # through to ManagerSkills - see CapabilityRequest's own docstring:
+    # scripts/exchange.py already retains what a person asks to be
+    # remembered, through this exact policy, on every real turn.
+    manager_memory = build_memory(runtime.settings, MANAGER)
+    manager_memory_policy = ManagerMemoryPolicy()
+
+    # Built as a local rather than inline, so its governed write path
+    # (``retain``) can be bound once the ManagerAgent that owns the real
+    # one exists - see the bind_retain call just below. Everything else
+    # about this construction is unchanged.
+    own_skills = ManagerSkills(
+        runtime.identity,
+        roster=registry.all_agents,
+        user=profile,
+        # A second per-run document about the same person. Passed here and
+        # never held in Runtime: a schedule read once at startup would
+        # leave every later heartbeat tick reasoning about a week the user
+        # has since changed, which is the same trap the profile avoids.
+        schedule=schedule,
+        # What Alfred is equipped to do himself. Empty until a caller
+        # asks for something: this function is the shared composition
+        # root every test in this project also builds a Manager
+        # through, so its own default stays the conservative,
+        # long-established one (see ManagerSkills.__init__). The real
+        # production conversation path - scripts/control_center.py's
+        # own build(), reused by scripts/serve_ui.py - is what
+        # actually equips Alfred with the live_information tool,
+        # backed by runtime.live_info; a caller here still gets
+        # exactly what it asks for, and nothing added behind its back.
+        tools=tools,
+        # The same manager_brain given to ManagerAgent below - one
+        # canonical Brain, never a second instance - so an open-ended
+        # request Alfred takes on himself can reach genuine reasoning.
+        # Bound rather than the brain object itself, matching every
+        # other narrow collaborator ManagerSkills receives.
+        converse=runtime.manager_brain.converse,
+        # Files/Documents completion: the same canonical Brain's own
+        # visual-reasoning question, bound the identical way - never a
+        # Tool holding an LLMProvider directly.
+        analyze_image=runtime.manager_brain.analyze_image,
+        # Final Pre-Phase Interaction Completion: the same canonical
+        # Brain's own ambiguity/guided-activity questions, bundled -
+        # never a second Brain, never the brain object itself. See
+        # ActivityBrainOps's own docstring for why this is four bound
+        # callables rather than the brain.
+        activity_brain=ActivityBrainOps.from_brain(runtime.manager_brain),
+        # Stage 12: the exact same store ManagerAgent itself uses
+        # below - never a second memory.
+        recall=manager_memory.recall,
+        forget=manager_memory.forget,
+        # Stage 12 closure: the single, Settings-selected provider every
+        # agent's own celebration reaction now comes from, in place of
+        # each agent silently constructing its own DefaultCelebrationProvider.
+        celebration=runtime.celebration,
+        # Stage 16: read-only status access to Alfred's own configured
+        # connection - see CapabilityRequest's own docstring for why
+        # only connected_action ever reaches request.tools.invoke() to
+        # actually execute anything through it.
+        connection=runtime.connection,
+        # Foundation Repair #1: the same real, timezone-configured
+        # Calendar given to ManagerAgent below - one canonical clock,
+        # never a second one - so current_datetime answers "what day is
+        # it" from this person's actual local day, not bare UTC.
+        calendar=runtime.calendar,
+    )
+
     manager = ManagerAgent(
         registry=registry,
         router=runtime.router,
@@ -249,29 +660,17 @@ def build_manager(
         # straight through this function; the orchestrator accountable for the
         # mission simply never saw it. It arrives per call, like the memory
         # beside it, so an edit to USER.md takes effect on the next tick.
-        own_skills=ManagerSkills(
-            runtime.identity,
-            roster=registry.all_agents,
-            user=profile,
-            # A second per-run document about the same person. Passed here and
-            # never held in Runtime: a schedule read once at startup would
-            # leave every later heartbeat tick reasoning about a week the user
-            # has since changed, which is the same trap the profile avoids.
-            schedule=schedule,
-            # What Alfred is equipped to do himself. Empty until a real tool
-            # exists: the architecture makes room for one and refuses to
-            # pretend any is installed, so an ordinary request is answered
-            # with the name of the missing capability rather than a guess.
-            tools=tools,
-        ),
-        # The Manager's store is selected by the Manager's own declared name,
-        # for the same reason the specialist's is selected by his. An agent
-        # that registers under one name and remembers under another is the
-        # divergence this milestone exists to make impossible, and the Manager
-        # is not exempt from it.
-        memory=build_memory(runtime.settings, runtime.identity.name),
+        own_skills=own_skills,
+        memory=manager_memory,
+        memory_policy=manager_memory_policy,
         calendar=runtime.calendar,
     )
+    # Stage 12 addition: the one governed write path a capability handler
+    # needing to *write* (record_this, milestone_recognition) reaches
+    # through CapabilityRequest.retain - bound here, once, to the real
+    # ManagerAgent.retain, never a second implementation of it. This is
+    # the only place this call happens.
+    own_skills.bind_retain(manager.retain)
 
     # Every registered specialist, built and registered the same way. This
     # loop is the whole of Step 3: before it, adding a specialist meant
@@ -288,6 +687,17 @@ def build_manager(
                 SpecialistContext(
                     settings=runtime.settings,
                     calendar=runtime.calendar,
+                    # What this specialist may reach in the world, keyed by its
+                    # own technical key so equipping one agent equips exactly
+                    # that agent. There is deliberately no way to grant
+                    # something to "all specialists": an integration that
+                    # reached every agent because one of them needed it would
+                    # make "who can read that?" a question nobody could answer.
+                    #
+                    # Empty when nobody equipped it, which is the honest
+                    # default - the agent then names what it cannot do rather
+                    # than guessing.
+                    tools=(specialist_tools or {}).get(entry.key) or ToolSet(),
                     provider=runtime.provider,
                     wiring=entry.wiring,
                     brain=entry.brain,
@@ -297,6 +707,10 @@ def build_manager(
                     mailbox=mailbox,
                     fetch_limit=fetch_limit,
                     interpreter=runtime.interpreter,
+                    # Stage 12 closure: the same single, shared provider
+                    # own_skills above receives - one CelebrationProvider
+                    # instance for the whole system, never one per agent.
+                    celebration=runtime.celebration,
                 )
             )
         )

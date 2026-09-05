@@ -66,6 +66,7 @@ from src.core.contracts import (
     TaskResult,
     TaskStatus,
 )
+from src.events.events import EventLog, delegation
 from src.manager.assessor import Assessor, ContractAssessor
 from src.manager.brain import BrainDecision, ManagerBrain, NullBrain
 from src.manager.memory_policy import ManagerMemoryPolicy, MemoryCategory
@@ -74,7 +75,7 @@ from src.registry.agent_registry import AgentRegistry
 from src.services.memory.day import Calendar, DayView
 from src.services.memory.ephemeral import EphemeralMemory
 from src.services.memory.memory import Memory, MemoryRecord
-from src.services.memory.policy import MemoryPolicy
+from src.services.memory.policy import MemoryPolicy, PolicyVerdict
 from src.services.memory.query import distinctive_terms
 from src.utils.logging import get_logger, summarize, task_logger
 
@@ -143,6 +144,7 @@ class ManagerAgent:
         memory: Memory | None = None,
         memory_policy: MemoryPolicy | None = None,
         calendar: Calendar | None = None,
+        events: EventLog | None = None,
     ) -> None:
         # Every collaborator is injected but optional. Tests can substitute any
         # of them; ordinary callers get working defaults and need not care.
@@ -200,6 +202,21 @@ class ManagerAgent:
         # only which records count as *today* when context is recalled.
         self.calendar = calendar if calendar is not None else Calendar.utc()
 
+        # What observably happened, as distinct from what was worth retaining.
+        #
+        # A collaborator on the same terms as the others: injected, optional,
+        # with a working default. The default is a real bounded log rather than
+        # a null object, for the reason the memory comment above gives -
+        # something that accepted a record and silently discarded it would make
+        # "nothing happened" and "nothing was recorded" indistinguishable.
+        #
+        # Deliberately not a second memory. An EventLog is bounded, in-process
+        # and dies with this Manager; memory is admitted by policy and may
+        # persist. They answer different questions - "what happened?" and "what
+        # should change a future decision?" - and an event that turned out to be
+        # knowledge would still have to go through the policy to be remembered.
+        self.events = events if events is not None else EventLog()
+
     def register_agent(self, agent: BaseAgent) -> None:
         """Convenience passthrough so callers can set up a Manager in one place."""
         self.registry.register(agent)
@@ -208,15 +225,27 @@ class ManagerAgent:
     # The DATA loop
     # ------------------------------------------------------------------
 
-    def handle_task(self, task: Task) -> TaskResult:
-        """Run the full D -> A -> T -> A cycle for one task."""
+    def handle_task(self, task: Task, addressed: str | None = None) -> TaskResult:
+        """Run the full D -> A -> T -> A cycle for one task.
+
+        ``addressed`` is who the person was speaking to, when they were
+        speaking to somebody in particular. It is *context about the request*,
+        not a second way into the system: everything below it is unchanged, so
+        an addressed task is assembled, executed, assessed, remembered and
+        announced exactly like any other. Only the D step differs, and only in
+        where the answer comes from.
+
+        Deciding what an address means is orchestration, which is why it is
+        decided here rather than in whatever collected the words. A channel or
+        a room that could pick an agent would be a second router.
+        """
         # One adapter for the whole cycle: every line below is automatically
         # stamped with this task's id, so the four phases can be read as a
         # single story even when many tasks are interleaved.
         log = task_logger(logger, task.id)
         log.info("received: %s", summarize(task.description))
 
-        decision = self.diagnose(task)
+        decision = self.decide(task, addressed)
         if decision is None:
             log.warning(
                 "D: no match among %d registered agent(s)", len(self.registry)
@@ -255,11 +284,143 @@ class ManagerAgent:
                 "A: %s from '%s' - %s", verdict.status.value, agent.name, verdict.error
             )
 
-        # The "useful outcome? -> MEMORY" step. It runs after assessment
-        # because the assessment is what decides whether the outcome was
-        # meaningful, and it cannot change what is returned below.
+        # Two records of the same moment, answering different questions.
+        #
+        #   event   what observably happened - every real delegation
+        #   memory  what should change a future decision - if policy admits it
+        #
+        # Both run after assessment, because until a result is assessed there
+        # is nothing truthful to say about it, and neither can change what is
+        # returned below.
+        self._record_delegation_event(decision, verdict)
         self._remember_delegation(task, verdict)
         return verdict
+
+    def _record_delegation_event(
+        self, decision: RoutingDecision, verdict: TaskResult
+    ) -> None:
+        """Note that work went to somebody else, and on what reasoning.
+
+        Raised here because this is where it happened. A delegation is an
+        orchestration act - the Manager decided this work was better done by
+        another agent - and only the Manager knows it occurred. Somewhere
+        downstream noticing that a result carries another agent's name would be
+        an inference about the decision rather than a report of it, and the
+        first time the two disagreed nobody could say which was real.
+
+        Only a genuine handover. Work the Manager took on itself is not a
+        delegation, and raising one for it would make the record of "times
+        Alfred handed something over" quietly wrong - the same distinction
+        _remember_delegation already draws through handled_it_myself.
+
+        Nothing about any particular specialist is known here. The name comes
+        from the result and the reasoning from the router's own decision, so
+        this method cannot tell one specialist from another - and must not be
+        able to.
+
+        Never raises. Recording that something happened must not change whether
+        it happened, so an observability failure is contained the same way
+        take_action contains a failing agent.
+        """
+        if self.handled_it_myself(verdict) or not verdict.agent_name:
+            return
+        try:
+            self.events.record(
+                delegation(
+                    manager=self.own_skills.name if self.own_skills else "manager",
+                    specialist=verdict.agent_name,
+                    reason=decision.reason,
+                )
+            )
+        except Exception:  # noqa: BLE001 - observing must not break the work
+            logger.debug("could not record a delegation event", exc_info=True)
+
+    def decide(self, task: Task, addressed: str | None = None) -> RoutingDecision | None:
+        """D - Who should handle this task, taking any address into account.
+
+        Four ways to arrive at one decision, and they are not four routers:
+
+            addressed   the person named somebody. That is a better answer to
+                        "who should handle this" than a word-overlap score, so
+                        it is used - and it is used *as a decision*, feeding
+                        the same assemble/act/assess loop as any other.
+
+            claimed     one of the Manager's own capabilities recognised this
+                        task's *shape* (own_skills.claims(task) - see that
+                        method's own docstring). A specialist's declared
+                        capability words are a coarse, incidental signal
+                        compared to Alfred's own capability explicitly
+                        recognising its own request, so this is checked
+                        before the router's word-overlap score - the same
+                        priority ``addressed`` already has, for the same
+                        reason.
+
+            scored      the router scores declared capabilities, exactly as
+                        before.
+
+            unclaimed   no specialist's declared capabilities matched anything
+                        in the task. The Manager is the default owner of
+                        unclaimed work - a property of the orchestrator role,
+                        never a name - so own_skills takes it when one is
+                        registered, rather than the request dying here with
+                        nothing to show for it.
+
+        An address is honoured only when it names a *registered* agent. A name
+        the registry does not know is not turned into an agent - nothing here
+        creates a participant, and inventing one to satisfy a sentence would be
+        the system agreeing that somebody exists because they were mentioned.
+        When that happens the address is dropped, the router decides, and the
+        reason below says so, so a person can see that their address did not
+        land rather than wondering why somebody else replied.
+
+        Note the Manager still decides. Being addressed does not let a caller
+        reach an agent directly; it lets a caller tell the Manager who they
+        were talking to.
+        """
+        if addressed:
+            agent = self.registry.get(addressed)
+            if agent is not None:
+                return RoutingDecision(
+                    agent_name=agent.name,
+                    score=1,
+                    reason="addressed directly by name",
+                )
+            logger.info(
+                "'%s' was addressed but is not registered; routing normally",
+                addressed,
+            )
+        if self.own_skills is not None:
+            claims = getattr(self.own_skills, "claims", None)
+            if claims is not None and claims(task):
+                return RoutingDecision(
+                    agent_name=self.own_skills.name,
+                    score=1,
+                    reason="claimed by one of the Manager's own capabilities",
+                )
+        decision = self.diagnose(task)
+        if decision is not None:
+            return decision
+        return self._unclaimed_work_decision()
+
+    def _unclaimed_work_decision(self) -> RoutingDecision | None:
+        """Who takes work no specialist's declared capabilities matched.
+
+        None when there is no own_skills to fall back to - a bare
+        ManagerAgent with no Manager capabilities registered at all, which
+        preserves diagnose()'s exact prior meaning for that case (see
+        test_manager.py's own fixture, which has none). Score is 1, the
+        same sentinel the addressed-by-name branch above already uses for
+        a decision that is not a word-overlap strength: this one is not
+        a capability match either, it is "nobody more specific claimed
+        this."
+        """
+        if self.own_skills is None:
+            return None
+        return RoutingDecision(
+            agent_name=self.own_skills.name,
+            score=1,
+            reason="no specialist's declared capabilities matched; the Manager takes unclaimed work by default",
+        )
 
     def diagnose(self, task: Task) -> RoutingDecision | None:
         """D - Ask the router which agent should handle this task."""
@@ -353,6 +514,28 @@ class ManagerAgent:
 
         log.info("brain: %s", decision.describe())
         return decision
+
+    def retain(self, record: MemoryRecord) -> PolicyVerdict:
+        """Offer one record to this Manager's memory. The policy decides.
+
+        **The one governed write path.** Every route into this Manager's store
+        goes through here, so "what may Alfred remember?" has a single answer
+        and a single place to read it. A second path that wrote directly would
+        make the policy advisory, which is the same as not having one.
+
+        The policy is the authority, not this method: a refused record is
+        returned with the reason it gave, and the Manager does not get to
+        overrule his own admission rules. The verdict comes back rather than
+        being swallowed so a caller can say *why* something was not kept.
+
+        Writes into **this agent's** store and no other. There is no owner
+        argument and no way to name a different memory, which is what stops a
+        continuity path becoming a way to write into somebody else's.
+        """
+        verdict = self.memory_policy.evaluate(record)
+        if verdict.allowed:
+            self.memory.remember(record)
+        return verdict
 
     def recall_context(
         self, task: Task, limit: int = MEMORY_CONTEXT_LIMIT
@@ -555,15 +738,10 @@ class ManagerAgent:
 
             record = self._delegation_record(task, verdict, outcome)
 
-            # The policy is the authority, not this method. A record it refuses
-            # is dropped with the reason it gave - the Manager does not get to
-            # overrule its own admission rules.
-            permitted = self.memory_policy.evaluate(record)
+            permitted = self.retain(record)
             if not permitted.allowed:
                 log.info("not remembered: %s", permitted.reason)
                 return
-
-            self.memory.remember(record)
             log.debug("remembered %s", record.describe())
 
         except Exception as exc:  # noqa: BLE001 - deliberate boundary catch

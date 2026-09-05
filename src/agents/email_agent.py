@@ -28,8 +28,14 @@ from src.agents.tools.toolset import ToolSet
 from src.agents.email.analyzers import Analyzer, JobOpportunityAnalyzer
 from src.core.contracts import FINDINGS_KEY, AgentSpec, Task, TaskResult, tokenize
 from src.services.email.mailbox import Mailbox, MailboxError, Outbox
+from src.providers.celebration import CelebrationProvider
+from src.providers.default_celebration_provider import DefaultCelebrationProvider
+from src.services.memory.capture import DEFAULT_PURPOSE as DEFAULT_CAPTURE_PURPOSE
+from src.services.memory.capture import build_recording, capture_intent
 from src.services.memory.memory import Memory, MemoryRecord
 from src.services.identity.specialist import SpecialistIdentity
+from src.services.identity.personality import AgentPersonality, default_personality
+from src.services.identity.voice import VoiceActivation, VoiceProfile, default_activation, default_voice
 from src.services.memory.policy import MemoryPolicy
 from src.utils.logging import get_logger, task_logger
 
@@ -72,6 +78,7 @@ class EmailAgent(CognitiveAgent):
         tools: ToolSet | None = None,
         calendar: Calendar | None = None,
         identity: SpecialistIdentity | None = None,
+        celebration: CelebrationProvider | None = None,
     ) -> None:
         """Every collaborator is injected - mailbox, analyzers, outbox.
 
@@ -103,6 +110,14 @@ class EmailAgent(CognitiveAgent):
             # calendars; it simply lets one be given to the specialist
             # machinery underneath, the same way brain and memory are.
             calendar=calendar,
+            # Defaulted here, not in CognitiveAgent: the shared base class
+            # imports nothing from src.providers (see
+            # test_specialist_cognition.py's own TestNothingLeaksOut), so
+            # the one real, generic implementation this project ships is
+            # constructed at this concrete specialist's own construction
+            # site instead - the identical place brain/memory defaults
+            # already live, one level up from where they are declared.
+            celebration=celebration if celebration is not None else DefaultCelebrationProvider(),
         )
 
         if not isinstance(mailbox, Mailbox):
@@ -166,6 +181,36 @@ class EmailAgent(CognitiveAgent):
         )
 
     @property
+    def voice(self) -> VoiceProfile:
+        """How this specialist sounds, from its own identity document.
+
+        Its own, and separate from the Manager's by construction: the profile
+        comes from this agent's document, and the fallback is keyed on this
+        agent's name. Nothing here can inherit another agent's voice, because
+        nothing here can see another agent.
+        """
+        declared = self._identity.voice if self._identity is not None else None
+        return declared if declared is not None else default_voice(self._name)
+
+    @property
+    def activation(self) -> VoiceActivation:
+        """How this specialist is addressed by voice, from its own identity
+        document. Its own, and separate from the Manager's by construction -
+        exactly as voice above is, and for the same reason.
+        """
+        declared = self._identity.activation if self._identity is not None else None
+        return declared if declared is not None else default_activation(self._name)
+
+    @property
+    def personality(self) -> AgentPersonality:
+        """How this specialist tends to communicate, from its own identity
+        document. Its own, and separate from the Manager's by construction -
+        exactly as voice/activation above are, and for the same reason.
+        """
+        declared = self._identity.personality if self._identity is not None else None
+        return declared if declared is not None else default_personality(self._name)
+
+    @property
     def identity(self) -> SpecialistIdentity | None:
         """The document this agent was named by, if it was named by one."""
         return self._identity
@@ -222,8 +267,37 @@ class EmailAgent(CognitiveAgent):
         log = task_logger(logger, task.id)
         tokens = tokenize(task.description)
 
+        # Stage 17.22: conversation before domain work. Everything below
+        # this line treats the task as a request about a mailbox, which is
+        # right for "check my inbox" and was being applied to "hello" and
+        # to "who are you" as well. The floor is CognitiveAgent's, shared
+        # with the orchestrator - see its own comment - and returns None
+        # for anything that is genuinely email work, so this method
+        # continues exactly as it did.
+        spoken = self.conversational_reply(task)
+        if spoken is not None:
+            log.debug("answered conversationally rather than as mailbox work")
+            return spoken
+
+        if capture_intent(task.description):
+            return self._capture(task)
+
         if tokens & SEND_WORDS:
             return self._refuse_to_send(task, log)
+
+        # 0.2 Final Surgical Pass: genuinely open-ended conversation, not
+        # domain work assumed by default. Before this line, a remark
+        # naming none of this agent's own vocabulary ("tell me about
+        # Napoleon", a joke, an ordinary follow-up) still fell straight
+        # into fetching and summarising the mailbox - real, live domain
+        # work, and the wrong answer to a request that was never about
+        # email at all. Checked here, and only here, because this agent
+        # is the one thing that actually knows what its own domain
+        # vocabulary is (self.spec.capabilities, computed from its own
+        # registered analyzers) - see CognitiveAgent.general_conversation
+        # for the one, reusable place the answer itself comes from.
+        if tokens and not (tokens & self.spec.capabilities):
+            return self.general_conversation(task)
 
         # A mission may narrow the work: skip messages already processed on an
         # earlier run, or cap how many to pull. Both ride in the Task payload
@@ -430,3 +504,32 @@ class EmailAgent(CognitiveAgent):
             )
         log.info("declined a send request: %s", error)
         return TaskResult.failure(task, self._name, error)
+
+    def _capture(self, task: Task) -> TaskResult:
+        """Stage 12 item 7: "Arthur, record this for later" - the
+        identical governed capture ManagerSkills offers Alfred, reused
+        rather than reimplemented. ``build_recording`` and ``self.retain``
+        are the same functions any other agent equipped this way would
+        call; only *which* memory (this agent's own) and *which*
+        category (``SpecialistMemoryCategory.RECORDING``) differ, because
+        those are genuinely this agent's own facts, never Alfred's.
+        """
+        record = build_recording(
+            task.description,
+            agent_name=self._name,
+            kind=SpecialistMemoryCategory.RECORDING.value,
+        )
+        if record is None:
+            return TaskResult.failure(task, self._name, "Record what, exactly?")
+
+        verdict = self.retain(record)
+        if not verdict.allowed:
+            return TaskResult.failure(
+                task, self._name, f"I couldn't record that: {verdict.reason}"
+            )
+
+        purpose = (record.context or {}).get("purpose", DEFAULT_CAPTURE_PURPOSE)
+        return TaskResult.success(
+            task, self._name, f"Recorded for {purpose}.",
+            payload={"handled_by": "record_this", "purpose": purpose},
+        )

@@ -24,6 +24,20 @@ Design, in order of importance:
   load path trust what it finds.
 - **A damaged file is moved aside, never overwritten.** Losing history is bad;
   losing it silently, with no artefact left to inspect, is worse.
+- **A recognized older schema is carried forward, not discarded.** Governed
+  evolution (src/core/versioning.py) lets a future SCHEMA_VERSION bump ship
+  with a registered Migration; an older file is then checkpointed and
+  upgraded in place rather than quarantined. A version nobody has written a
+  Migration for is still refused exactly as before - carrying data forward is
+  additive, and never replaces the refusal of a version this store cannot
+  trust.
+- **A store can also be adopted under a new, stable owner name.**
+  `adopt_legacy_store()` is the file-identity counterpart to a schema
+  Migration: not the JSON *shape* changing, but *which file* is
+  authoritative - the case a caller's own stable technical key was always
+  the intended owner, but an owner derived from something mutable (a
+  display name) was used instead. Checkpointed, atomic and idempotent by
+  the same rules as everything above.
 
 Deliberately absent, each a later decision rather than an oversight: any notion
 of a day, of "current" versus "historical", of summarising or consolidating, of
@@ -41,6 +55,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
+from src.core.versioning import MigrationChain, MigrationUnavailable
 from src.services.memory.ephemeral import EphemeralMemory
 from src.services.memory.memory import Memory, MemoryRecord, MemoryStoreError
 from src.utils.logging import get_logger
@@ -48,6 +63,15 @@ from src.utils.logging import get_logger
 logger = get_logger(__name__)
 
 SCHEMA_VERSION = 1
+
+# Every Migration this store currently knows how to run, keyed by the
+# version it starts from - see src/core/versioning.py. Empty today: schema 1
+# is still the only schema that has ever existed, so there is nothing to
+# migrate from yet. An older file therefore still hits exactly the same
+# quarantine path it hit before this seam existed (see _migrate_or_quarantine
+# below) - this constant is where a future schema bump registers its own
+# Migration, not a place that changes behavior by existing.
+MEMORY_MIGRATIONS: MigrationChain = MigrationChain()
 
 # Where a store lives when nobody says otherwise. Under data/, which is
 # gitignored - these files hold whatever an agent was told, which is user
@@ -164,8 +188,10 @@ class PersistentMemory(Memory):
 
         version = raw.get("version")
         if version != SCHEMA_VERSION:
-            self._quarantine(f"schema {version!r} is not {SCHEMA_VERSION}")
-            return []
+            migrated = self._migrate_or_quarantine(raw, version)
+            if migrated is None:
+                return []
+            raw = migrated
 
         records: list[MemoryRecord] = []
         skipped = 0
@@ -263,6 +289,72 @@ class PersistentMemory(Memory):
             "created_at": record.created_at.isoformat(),
         }
 
+    def _migrate_or_quarantine(self, raw: dict[str, Any], version: Any) -> dict[str, Any] | None:
+        """Bring a recognized older schema forward, or fall back to exactly
+        today's quarantine behavior for anything this store cannot trust.
+
+        Governed evolution, not automatic recovery: a version this store has
+        no registered Migration for is refused in precisely the same way,
+        with precisely the same message, as an unknown version always has
+        been - test_an_unknown_schema_version_is_quarantined covers that and
+        is unchanged by this method existing. Only a version this store
+        explicitly knows how to carry forward (MEMORY_MIGRATIONS.can_migrate)
+        takes the new path below.
+
+        The new path never overwrites the original bytes before they are
+        safely elsewhere: the file is renamed aside first (the same
+        technique _quarantine() already uses, so a checkpoint is provably as
+        safe as quarantine already was), and only then does the migrated
+        result get written - atomically, the same tmp-then-replace _save()
+        already uses - to the now-free original path. A failure at any point
+        in between leaves either the untouched original (under its
+        checkpoint name) or the complete migrated result on disk; it can
+        never leave a half-written mixture of the two.
+        """
+        if not isinstance(version, int) or not MEMORY_MIGRATIONS.can_migrate(version, SCHEMA_VERSION):
+            self._quarantine(f"schema {version!r} is not {SCHEMA_VERSION}")
+            return None
+
+        try:
+            migrated = MEMORY_MIGRATIONS.migrate(raw, from_version=version, to_version=SCHEMA_VERSION)
+        except MigrationUnavailable as exc:
+            self._quarantine(f"schema {version!r} could not be migrated to {SCHEMA_VERSION}: {exc}")
+            return None
+
+        if not isinstance(migrated, dict) or not isinstance(migrated.get("records"), list):
+            self._quarantine(f"migration from schema {version!r} produced an unusable store")
+            return None
+
+        checkpoint = self._path.with_suffix(f".v{version}-checkpoint")
+        try:
+            self._path.replace(checkpoint)
+        except OSError as exc:
+            logger.warning(
+                "memory store at '%s' could not be checkpointed before migrating from "
+                "schema %s; leaving it untouched: %s",
+                self._path, version, exc,
+            )
+            return None
+
+        try:
+            body = json.dumps(migrated, indent=2, sort_keys=True)
+            temporary = self._path.with_suffix(".tmp")
+            temporary.write_text(body, encoding="utf-8")
+            os.replace(temporary, self._path)
+        except (OSError, TypeError, ValueError) as exc:
+            logger.warning(
+                "migrated memory for '%s' could not be written; the pre-migration file "
+                "is preserved at '%s': %s",
+                self._path, checkpoint, exc,
+            )
+            return None
+
+        logger.info(
+            "migrated memory store at '%s' from schema %s to %s; original preserved at '%s'",
+            self._path, version, SCHEMA_VERSION, checkpoint,
+        )
+        return migrated
+
     def _quarantine(self, reason: str) -> None:
         """Move a damaged store aside and start empty.
 
@@ -280,3 +372,98 @@ class PersistentMemory(Memory):
         except OSError:
             logger.warning("memory store at '%s' was %s and could not be moved aside",
                            self._path, reason)
+
+
+def adopt_legacy_store(
+    memory_dir: str | Path, *, stable_owner: str, legacy_owner: str
+) -> bool:
+    """Bring a store forward from an old owner-derived filename to a new,
+    stable one.
+
+    The file-identity counterpart to `_migrate_or_quarantine` above: that
+    method carries a store's JSON *shape* forward when the schema inside one
+    fixed path changes; this carries a store forward when *which path* is
+    authoritative changes, because whatever decided the owner name changed
+    underneath it (see ARCHITECTURE.md's entry on stable identity vs.
+    display name). Agent-agnostic on purpose - this module has no notion of
+    "the Manager" or "IDENTITY.md"; a caller who does supplies both names.
+
+    Deliberately conservative:
+
+    - Does nothing if a file already exists under ``stable_owner``. A real
+      store there, however it got there, is never read, merged into or
+      overwritten.
+    - Does nothing if ``legacy_owner`` and ``stable_owner`` are the same
+      string - there is nothing to adopt from.
+    - Does nothing if no file exists under ``legacy_owner``.
+    - A damaged legacy file is quarantined by PersistentMemory's own,
+      already-tested load path (constructing one over the legacy path
+      triggers it in full) - this function then has nothing left to adopt,
+      and the quarantined file is left exactly where that path already
+      leaves it.
+
+    Idempotent by construction, with no separate "already done" flag that
+    could fall out of sync with reality: the very next call (the next
+    heartbeat tick, the next live-server request) finds the stable file
+    already there, and the first check alone makes it a no-op. Safe to call
+    unconditionally, every time.
+
+    Returns True only if an adoption actually happened.
+    """
+    memory_dir = Path(memory_dir)
+    stable_path = memory_dir / f"{stable_owner}.json"
+    if stable_path.exists():
+        return False
+    if legacy_owner == stable_owner:
+        return False
+
+    legacy_path = memory_dir / f"{legacy_owner}.json"
+    if not legacy_path.exists():
+        return False
+
+    # Reuses PersistentMemory's own load path in full, including its
+    # existing quarantine behavior for a damaged file - not a second,
+    # parallel validation of the same JSON shape.
+    legacy_store = PersistentMemory(legacy_path)
+    if not legacy_path.exists():
+        return False  # quarantined during the load above; nothing to adopt
+
+    # Oldest-first, matching the original insertion order: recall() with no
+    # query returns newest-first (its documented behaviour), and _save()
+    # reverses it for exactly the same reason this does.
+    ordered = tuple(reversed(legacy_store.recall(limit=2**31 - 1)))
+    payload = {
+        "version": SCHEMA_VERSION,
+        "records": [PersistentMemory._serialise(record) for record in ordered],
+    }
+
+    checkpoint = legacy_path.with_suffix(".pre-stable-owner-checkpoint")
+    try:
+        legacy_path.replace(checkpoint)
+    except OSError as exc:
+        logger.warning(
+            "legacy store at '%s' could not be checkpointed before adopting it as "
+            "'%s'; leaving it untouched: %s",
+            legacy_path, stable_path, exc,
+        )
+        return False
+
+    try:
+        body = json.dumps(payload, indent=2, sort_keys=True)
+        temporary = stable_path.with_suffix(".tmp")
+        temporary.write_text(body, encoding="utf-8")
+        os.replace(temporary, stable_path)
+    except (OSError, TypeError, ValueError) as exc:
+        logger.warning(
+            "adopted store for '%s' could not be written; the pre-adoption file is "
+            "preserved at '%s': %s",
+            stable_path, checkpoint, exc,
+        )
+        return False
+
+    logger.info(
+        "adopted legacy store '%s' as '%s' (%d record(s)); the pre-adoption file is "
+        "preserved at '%s'",
+        legacy_path, stable_path, len(ordered), checkpoint,
+    )
+    return True

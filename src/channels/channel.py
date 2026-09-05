@@ -43,6 +43,13 @@ from src.control_center.trail import observe
 from src.control_center.views import ConversationTurn
 from src.core.contracts import Task
 from src.manager.manager import ManagerAgent
+from src.services.identity.presence import (
+    PresenceRegistry,
+    presentation_intent_for_turn,
+    speaking,
+)
+from src.services.identity.voice import VoiceProfile
+from src.services.identity.voice_preference import effective_voice_for
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -145,7 +152,13 @@ class Channel(ABC):
         engine is silent.
         """
 
-    def ask(self, request: str, *, explain: bool = True) -> Response:
+    def ask(
+        self,
+        request: str,
+        *,
+        explain: bool = True,
+        addressed: str | None = None,
+    ) -> Response:
         """Put one request to Alfred. Does not present it, and does not speak.
 
         **The single path.** Every channel funnels through here, and here
@@ -157,7 +170,15 @@ class Channel(ABC):
         The Response comes back with ``spoken`` False in every channel,
         because nothing has been presented yet. See ``deliver``.
         """
-        turn = observe(self._manager, Task(description=request), explain=explain)
+        # `addressed` is carried, never acted on here. A door that chose
+        # an agent would be a second router; this hands the Manager the
+        # context and the Manager decides what it means.
+        turn = observe(
+            self._manager,
+            Task(description=request),
+            explain=explain,
+            addressed=addressed,
+        )
         return Response(
             text=turn.outcome or turn.detail or "",
             speech=speakable(turn),
@@ -205,12 +226,20 @@ class VoiceChannel(Channel):
         manager: ManagerAgent,
         speech: SpeechAdapter | None = None,
         fallback: Channel | None = None,
+        presence: PresenceRegistry | None = None,
     ) -> None:
         super().__init__(manager)
         self._speech = speech if speech is not None else NoSpeech()
         # Text is always available, so it is always the fallback. This is what
         # makes "voice is enabled" never mean "typing is disabled".
         self._fallback = fallback if fallback is not None else TextChannel(manager)
+        # Stage 17.2: optional, and None by every caller that predates
+        # this - a channel built without one behaves exactly as before.
+        # When given, it is the same shared PresenceRegistry the Control
+        # Center reads (see composition.py's Runtime.presence_registry),
+        # so a real speak() call below becomes a real, live SPEAKING
+        # signal somebody else can observe while it is still true.
+        self._presence = presence
 
     @property
     def name(self) -> str:
@@ -280,9 +309,94 @@ class VoiceChannel(Channel):
         so it could report ``spoken``, which meant a caller doing the obvious
         ``deliver(ask(x))`` said everything twice. Nothing caught it, because
         the only engine that ships is silent.
+
+        **Stage 17.2: the real speaking/presence synchronisation point.**
+        Whoever answered (``response.turn.handled_by``) is marked SPEAKING,
+        via ``speaking()``, for exactly as long as the call below actually
+        takes - real for a blocking engine (``WindowsSpeechAdapter``,
+        ``ElevenLabsSpeechAdapter`` both block until playback finishes),
+        momentary and still honest for ``NoSpeech``. This is the *only*
+        place that happens, because this is the only place speech happens -
+        adding a second SPEAKING assertion elsewhere would be exactly the
+        double-announcement this method's own docstring already refuses for
+        audio itself.
+
+        **Stage 17.9: the one real PresentationIntent producer.**
+        Immediately before speaking, this asks
+        ``presentation_intent_for_turn()`` for a real, structured
+        presentation intent - never invented, never a reading of what
+        the words mean (see that function's own docstring) - and, when
+        one exists, asserts it on the same shared registry for exactly
+        the speaking window, cleared in ``finally`` so an exception can
+        never leave a stale intent behind. This does not create a
+        second SPEAKING-style mechanism: it reuses the identical
+        registry ``speaking()`` above already writes to, through its
+        own, separate ``set_intent``/``clear_intent`` pair.
         """
-        spoken = self._speech.speak(response.speech)
+        # Only a real, registered agent is marked SPEAKING - the same
+        # "is this an agent?" guard scripts/exchange.py already applies
+        # before attributing a spoken line in the room's own transcript.
+        # `handled_by` carries the literal sentinel "nobody" when
+        # nothing matched the request, and that must never become a
+        # presence entry - "nobody" is not an agent this project could
+        # ever ask presence_for() about.
+        answered = getattr(response.turn, "handled_by", "") or ""
+        if answered and self._manager.registry.get(answered) is None:
+            answered = ""
+        intent = presentation_intent_for_turn(response.turn)
+        if self._presence is not None and answered and intent is not None:
+            self._presence.set_intent(answered, intent)
+        try:
+            with speaking(self._presence, answered):
+                spoken = self._speech.speak(response.speech, self._voice_of(response))
+        finally:
+            if self._presence is not None and answered and intent is not None:
+                self._presence.clear_intent(answered)
         print(response.text)
         if not spoken and self._speech.available:
             logger.warning("the speech engine accepted nothing to say")
         return replace(response, spoken=spoken)
+
+    def _voice_of(self, response: Response) -> VoiceProfile | None:
+        """Whose voice this answer should be said in.
+
+        Looked up, never decided. The turn already records *who answered*, so
+        the channel asks the registry for that agent and asks the agent for its
+        voice - which is a fact about the agent's identity, not a choice this
+        door gets to make. A channel that picked a voice would be assigning
+        identity from the presentation layer.
+
+        No agent is named here and no mapping is kept. A future specialist is
+        heard in its own voice because it has one, not because this method
+        learned about it.
+
+        Returns None when the agent declares no voice or cannot be found. None
+        means "no preference", which a speaker handles; inventing a voice would
+        be the presentation layer deciding what somebody sounds like.
+
+        0.2 Reality Audit: asks for the *effective* voice, not the bare
+        declared default - a runtime preference set through the "voice"
+        command (services/identity/voice.py's own governed mechanism,
+        the same shape avatar preferences already use) overrides
+        IDENTITY.md's own ``preferred_voice:`` line, exactly as a user
+        selection must. ``recall`` is resolved the same way
+        scripts/exchange.py's own ``memory_for`` already does: the
+        Manager's own store when the answerer is the Manager himself
+        (``own_skills`` exposes no ``.memory`` directly), that agent's
+        own store otherwise. No recall reaches this call for an agent
+        with no memory at all, which degrades to exactly the bare
+        declared voice - never a crash, never a fabricated preference.
+        """
+        answered = getattr(response.turn, "handled_by", "")
+        if not answered:
+            return None
+        try:
+            agent = self._manager.registry.get(answered)
+        except Exception:  # noqa: BLE001 - looking up a voice must not break delivery
+            return None
+        if agent is None:
+            return None
+        manager_name = self._manager.own_skills.name if self._manager.own_skills else None
+        memory = self._manager.memory if answered == manager_name else getattr(agent, "memory", None)
+        recall = memory.recall if memory is not None else None
+        return effective_voice_for(agent, recall=recall)

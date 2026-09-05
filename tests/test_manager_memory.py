@@ -361,6 +361,13 @@ class TestExistingBehaviourIsUnchanged:
         assert len(agent.executions) == 1
 
     def test_every_collaborator_is_still_injectable(self):
+        """Exact, so a collaborator that stopped being substitutable is caught.
+
+        ``events`` joined the set when the Manager began raising delegation
+        events. Listing it here is what keeps the claim complete - the assertion
+        is "every collaborator is injectable", so a new one that could not be
+        substituted would be the failure, not a longer list.
+        """
         import inspect
 
         parameters = set(inspect.signature(ManagerAgent.__init__).parameters)
@@ -370,6 +377,7 @@ class TestExistingBehaviourIsUnchanged:
             "router",
             "assessor",
             "own_skills",
+            "events",
             "brain",
             "memory",
             "memory_policy",

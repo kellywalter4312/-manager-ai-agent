@@ -45,8 +45,11 @@ from pathlib import Path
 from src.services.identity.identity import (
     IdentityError,
     joined_section,
+    parse_activation,
     parse_sections,
 )
+from src.services.identity.personality import AgentPersonality, parse_personality
+from src.services.identity.voice import VoiceActivation, VoiceProfile, parse_voice
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -71,6 +74,19 @@ class SpecialistIdentity:
     # asked to reason *about*, and a SpecialistBrain returns an Insight - it
     # cannot execute, delegate, send or reach a mailbox. See brain_factory.
     area_of_responsibility: str = ""
+    # A specialist's own voice, so a person can tell it from the Manager
+    # without looking. Read by the same parser as the Manager's, for the
+    # same reason the section parser is shared: two documents that appear
+    # to have one format must not quietly acquire two.
+    voice: VoiceProfile | None = None
+    # A specialist's own activation identity - see AgentIdentity.activation
+    # for what this field means and why it is separate from voice above.
+    # None until a specialist document declares a `## Voice Activation`
+    # section of its own; nothing in this stage requires one to exist.
+    activation: VoiceActivation | None = None
+    # A specialist's own personality - see AgentIdentity.personality for
+    # what this field means and why it is separate from voice above.
+    personality: AgentPersonality | None = None
 
     def __post_init__(self) -> None:
         if not self.name.strip():
@@ -107,6 +123,9 @@ def parse_specialist_identity(text: str) -> SpecialistIdentity:
         purpose=joined_section(sections, "purpose"),
         description=joined_section(sections, "description"),
         area_of_responsibility=joined_section(sections, "area of responsibility"),
+        voice=parse_voice(sections.get("voice", []), key=name),
+        activation=parse_activation(sections, key=name),
+        personality=parse_personality(sections.get("personality", []), key=name),
     )
 
 

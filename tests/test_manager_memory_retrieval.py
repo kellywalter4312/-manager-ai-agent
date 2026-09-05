@@ -646,7 +646,10 @@ class TestTheMemoryAbstractionIsNotBypassed:
         return found
 
     def test_writing_still_goes_through_one_method(self):
-        assert self._methods_calling("memory", "remember") == {"_remember_delegation"}
+        # Still exactly one. The writer moved from `_remember_delegation` to
+        # the public `retain` when session continuity needed a second caller -
+        # extracting it is what kept this at one method instead of two.
+        assert self._methods_calling("memory", "remember") == {"retain"}
 
     def test_the_manager_never_deletes(self):
         assert self._methods_calling("memory", "forget") == set()

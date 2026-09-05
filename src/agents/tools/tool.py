@@ -26,8 +26,20 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Mapping
+
+
+def utc_now() -> datetime:
+    """When something was observed. Injectable so tests can control time.
+
+    Defined here rather than imported from services.memory, which already has
+    one, because this module must not depend on memory - the toolset touching
+    memory is precisely what `TestToolResultsDoNotBecomeMemories` forbids. Two
+    small clocks are cheaper than that dependency.
+    """
+    return datetime.now(timezone.utc)
 
 
 class ToolError(Exception):
@@ -68,11 +80,26 @@ class ToolResult:
     status: ToolStatus
     output: str = ""
     error: str | None = None
+    # Where this came from, and when the world was actually looked at.
+    #
+    # **This is what stops a memory being mistaken for the present.** A
+    # MemoryRecord's created_at says when something was written down; it says
+    # nothing about when the fact was true. Remember "Dublin is 15.6C" today
+    # and read it back tomorrow and the two are indistinguishable - unless the
+    # observation carried the moment it was made.
+    #
+    # ``source`` is what was reached for, and is caller-owned in the same way
+    # Insight.source and LLMJudgement's provenance are: an observation may not
+    # claim its own origin, because a thing that could would be trusted about
+    # the one fact nobody can check.
+    source: str = ""
+    observed_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if not str(self.tool).strip():
             raise ToolError("ToolResult.tool must name the tool that was called")
         object.__setattr__(self, "tool", str(self.tool).strip())
+        object.__setattr__(self, "source", " ".join(str(self.source or "").split()))
 
         # A non-success must say what went wrong. "It failed" with no reason is
         # not something a brain or a person can act on.
@@ -83,31 +110,90 @@ class ToolResult:
         if self.error is not None:
             object.__setattr__(self, "error", " ".join(str(self.error).split()))
 
+        # Only a successful call observed anything. A rejected call never ran,
+        # and a failed one ran and produced nothing to look at - so neither may
+        # carry an observation time. Allowing it would let "we tried at 14:03"
+        # be read later as "the world was like this at 14:03", which is the
+        # exact confusion this field exists to prevent.
+        if self.observed_at is not None and self.status is not ToolStatus.SUCCEEDED:
+            raise ToolError(
+                f"a {self.status.value} ToolResult observed nothing, so it must "
+                "not carry an observed_at"
+            )
+        if self.observed_at is not None and not isinstance(self.observed_at, datetime):
+            raise ToolError("ToolResult.observed_at must be a datetime")
+
     @property
     def ok(self) -> bool:
         return self.status is ToolStatus.SUCCEEDED
+
+    @property
+    def is_observation(self) -> bool:
+        """Whether this is a look at the world, dated and attributed.
+
+        The question a caller has to be able to ask before treating a result as
+        current truth. A rejected or failed call is not an observation, and a
+        successful one that nobody dated is a fact with no moment attached.
+        """
+        return self.ok and self.observed_at is not None
 
     def describe(self) -> str:
         """A short line for logs.
 
         Excludes ``output``: a tool may return domain content - message text,
         posting bodies - and this project keeps that out of log files. The same
-        rule Completion.describe() and Insight.describe() follow.
+        rule Completion.describe() and Insight.describe() follow. Provenance is
+        included, because where and when something was observed is not content.
         """
         detail = f" error={self.error}" if self.error else f" chars={len(self.output)}"
-        return f"tool={self.tool} {self.status.value}{detail}"
+        origin = f" source={self.source}" if self.source else ""
+        seen = f" observed_at={self.observed_at.isoformat()}" if self.observed_at else ""
+        return f"tool={self.tool} {self.status.value}{detail}{origin}{seen}"
 
     @classmethod
-    def succeeded(cls, tool: str, output: str) -> "ToolResult":
-        return cls(tool=tool, status=ToolStatus.SUCCEEDED, output=output)
+    def succeeded(
+        cls,
+        tool: str,
+        output: str,
+        source: str = "",
+        observed_at: datetime | None = None,
+    ) -> "ToolResult":
+        """A call that ran and produced something - so, an observation.
+
+        ``observed_at`` defaults to now rather than to None, because a
+        successful call *did* look at the world and the moment it did so is
+        known here. Leaving it unset would make every observation undatable
+        unless somebody remembered to date it, and the one that got forgotten
+        would be the one later read as current.
+        """
+        return cls(
+            tool=tool,
+            status=ToolStatus.SUCCEEDED,
+            output=output,
+            source=source or tool,
+            observed_at=observed_at if observed_at is not None else utc_now(),
+        )
 
     @classmethod
-    def rejected(cls, tool: str, reason: str) -> "ToolResult":
-        return cls(tool=tool, status=ToolStatus.REJECTED, error=reason)
+    def rejected(cls, tool: str, reason: str, source: str = "") -> "ToolResult":
+        """Refused before running. Nothing was observed, so nothing is dated."""
+        return cls(
+            tool=tool,
+            status=ToolStatus.REJECTED,
+            error=reason,
+            source=source or tool,
+        )
 
     @classmethod
-    def failed(cls, tool: str, reason: str) -> "ToolResult":
-        return cls(tool=tool, status=ToolStatus.FAILED, error=reason)
+    def failed(cls, tool: str, reason: str, source: str = "") -> "ToolResult":
+        """Ran and went wrong. It reached for a source and saw nothing usable,
+        so the source is recorded and the observation time is not."""
+        return cls(
+            tool=tool,
+            status=ToolStatus.FAILED,
+            error=reason,
+            source=source or tool,
+        )
 
 
 @dataclass(frozen=True)

@@ -73,15 +73,28 @@ def refused(**fields):
 
 
 class TestTheCategoriesAreExplicit:
-    def test_there_are_exactly_four(self):
-        """A small vocabulary on purpose. Adding a fifth is a decision."""
-        assert len(MemoryCategory) == 4
+    def test_there_are_exactly_seven(self):
+        """A small vocabulary on purpose. Adding a category is a decision -
+        Stage 12 added two: RECORDING (an explicit "record this [for X]"
+        capture, distinct from an ordinary durable fact) and MILESTONE (a
+        structured, dated personal milestone). Stage 18 added a third,
+        LEARNING (what the person is currently studying or reading), which
+        passes the same admission test: it plainly changes what the Manager
+        should do next time, because an explanation pitched at the work
+        somebody is actually doing is a different explanation. Note what it
+        is *not*: a place to put the study material itself, which belongs
+        in the user's own documents where it can be quoted with
+        provenance."""
+        assert len(MemoryCategory) == 7
 
     def test_the_categories_are_the_agreed_ones(self):
         assert POLICY.category_names == (
             "decision",
             "delegation_outcome",
+            "learning",
             "lesson",
+            "milestone",
+            "recording",
             "user_context",
         )
 

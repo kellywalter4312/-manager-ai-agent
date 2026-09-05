@@ -835,12 +835,21 @@ class TestThePolicyCannotBeBypassed:
         return found
 
     def test_there_is_exactly_one_place_that_writes_to_memory(self):
+        """Still exactly one, and now it is the public one.
+
+        The writer used to be `_remember_delegation`, which meant every future
+        route into memory would have had to re-implement the policy check.
+        Session continuity needed a second caller, so the write was extracted
+        to `retain` and the delegation path now goes through it. The invariant
+        this test protects is unchanged - one place, not none and not two -
+        and a second writer appearing here would still fail.
+        """
         writers = self._methods_calling("memory", "remember")
-        assert writers == {"_remember_delegation"}
+        assert writers == {"retain"}
 
     def test_that_place_also_consults_the_policy(self):
         judges = self._methods_calling("memory_policy", "evaluate")
-        assert "_remember_delegation" in judges
+        assert "retain" in judges
 
     def test_the_write_is_guarded_by_the_policy_verdict(self):
         """The evaluate() call must precede the remember() call in the source,
@@ -848,13 +857,22 @@ class TestThePolicyCannotBeBypassed:
         import inspect
         import textwrap
 
-        source = textwrap.dedent(
-            inspect.getsource(ManagerAgent._remember_delegation)
-        )
+        source = textwrap.dedent(inspect.getsource(ManagerAgent.retain))
         evaluated = source.index("self.memory_policy.evaluate(")
         remembered = source.index("self.memory.remember(")
         assert evaluated < remembered
-        assert "if not permitted.allowed:" in source
+        assert "if verdict.allowed:" in source
+
+    def test_the_delegation_path_still_goes_through_the_policy(self):
+        """Extracting the write must not have let one caller slip past it."""
+        import inspect
+        import textwrap
+
+        source = textwrap.dedent(
+            inspect.getsource(ManagerAgent._remember_delegation)
+        )
+        assert "self.retain(" in source
+        assert "self.memory.remember(" not in source
 
     def test_the_manager_never_deletes_from_memory(self):
         assert self._methods_calling("memory", "forget") == set()

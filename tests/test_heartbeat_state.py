@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from src.core.versioning import Migration, MigrationChain
 from src.heartbeat.state import (
     SCHEMA_VERSION,
     ProcessedState,
@@ -134,6 +135,97 @@ class TestRecovery:
     def test_unknown_schema_version_starts_fresh(self, tmp_path):
         path = tmp_path / "s.json"
         path.write_text(json.dumps({"version": 999, "messages": {"m": "x"}}), encoding="utf-8")
+        assert StateStore(path).load().messages == {}
+
+
+# ----------------------------------------------------------------------
+# Governed migration (src/core/versioning.py) - the same seam
+# test_persistent_memory.py::TestGovernedMigration proves for
+# PersistentMemory, wired here for StateStore. Schema 1 has always been
+# schema 1, so every test registers a synthetic 0->1 migration purely to
+# prove the wiring; STATE_MIGRATIONS itself stays the real, empty chain
+# except where a test explicitly monkeypatches it.
+# ----------------------------------------------------------------------
+
+
+class TestGovernedMigration:
+    def _register(self, monkeypatch, *migrations):
+        import src.heartbeat.state as state_module
+
+        monkeypatch.setattr(state_module, "STATE_MIGRATIONS", MigrationChain(migrations))
+
+    def test_a_recognized_older_version_is_migrated_not_reset(self, tmp_path, monkeypatch):
+        self._register(
+            monkeypatch,
+            Migration(from_version=0, to_version=SCHEMA_VERSION, apply=lambda raw: {**raw, "version": SCHEMA_VERSION}),
+        )
+        path = tmp_path / "s.json"
+        path.write_text(
+            json.dumps({"version": 0, "messages": {"m": "2026-08-17T00:00:00+00:00"}}),
+            encoding="utf-8",
+        )
+
+        loaded = StateStore(path).load()
+        assert loaded.messages == {"m": "2026-08-17T00:00:00+00:00"}
+
+    def test_the_pre_migration_file_is_preserved_as_a_checkpoint(self, tmp_path, monkeypatch):
+        self._register(
+            monkeypatch,
+            Migration(from_version=0, to_version=SCHEMA_VERSION, apply=lambda raw: {**raw, "version": SCHEMA_VERSION}),
+        )
+        path = tmp_path / "s.json"
+        original = json.dumps({"version": 0, "messages": {}})
+        path.write_text(original, encoding="utf-8")
+
+        StateStore(path).load()
+
+        checkpoints = list(tmp_path.glob("s.v0-checkpoint"))
+        assert checkpoints, "no checkpoint of the pre-migration file was kept"
+        assert checkpoints[0].read_text(encoding="utf-8") == original
+
+    def test_the_migrated_file_is_written_at_the_current_schema(self, tmp_path, monkeypatch):
+        self._register(
+            monkeypatch,
+            Migration(from_version=0, to_version=SCHEMA_VERSION, apply=lambda raw: {**raw, "version": SCHEMA_VERSION}),
+        )
+        path = tmp_path / "s.json"
+        path.write_text(json.dumps({"version": 0, "messages": {}}), encoding="utf-8")
+
+        StateStore(path).load()
+
+        on_disk = json.loads(path.read_text(encoding="utf-8"))
+        assert on_disk["version"] == SCHEMA_VERSION
+
+    def test_a_version_with_no_registered_migration_still_starts_fresh(self, tmp_path, monkeypatch):
+        """The guarantee this seam must never weaken: registering a
+        migration for version 0 must not make version 999 trustworthy -
+        exactly test_unknown_schema_version_starts_fresh's scenario, proven
+        to still hold with a real migration registered alongside it."""
+        self._register(
+            monkeypatch,
+            Migration(from_version=0, to_version=SCHEMA_VERSION, apply=lambda raw: {**raw, "version": SCHEMA_VERSION}),
+        )
+        path = tmp_path / "s.json"
+        path.write_text(json.dumps({"version": 999, "messages": {"m": "x"}}), encoding="utf-8")
+
+        assert StateStore(path).load().messages == {}
+
+    def test_a_migration_that_raises_falls_back_to_starting_fresh(self, tmp_path, monkeypatch):
+        def broken(_raw):
+            raise ValueError("simulated bug in a future migration")
+
+        self._register(monkeypatch, Migration(from_version=0, to_version=SCHEMA_VERSION, apply=broken))
+        path = tmp_path / "s.json"
+        path.write_text(json.dumps({"version": 0, "messages": {"m": "x"}}), encoding="utf-8")
+
+        assert StateStore(path).load().messages == {}
+
+    def test_no_migrations_registered_behaves_exactly_as_before_this_seam_existed(self, tmp_path):
+        """No monkeypatch here - STATE_MIGRATIONS is the real, empty chain
+        this store is actually wired with today."""
+        path = tmp_path / "s.json"
+        path.write_text(json.dumps({"version": 0, "messages": {"m": "x"}}), encoding="utf-8")
+
         assert StateStore(path).load().messages == {}
 
 

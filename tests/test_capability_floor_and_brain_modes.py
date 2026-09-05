@@ -234,11 +234,52 @@ class TestHonestyAboutMissingCapability:
         assert manager.own_skills.tools.is_empty
 
     def test_a_present_tool_is_actually_used(self):
-        _, manager = assembled(tools=ToolSet([FakeSearch()]))
+        """Phase 3 (Knowledge, Research & Live Information) narrowed this
+        one case, deliberately: research must be more than "search and
+        paste" (that phase's own explicit requirement), so a present,
+        working ``web_search`` tool is necessary but no longer
+        sufficient on its own - the gathered evidence is now reasoned
+        over by the Brain before an answer is given, the identical
+        acquire-then-reason shape ``live_information`` already
+        established. "A Half Brain Alfred with a working tool does the
+        work" (this file's own docstring) still holds for every kind of
+        general work that does not itself require reasoning over what a
+        tool found - coding's own raw tool output is still returned
+        as-is, unchanged, see ``test_coding_and_research_are_separate_capabilities``
+        below - it is specifically research's own deliverable that
+        changed shape."""
+        from src.manager.llm_brain import LLMManagerBrain
+        from src.providers.base import Completion, LLMProvider
+
+        class FixedProvider(LLMProvider):
+            @property
+            def name(self):
+                return "fixed"
+
+            def complete(self, prompt, *, system=None):
+                return Completion(text="Comparing the sources found.", provider="fixed")
+
+        runtime, manager = assembled(tools=ToolSet([FakeSearch()]))
+        manager.brain = LLMManagerBrain(FixedProvider(), personality=runtime.identity.personality)
+        manager.own_skills._converse = manager.brain.converse
+
         result = manager.handle_task(Task(description="research Liverpool"))
         assert result.succeeded
-        assert "handled:" in result.output
+        assert result.output == "Comparing the sources found."
         assert result.payload["tool"] == "web_search"
+        assert result.payload["synthesised"] is True
+
+    def test_a_present_research_tool_with_an_undecided_brain_refuses_honestly(self):
+        """The other, equally honest half of the same change: with no
+        Brain able to actually decide anything (this file's own default
+        Half Brain), this capability refuses plainly rather than
+        fabricating a comparison - it never silently discards the real
+        evidence it found; it simply declines to pretend it reasoned
+        about it."""
+        _, manager = assembled(tools=ToolSet([FakeSearch()]))
+        result = manager.handle_task(Task(description="research Liverpool"))
+        assert not result.succeeded
+        assert "couldn't properly reason" in result.error.lower()
 
     def test_a_failing_tool_reports_its_own_failure(self):
         """Three different outcomes, never collapsed into one: no tool, a
@@ -423,7 +464,10 @@ class TestHalfBrainIsOperationalNotDisabled:
     def test_alfred_in_half_brain_still_recalls_memory(self):
         from src.services.memory.memory import MemoryRecord
 
-        _, manager = assembled()
+        # Ephemeral on purpose: this is about recall in Half Brain, not
+        # about where records live, and a unit test must not write into
+        # the production store now that persistent is the default.
+        _, manager = assembled(memory="ephemeral")
         manager.memory.remember(
             MemoryRecord(content="inbox scanning went well", tags=("inbox",))
         )

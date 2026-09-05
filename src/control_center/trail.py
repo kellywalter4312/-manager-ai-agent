@@ -37,8 +37,11 @@ from typing import Any
 
 from src.control_center.views import ConversationTurn, TrailStep
 from src.core.contracts import Task, TaskResult, TaskStatus
+from src.manager.capabilities import INVITED_KEY
 from src.manager.cognition import assess_cognition, assess_manager
+from src.manager.collaboration_entry import answer_with_collaboration
 from src.manager.manager import ManagerAgent
+from src.manager.objective_loop import pursue_objective
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -61,6 +64,7 @@ def observe(
     task: Task,
     *,
     explain: bool = True,
+    addressed: str | None = None,
 ) -> ConversationTurn:
     """Handle one request and report what the system observably did.
 
@@ -93,7 +97,11 @@ def observe(
     decision = None
     if explain:
         try:
-            decision = manager.diagnose(task)
+            # decide(), not diagnose(): the trail must show the decision
+            # that was actually made, and an addressed task is decided
+            # by the address. Reporting the router's opinion instead
+            # would print a reason that did not happen.
+            decision = manager.decide(task, addressed)
         except Exception as exc:  # noqa: BLE001 - watching must not break the request
             logger.warning("could not read a routing decision: %s", type(exc).__name__)
 
@@ -113,7 +121,45 @@ def observe(
     }
     before[_manager_name(manager)] = _memory_size(manager.memory)
 
-    result = manager.handle_task(task)
+    # Stage 13 final integration, extended by the Pre-Phase Agentic
+    # Workflow checkpoint: an unaddressed request is where Alfred decides
+    # for himself, so it is the one case the governed objective loop
+    # applies to. `pursue_objective` runs the identical single
+    # `answer_with_collaboration` step this call site has always run, and
+    # - only in Full Brain, only when the Brain itself judges more is
+    # genuinely needed - reasons about whether the objective is actually
+    # complete, dynamically, never through a hardcoded workflow. A Half
+    # Brain installation, or any objective the Brain judges already
+    # answered by that one step, produces byte-identical output to before
+    # this checkpoint existed.
+    #
+    # An explicit address is a deliberate override ("Arthur, ...") and
+    # keeps going straight to `handle_task`, unchanged: addressing somebody
+    # by name has always meant the Manager's own decision is skipped, and a
+    # multi-step or collaboration synthesis picking a different final
+    # speaker would break exactly that guarantee.
+    objective_outcome = None
+    if addressed is None:
+        objective_outcome = pursue_objective(manager, task)
+        result = objective_outcome.result
+    else:
+        result = manager.handle_task(task, addressed)
+
+    # Only shown when more than the ordinary one step actually ran - an
+    # objective the Brain judged already answered by a single step (the
+    # overwhelming majority of ordinary requests) leaves the trail exactly
+    # as it was before this checkpoint existed.
+    if objective_outcome is not None and len(objective_outcome.steps) > 1:
+        steps.append(
+            TrailStep(
+                label="Objective pursuit",
+                detail=(
+                    f"{objective_outcome.status.label} after "
+                    f"{len(objective_outcome.steps)} step(s)"
+                ),
+                actor=_manager_name(manager),
+            )
+        )
 
     handled_by = result.agent_name or "nobody"
     delegated = bool(result.agent_name) and not manager.handled_it_myself(result)
@@ -209,7 +255,34 @@ def observe(
         memory_written=written,
         tool_used=tool_used,
         tool_available=tool_available,
+        invited=_invited_in(result),
+        celebration=_celebration_of(result),
     )
+
+
+def _celebration_of(result: TaskResult) -> dict[str, object] | None:
+    """The presentation-shaped reaction a genuine milestone produced, if
+    any - read from the payload milestone_recognition already builds
+    (CelebrationReaction.to_dict()), never re-selected or re-derived
+    here. Nothing is inferred: a turn that was not a milestone, or one
+    handled with no celebration provider configured, carries no such
+    key and this returns None - the identical honest-absence shape
+    ``_invited_in`` already has just above.
+    """
+    celebration = (result.payload or {}).get("celebration")
+    return celebration if isinstance(celebration, dict) else None
+
+
+def _invited_in(result: TaskResult) -> str | None:
+    """Whoever the Manager resolved an invitation to, if anyone.
+
+    Read from the payload the capability handler already produced.
+    Nothing is inferred: a request that was not an invitation carries
+    no such key, and a name nobody is registered under was already
+    resolved to None by the handler.
+    """
+    invited = (result.payload or {}).get(INVITED_KEY)
+    return invited if isinstance(invited, str) and invited.strip() else None
 
 
 def _manager_name(manager: ManagerAgent) -> str:
@@ -244,10 +317,27 @@ def _own_capability(
     if skills is None:
         return None, None, None
 
-    from src.manager.capabilities import GENERAL_CAPABILITIES, select_capability
+    from src.manager.capabilities import GENERAL_CAPABILITIES, OPEN_CONVERSATION, select_capability
 
     try:
-        capability = select_capability(task, skills.capabilities)
+        # Mirrors the identical priority check ManagerSkills.execute()
+        # itself applies: while a clarification or guided activity is
+        # genuinely active, that is what actually answers, regardless of
+        # which capability's words this task's text would otherwise
+        # match - the trail must show the decision that was actually
+        # made, never a re-derived guess that ignores session state.
+        sessions = getattr(skills, "_activity_sessions", None)
+        if sessions is not None and (
+            sessions.pending_clarification(skills.name) is not None
+            or sessions.activity(skills.name) is not None
+        ):
+            capability = OPEN_CONVERSATION
+        else:
+            capability = select_capability(
+                task,
+                skills.capabilities,
+                participants=[a.name for a in manager.registry.all_agents()],
+            )
     except Exception:  # noqa: BLE001 - watching must not break the request
         return None, None, None
 

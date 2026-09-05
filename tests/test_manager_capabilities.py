@@ -35,6 +35,7 @@ from src.core.contracts import AgentSpec, Task, TaskResult
 from src.manager.capabilities import (
     DEFAULT_CAPABILITY,
     MANAGER_CAPABILITIES,
+    OPEN_CONVERSATION,
     ROSTER_REPORT,
     CapabilityRequest,
     ManagerCapability,
@@ -150,21 +151,114 @@ class TestExistingBehaviourIsPreserved:
 
 class TestHandlersAreSelectedThroughTheRegistry:
     def test_the_shipped_registry_holds_its_handlers(self):
-        """Two: the roster report, and the general capability floor Step 9
-        added so ordinary work is attempted rather than refused."""
-        assert available_capabilities() == ["general_assistance", "roster_report"]
+        """Exact, so a handler cannot appear or vanish unnoticed.
+
+        Eleven: the roster report, the general capability floor Step 9 added so
+        ordinary work is attempted rather than refused, the participant
+        invitation Phase 5 added so somebody can be brought into a
+        conversation, the small-talk floor Stage 11.3 added so a short
+        conversational turn ("thanks", "okay", "good morning") gets a brief,
+        natural reply instead of finding no agent, open_conversation (the
+        Stage 11 audit fix) so a genuinely open-ended question or remark
+        reaches the Brain instead of a roster listing standing in for an
+        answer, forget/recall_memory (Stage 12) so an explicit memory
+        command is honoured - never "remember", which already has a real,
+        production-wired path outside this registry (see
+        src.manager.capabilities's own Stage 12 section docstring for why
+        that one is deliberately absent here) - live_information
+        (Stage 14) so a request needing current, external information is
+        acquired through a governed tool and reasoned over, rather than
+        answered from Alfred's own trained knowledge as though it were
+        current - and three further Stage 12 additions: record_this (an
+        explicit "record this [for X]" capture, distinct from "remember"),
+        temporal_derivation (age/birthday/completion answered by
+        computing from a stored date, never a stored answer), and
+        milestone_recognition (a structured, governed personal milestone,
+        confirmed or auto-stored per the user's own established
+        preference), communication (Stage 15) so a recognised
+        call/text/read/reply request is dispatched to a governed
+        communication tool - never a contact list, never a fabricated
+        result - personal_recurring_events (Stage 12 closure) so
+        another person's recurring birthday - confirmed, uncertain, or
+        deliberately changed - is recognised and governed the same way,
+        never with a date silently chosen on the user's behalf, and
+        connected_action (Stage 16) so a governed action through an
+        external connection is attempted only through the identical
+        ToolSet boundary, honest about capability availability,
+        connection availability and authorization as three separate
+        facts, and current_datetime (Foundation Repair #1) so "what
+        day/date/month/year is it" is answered from the real calendar -
+        never a stored fact, never the Brain, and never the false-success
+        "Got it." small_talk's own word-overlap scoring used to produce
+        for it. The list grows only when a handler genuinely exists -
+        that is the point of asserting it exactly rather than loosely.
+        """
+        assert available_capabilities() == [
+            # Stage 17.22 added this one and did not update this pin, so the
+            # assertion had been failing since. Restored rather than
+            # loosened: an exact list is the whole point of the test.
+            "about_self",
+            "communication",
+            "connected_action",
+            # Phase 2 (Memory & Personal Context): replaces or invalidates
+            # an existing memory when the user explicitly corrects it -
+            # "that's wrong, ...", "correction: ...", "update what you
+            # remembered about X to Y" - never inferred from similarity.
+            "correct_memory",
+            "current_datetime",
+            "forget",
+            "general_assistance",
+            # Phase 3 (Knowledge, Research & Live Information): composes a
+            # real document from recent findings through the real Brain
+            # and saves it as a real file - "create a report from these
+            # findings".
+            "generate_document",
+            # Files/Documents completion: real visual reasoning through
+            # the Brain's own analyze_image question, honestly bounded
+            # to whichever provider genuinely supports it (today:
+            # Anthropic only).
+            "image_analysis",
+            # Stage 18: settled general knowledge and history as one
+            # capability for every subject, and the learning context that
+            # pitches it. Both are kinds of knowing, not topics - see
+            # src/manager/knowledge.py for the four-way separation they
+            # exist to keep.
+            "knowledge",
+            "learning_context",
+            "live_information",
+            "media_production",
+            "milestone_recognition",
+            "open_conversation",
+            "participant_invitation",
+            "personal_recurring_events",
+            "recall_memory",
+            "record_this",
+            "roster_report",
+            "small_talk",
+            "temporal_derivation",
+        ]
 
     def test_selection_scores_words_against_handlers(self):
         registry = {ROSTER_REPORT.name: ROSTER_REPORT, WEATHER.name: WEATHER}
         assert select_capability(Task(description="what is the weather"), registry) is WEATHER
         assert select_capability(Task(description="show the roster"), registry) is ROSTER_REPORT
 
-    def test_an_unmatched_task_falls_back_rather_than_failing(self):
+    def test_an_unmatched_task_falls_back_to_open_conversation_when_there_is_content(self):
         """The router only sends work here when it scored a declared word, so
-        'routed to me but not by anything specific' is a real state. Saying who
-        I am and what I can do is never the wrong answer to it."""
+        'routed to me but not by anything specific' is a real state. With real
+        content and nowhere more specific to go, the honest answer is to let
+        the Brain take a look - never a roster listing standing in for one -
+        so this now falls to open_conversation rather than the roster
+        default (see the next test for the one case that still doesn't:
+        truly empty content)."""
         registry = {WEATHER.name: WEATHER}
-        assert select_capability(Task(description="xyzzy"), registry) is DEFAULT_CAPABILITY
+        assert select_capability(Task(description="xyzzy"), registry) is OPEN_CONVERSATION
+
+    def test_an_unmatched_empty_task_still_falls_back_to_the_roster(self):
+        """Nothing for the Brain to reason about either - the one case where
+        the old, harmless default still applies."""
+        registry = {WEATHER.name: WEATHER}
+        assert select_capability(Task(description="..."), registry) is DEFAULT_CAPABILITY
 
     def test_ties_break_on_handler_name_so_selection_is_repeatable(self):
         twin = ManagerCapability(
@@ -226,15 +320,17 @@ class TestDeclaringACapabilityDoesNotCreateOne:
     def test_an_unregistered_capability_cannot_execute(self):
         """Not offered, not routed, and not runnable even when asked directly.
 
-        With no handler answering `teleport`, the request falls back to the
-        roster report rather than finding some path to a behaviour nobody
-        wrote.
+        With no handler answering `teleport` and no Brain configured on this
+        bare ManagerSkills, the request reaches open_conversation's own
+        honest fallback - a named failure explaining no reasoning capability
+        is available - never a fabricated success finding some path to a
+        behaviour nobody wrote, and never a roster listing passed off as an
+        answer either.
         """
         identity = AgentIdentity(name="Alfred", capabilities=frozenset({"roster"}))
         result = ManagerSkills(identity).execute(Task(description="teleport me home"))
-        assert result.succeeded
-        assert "Alfred" in result.output
-        assert "teleport" not in result.output
+        assert not result.succeeded
+        assert "reason about that" in result.error
 
     def test_prose_in_the_identity_document_grants_nothing(self):
         """Step 1 proved this for AgentIdentity.to_spec. It has to stay true of
@@ -261,12 +357,19 @@ class TestDeclaringACapabilityDoesNotCreateOne:
         assert "plan" not in handled_words()
         assert "coordinate" not in handled_words()
 
-    def test_a_planning_request_finds_no_agent(self):
+    def test_a_planning_request_reaches_the_manager_honestly_not_as_a_completed_roster(self):
         """The user-visible consequence, asserted rather than described.
 
         "Never invent" and "Escalate rather than guess" are principles this
-        project states in SOUL.md. Answering a planning request with a roster
-        broke both; no_agent_found honours them.
+        project states in SOUL.md. Answering a planning request with a
+        roster - and marking it COMPLETED - broke both. The Stage 11 audit
+        fix changes *where* this lands (the Manager is now the default
+        owner of work no specialist's capabilities matched, rather than the
+        request dying with no agent at all) but not the principle: with no
+        Brain configured here, open_conversation still refuses to invent an
+        answer, so this is FAILED with an honest reason - never COMPLETED,
+        and never NO_AGENT_FOUND standing in for "nobody can help", when the
+        Manager genuinely is the one who owns unclaimed work now.
         """
         from src.core.contracts import TaskStatus
         from src.services.identity.identity import load_identity
@@ -278,7 +381,9 @@ class TestDeclaringACapabilityDoesNotCreateOne:
         manager.registry.register(manager.own_skills)
 
         result = manager.handle_task(Task(description="plan my week"))
-        assert result.status is TaskStatus.NO_AGENT_FOUND
+        assert result.status is TaskStatus.FAILED
+        assert result.agent_name == "Alfred"
+        assert "reason about that" in result.error
 
     def test_coordination_reporting_still_works(self):
         """Removing the unimplemented words must not have cost the real ones."""
@@ -320,24 +425,34 @@ class TestAddingACapabilityTouchesNoOrchestration:
     )
     ENTRY_POINTS = ("main.py", "scripts/heartbeat.py")
 
-    def test_orchestration_files_are_byte_identical_to_head(self):
-        """A measurement, not a promise.
+    def test_orchestration_knows_no_capability_handler(self):
+        """The sharper form of the claim a byte-freeze used to make here.
 
-        If giving the Manager a capability architecture had required a line in
-        ManagerAgent, the router or the assessor, this fails.
+        This was `git diff HEAD` over the three orchestration files, and it
+        over-reached in the same way the entry-point freeze beneath it did.
+        The claim is "adding a capability changes no orchestration", not
+        "orchestration never changes for any reason" - and a change-detector
+        cannot tell those apart. It forbade Alfred emitting a delegation event,
+        which is orchestration doing its own job and has nothing to do with
+        capabilities; and being diff-against-HEAD it fell silent the moment
+        anything was committed, so it never held the line it claimed to.
+
+        The property itself is what matters, and it was already asserted for
+        ManagerAgent by test_manager_agent_has_no_knowledge_of_capabilities
+        below. This is that same check across all three orchestration files:
+        what the Manager can do is decided by IDENTITY.md and
+        src/manager/capabilities.py, and orchestration that started deciding it
+        would be a second source of truth.
         """
-        result = subprocess.run(
-            ["git", "diff", "--name-only", "HEAD", "--", *self.ORCHESTRATION],
-            cwd=REPO_ROOT,
-            capture_output=True,
-            text=True,
+        forbidden = (
+            "ManagerCapability", "CapabilityRequest", "MANAGER_CAPABILITIES",
+            "select_capability", "offered_capabilities", "report_roster",
+            "ROSTER_REPORT", "GENERAL_CAPABILITIES", "general_assistance",
         )
-        if result.returncode != 0:  # pragma: no cover - only if git is absent
-            pytest.skip("git unavailable")
-        assert result.stdout.strip() == "", (
-            "adding a capability must not change orchestration, but these "
-            f"files differ from HEAD: {result.stdout.strip()}"
-        )
+        for relative in self.ORCHESTRATION:
+            source = (REPO_ROOT / relative).read_text(encoding="utf-8")
+            for name in forbidden:
+                assert name not in source, (relative, name)
 
     def test_the_entry_points_know_no_capability_handler(self):
         """The sharper form of the claim the byte-freeze used to make.

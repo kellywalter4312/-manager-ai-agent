@@ -31,6 +31,7 @@ from src.control_center.views import (
     ConversationTurn,
     HistoryView,
     OverviewView,
+    UnresolvedFactView,
     VoiceView,
 )
 
@@ -186,6 +187,23 @@ def render_agent(agent: AgentView, columns: int | None = None) -> str:
     columns = columns if columns is not None else width()
     out: list[str] = []
     out += _heading(f"{agent.name} - {agent.kind}", columns)
+
+    # Phase 1.1: role and area of responsibility already reach this view
+    # (see AgentView.role/.area, populated by observer.py's manager_view())
+    # but neither was ever printed here - the overview screen shows a
+    # truncated one-line role, and role's own full sentence reaches a
+    # conversational "who are you", but the *detail* screen (this
+    # function) silently dropped both. Rendered here from data that was
+    # already computed; nothing new is loaded or invented.
+    if agent.role:
+        out.append("")
+        out.append("ROLE")
+        out += _wrap(agent.role, columns)
+
+    if agent.area:
+        out.append("")
+        out.append("RESPONSIBILITY")
+        out += _wrap(agent.area, columns)
 
     if agent.purpose:
         out.append("")
@@ -355,10 +373,20 @@ def render_turn(turn: ConversationTurn, columns: int | None = None) -> str:
     for step in turn.steps:
         if step.label in ("Received",):
             continue
-        out.append(f"  {step.label}: {step.detail}")
+        out += _wrap(f"{step.label}: {step.detail}", columns)
 
     if turn.capability:
         out.append(f"  Capability: {turn.capability}")
+
+    # Stage 12 closure: the presentation-shaped reaction a genuine
+    # milestone produced, if any - rendered as a single line, never
+    # re-derived. "Off" (enabled=False) or no celebration at all shows
+    # nothing, which is the honest, correct presentation of "off" -
+    # this is deliberately the only branch in this file that reads
+    # turn.celebration, so a future avatar/environment renderer has
+    # exactly one boundary to mirror.
+    if turn.celebration and turn.celebration.get("enabled"):
+        out.append(f"  Celebration: {_celebration_line(turn.celebration)}")
 
     out.append("")
     out.append("RESULT")
@@ -367,6 +395,24 @@ def render_turn(turn: ConversationTurn, columns: int | None = None) -> str:
         out += _wrap(turn.detail, columns)
 
     return "\n".join(out)
+
+
+def _celebration_line(celebration: dict[str, object]) -> str:
+    """One compact line from a CelebrationReaction.to_dict() payload -
+    presentation labels only, exactly what the dict already carries.
+    Never a word of what the milestone means or a reason it happened;
+    that sentence already came from Alfred's own answer, above."""
+    parts = [str(celebration.get("intensity", ""))]
+    avatar = celebration.get("avatar_action")
+    environment = celebration.get("environment_action")
+    overlay = celebration.get("overlay")
+    if avatar:
+        parts.append(f"avatar={avatar}")
+    if environment:
+        parts.append(f"environment={environment}")
+    if overlay:
+        parts.append(f"overlay={overlay}")
+    return " ".join(p for p in parts if p)
 
 
 # A conversation shows an answer, not a report. A specialist that analysed a
@@ -420,4 +466,30 @@ def render_history(history: HistoryView, columns: int | None = None) -> str:
         out.append("")
         out.append(f"categories: {', '.join(history.categories)}")
         out.append(f"actors:     {', '.join(history.actors)}")
+    return "\n".join(out)
+
+
+def render_unresolved_facts(facts: tuple[UnresolvedFactView, ...], columns: int | None = None) -> str:
+    """Genuine, currently-unresolved personal facts - Stage 12 closure's
+    own example: "mom's birthday is either March 24 or May 24".
+    Read-only, like every other screen: resolving one happens by saying
+    the correct date to Alfred, not from this screen."""
+    columns = columns if columns is not None else width()
+    out: list[str] = []
+    out += _heading("unresolved", columns)
+
+    if not facts:
+        out.append("")
+        out.append("  nothing unresolved")
+        return "\n".join(out)
+
+    for fact in facts:
+        out.append("")
+        label = fact.fact_type.replace("person_", "").replace("_", " ") or "fact"
+        out.append(f"  {fact.person}'s {label}")
+        out.append(f"    which is correct? {' / '.join(fact.alternatives)} / enter another date")
+        out.append(
+            f"    (restate it in conversation, e.g. \"{fact.person}'s birthday is "
+            f"{fact.alternatives[0]}\" - id={fact.record_id})"
+        )
     return "\n".join(out)

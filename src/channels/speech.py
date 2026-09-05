@@ -51,6 +51,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 
 from src.providers.availability import Availability, AvailabilityState
+from src.services.identity.voice import VoiceProfile
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -65,7 +66,80 @@ class SpeechUnavailable(RuntimeError):
     """
 
 
-class SpeechAdapter(ABC):
+class Listener(ABC):
+    """Turning speech into text. Half of the seam, on its own.
+
+    Hearing and speaking are separate responsibilities and will be separate
+    products: the likely shape is a local recogniser and a hosted synthesiser,
+    which have different costs, different privacy consequences and different
+    failure modes. A single interface covering both would force one provider to
+    answer for the other, and the first installation that wanted them apart
+    would have to break the contract to get there.
+
+    Each half therefore publishes its own ``availability``. A machine with
+    working speakers and a dead microphone is an ordinary situation, and it now
+    has an honest way to be described.
+    """
+
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        """Short identifier for logs and status."""
+
+    @property
+    @abstractmethod
+    def availability(self) -> Availability:
+        """What was last observed about hearing. Evidence, not a verdict."""
+
+    @property
+    def available(self) -> bool:
+        """Whether a call to this listener has actually succeeded. Derived."""
+        return self.availability.is_usable
+
+    @abstractmethod
+    def listen(self, timeout: float | None = None) -> str:
+        """Capture one spoken utterance and return it as text."""
+
+
+class Speaker(ABC):
+    """Turning text into speech, in a particular agent's voice.
+
+    ``speak`` takes a voice because the alternative is one voice for the whole
+    system. In a conversation with several agents a person should be able to
+    tell who is speaking without looking, which makes the voice a property of
+    *whoever is talking* rather than of the machinery doing the talking.
+
+    The voice arrives as a ``VoiceProfile`` - characteristics, never a vendor
+    id - so which actual voice this speaker uses is this speaker's mapping to
+    make. That is what lets the provider change without every agent changing.
+    """
+
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        """Short identifier for logs and status."""
+
+    @property
+    @abstractmethod
+    def availability(self) -> Availability:
+        """What was last observed about speaking. Evidence, not a verdict."""
+
+    @property
+    def available(self) -> bool:
+        """Whether a call to this speaker has actually succeeded. Derived."""
+        return self.availability.is_usable
+
+    @abstractmethod
+    def speak(self, text: str, voice: VoiceProfile | None = None) -> bool:
+        """Say something in ``voice``. Returns whether it was actually spoken.
+
+        ``voice`` may be None, meaning the caller has no preference - not
+        meaning "use the house voice". A speaker with no way to distinguish
+        voices ignores it and still works; one that can, uses it.
+        """
+
+
+class SpeechAdapter(Listener, Speaker):
     """Speech in, speech out. Narrow on purpose.
 
     Two methods and a flag. A narrow interface is cheap to implement, which is
@@ -131,8 +205,8 @@ class SpeechAdapter(ABC):
         """
 
     @abstractmethod
-    def speak(self, text: str) -> bool:
-        """Say something. Returns whether it was actually spoken.
+    def speak(self, text: str, voice: VoiceProfile | None = None) -> bool:
+        """Say something in ``voice``. Returns whether it was actually spoken.
 
         False is a real answer, not an error: with no engine installed the
         system still has a written response, and a caller that knows the words
@@ -191,6 +265,12 @@ class NoSpeech(SpeechAdapter):
             "Type instead - text is always available."
         )
 
-    def speak(self, text: str) -> bool:
+    def speak(self, text: str, voice: VoiceProfile | None = None) -> bool:
+        """Accepts a voice and says nothing in it, honestly.
+
+        Taking the parameter matters even here: an adapter that refused a voice
+        would make the whole system's per-agent voice architecture untestable
+        against the only adapter that ships.
+        """
         logger.debug("speech requested but no engine is installed")
         return False

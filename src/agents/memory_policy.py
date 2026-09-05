@@ -53,6 +53,13 @@ class SpecialistMemoryCategory(str, Enum):
     DOMAIN_LESSON = "domain_lesson"
     DOMAIN_PATTERN = "domain_pattern"
     DOMAIN_PREFERENCE = "domain_preference"
+    # Stage 12 addition: the same explicit "record this [for X]" capture
+    # a person can ask of the Manager (see
+    # src/services/memory/capture.py) is available to an appropriately
+    # equipped specialist too - "Arthur, record this for later" - and is
+    # a distinct request from a domain lesson/pattern/preference the
+    # specialist forms on its own.
+    RECORDING = "recording"
 
     @property
     def label(self) -> str:
@@ -60,6 +67,7 @@ class SpecialistMemoryCategory(str, Enum):
             "domain_lesson": "DOMAIN LESSON",
             "domain_pattern": "DOMAIN PATTERN",
             "domain_preference": "DOMAIN PREFERENCE",
+            "recording": "RECORDED FOR LATER",
         }[self.value]
 
     @property
@@ -76,6 +84,10 @@ class SpecialistMemoryCategory(str, Enum):
             "domain_preference": (
                 "A preference stated within this specialist's domain that should "
                 "shape how future work in it is judged."
+            ),
+            "recording": (
+                "Something explicitly captured for later retrieval, with an "
+                "intended purpose - never this specialist's routine work."
             ),
         }[self.value]
 

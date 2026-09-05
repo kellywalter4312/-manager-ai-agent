@@ -27,6 +27,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from src.core.versioning import MigrationChain, MigrationUnavailable
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -34,6 +35,14 @@ logger = get_logger(__name__)
 SCHEMA_VERSION = 1
 DEFAULT_STATE_PATH = "data/state/processed.json"
 DEFAULT_RETENTION_DAYS = 90
+
+# Every Migration this store currently knows how to run, keyed by the
+# version it starts from - see src/core/versioning.py. Empty today, for the
+# same reason src/services/memory/persistent.py's MEMORY_MIGRATIONS is empty:
+# schema 1 is still the only schema that has ever existed. A version this
+# store has no registered Migration for still falls back to exactly the
+# behavior it had before this seam existed (see StateStore.load()).
+STATE_MIGRATIONS: MigrationChain = MigrationChain()
 
 _PUNCT = re.compile(r"[^a-z0-9]+")
 
@@ -185,15 +194,81 @@ class StateStore:
             logger.warning("state file at '%s' is not an object; starting fresh", self._path)
             return ProcessedState()
 
-        state = ProcessedState.from_dict(raw)
-        if state.version != SCHEMA_VERSION:
-            logger.warning(
-                "state schema %s differs from %s; starting fresh",
-                state.version, SCHEMA_VERSION,
-            )
-            return ProcessedState()
+        # The exact expression ProcessedState.from_dict() uses for a missing
+        # key, computed here too so a file with no "version" at all is still
+        # treated as current - unchanged from before this method could migrate
+        # anything.
+        version = int(raw.get("version", SCHEMA_VERSION))
+        if version != SCHEMA_VERSION:
+            migrated = self._migrate_or_reset(raw, version)
+            if migrated is None:
+                logger.warning(
+                    "state schema %s differs from %s; starting fresh",
+                    version, SCHEMA_VERSION,
+                )
+                return ProcessedState()
+            raw = migrated
 
-        return state
+        return ProcessedState.from_dict(raw)
+
+    def _migrate_or_reset(self, raw: dict[str, Any], version: int) -> dict[str, Any] | None:
+        """Bring a recognized older schema forward, or return None so the
+        caller falls back to exactly today's behavior: a warning and a
+        fresh, empty state.
+
+        Unlike PersistentMemory, this store has never quarantined (moved
+        aside) a version it couldn't use - a mismatched file is simply left
+        where it was, and the next save() overwrites it. That is existing
+        behavior this method does not change for the "no migration
+        available" case; only the new migrate path below gets the stronger,
+        checkpoint-before-write protection, because that path is new code
+        this milestone is adding, not existing behavior being preserved.
+        """
+        if not STATE_MIGRATIONS.can_migrate(version, SCHEMA_VERSION):
+            return None
+
+        try:
+            migrated = STATE_MIGRATIONS.migrate(raw, from_version=version, to_version=SCHEMA_VERSION)
+        except MigrationUnavailable:
+            return None
+
+        if not isinstance(migrated, dict):
+            logger.warning(
+                "migration from schema %s produced an unusable state for '%s'; starting fresh",
+                version, self._path,
+            )
+            return None
+
+        checkpoint = self._path.with_suffix(f".v{version}-checkpoint")
+        try:
+            self._path.replace(checkpoint)
+        except OSError as exc:
+            logger.warning(
+                "state file at '%s' could not be checkpointed before migrating from "
+                "schema %s; leaving it untouched: %s",
+                self._path, version, exc,
+            )
+            return None
+
+        try:
+            temporary = self._path.with_suffix(".tmp")
+            temporary.write_text(
+                json.dumps(migrated, indent=2, sort_keys=True), encoding="utf-8"
+            )
+            os.replace(temporary, self._path)
+        except (OSError, TypeError, ValueError) as exc:
+            logger.warning(
+                "migrated state for '%s' could not be written; the pre-migration file "
+                "is preserved at '%s': %s",
+                self._path, checkpoint, exc,
+            )
+            return None
+
+        logger.info(
+            "migrated state store at '%s' from schema %s to %s; original preserved at '%s'",
+            self._path, version, SCHEMA_VERSION, checkpoint,
+        )
+        return migrated
 
     def save(self, state: ProcessedState, now: datetime) -> None:
         """Persist state atomically, pruning old entries first.

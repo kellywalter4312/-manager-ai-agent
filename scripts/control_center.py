@@ -26,9 +26,15 @@ which of those happened. That is the difference between an agent system and a
 chat box, and it is why the trail is shown by default rather than hidden behind
 a flag.
 
-Read-only throughout, exactly as every other entry point: the Gmail token
-carries gmail.readonly, no Outbox implementation exists, and nothing here can
-send, reply, apply, bid or contact anyone.
+Read-only for Gmail specifically, exactly as every other entry point: the
+Gmail token carries gmail.readonly, and no Outbox implementation exists - that
+has not changed. Phase 4 (Real-World Communication) made general
+communication (any recipient, any message, a real call) genuinely reachable
+here too, but never silently: every consequential send or call is described
+back and requires an explicit yes/no before anything actually happens (see
+``src/manager/guided_interaction.py``'s own ``PendingConfirmation`` handling) -
+the identical governed-confirmation gate every provider this axis will ever
+have goes through, never a per-provider exception.
 """
 
 from __future__ import annotations
@@ -36,11 +42,30 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from dataclasses import fields, replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.composition import build_manager, build_runtime  # noqa: E402
+from scripts.exchange import exchange, memory_for  # noqa: E402
+from src.agents.tools.communication import (  # noqa: E402
+    CommunicationCallTool,
+    CommunicationReadTool,
+    CommunicationSendTool,
+)
+from src.agents.tools.knowledge import KnowledgeLookupTool  # noqa: E402
+from src.agents.tools.live_information import LiveInformationTool  # noqa: E402
+from src.agents.tools.web_search import WebSearchTool  # noqa: E402
+from src.agents.tools.document_generation import DocumentGenerationTool  # noqa: E402
+from src.agents.tools.media_production import MediaProductionTool  # noqa: E402
+from src.agents.tools.toolset import ToolSet  # noqa: E402
+from src.channels.channel import Channel  # noqa: E402
+from src.composition import (  # noqa: E402
+    build_channel,
+    build_conversation,
+    build_manager,
+    build_runtime,
+)
 from src.config.coherence import ConfigurationError, check_configuration  # noqa: E402
 from src.config.settings import Settings  # noqa: E402
 from src.control_center.observer import ControlCenter  # noqa: E402
@@ -50,14 +75,56 @@ from src.control_center.render import (  # noqa: E402
     render_overview,
     render_system,
     render_turn,
+    render_unresolved_facts,
     render_voice,
     width,
 )
-from src.control_center.trail import observe  # noqa: E402
 from src.control_center.views import VoiceView  # noqa: E402
-from src.core.contracts import Task  # noqa: E402
-from src.providers.factory import ProviderConfigurationError  # noqa: E402
+from src.conversation.conversation import Conversation  # noqa: E402
+from src.providers.connection import AuthorizationState  # noqa: E402
+from src.providers.connection_factory import build_connection  # noqa: E402
+from src.providers.factory import ProviderConfigurationError, available_providers  # noqa: E402
+from src.providers.media.factory import available_video_generation_backends  # noqa: E402
+from src.providers.speech_factory import available_speech_providers  # noqa: E402
+from src.manager.cognition import assess_manager  # noqa: E402
+from src.services.credentials.account import ProviderAccount  # noqa: E402
+from src.services.credentials.account_store_file import (  # noqa: E402
+    DEFAULT_ACCOUNTS_PATH,
+    load_credential_store,
+    save_credential_store,
+)
+from src.services.ecosystem.registry_factory import build_ecosystem_registry  # noqa: E402
+from src.evolution import RiskLevel  # noqa: E402
+from src.services.evolution import ecosystem_evolution  # noqa: E402
+from src.services.evolution.governed_config import DEFAULT_CONFIG_PATH, load_governed_config  # noqa: E402
+from src.services.evolution.inventory import (  # noqa: E402
+    CAPABILITY_GENERAL_CONVERSATION,
+    CONNECTION_GMAIL_ADAPTER,
+    DEFAULT_CONVERSATION_HISTORY_LIMIT,
+    DEFAULT_GMAIL_ADAPTER_VERSION,
+    TOOL_DOCUMENT_GENERATION,
+    brain_development_snapshot,
+    discover_components,
+    memory_development_snapshot,
+)
+from src.services.evolution.ledger_store import DEFAULT_LEDGER_PATH, load_evolution_state  # noqa: E402
+from src.services.evolution.ecosystem_evolution import (  # noqa: E402
+    DEFAULT_BACKUPS_DIR,
+    DEFAULT_STAGING_DIR,
+)
 from src.services.email.mailbox_factory import build_mailbox  # noqa: E402
+from src.services.identity.presence import (  # noqa: E402
+    DIGITAL_HUMAN_STYLE_FIELDS,
+    digital_human_style_for,
+    environment_for,
+    set_avatar_preference,
+    set_digital_human_style,
+    set_environment_preference,
+)
+from src.services.identity.voice_preference import (  # noqa: E402
+    effective_voice_for,
+    set_voice_preference,
+)
 from src.services.memory.day import TimezoneError  # noqa: E402
 from src.services.profile.loader import load_profile  # noqa: E402
 from src.services.profile.profile import ProfileError  # noqa: E402
@@ -71,11 +138,139 @@ HELP = """
   status system            heartbeat, permissions, tools, health
   history                  what happened
   history <category>       filter: memory, report
+  unresolved               personal facts Alfred knows only as uncertainty
+  avatar                   every agent's current presence and avatar
+  avatar <agent>           one agent's avatar, and what else it could be
+  avatar <agent> <choice>  choose that agent's avatar - never a new agent
+  environment              every agent's current environment
+  environment <agent>      one agent's environment, and what else it could be
+  environment <agent> <choice>
+                           choose that agent's environment
+  profile <agent>          that agent's fuller presentation style
+  profile <agent> <field> <value>
+                           set one presentation style dimension
   voice                    whether Alfred can hear and speak
+  voice <agent>            that agent's current voice, and its choices
+  voice <agent> <name>     choose that agent's voice - never Alfred's Brain
   review                   what Alfred has noticed about his own system
+  capabilities             the real capability matrix - what Alfred can
+                           actually do right now, and why not otherwise
+  provider                 every ecosystem category and its backends
+  provider <category>      one category's detail: active, dependents, accounts
+  provider <category> accounts
+                           every persisted account for that category's backends
+  provider <category> add <backend> <account-id> <credential> [model]
+                           register a new persisted account for that backend
+  provider <category> select <backend> <account-id>
+                           make an already-registered account active for that backend
+  provider <category> revoke <backend> <account-id>
+                           remove an account immediately
+  provider <category> validate <key> [credential]
+                           attempt real construction, report honestly
+
+  Accounts are keyed by backend (e.g. 'anthropic', 'runway', 'null'),
+  never by category - the same key build_provider/build_media/
+  build_speech/build_communication_provider themselves read. Switching
+  the active backend never deletes another account: 'select' only
+  changes which one is active, 'revoke' is the only way to remove one.
+
+  connections              every external app/service: Gmail's real OAuth
+                           status, plus every additively-connected service
+  connections gmail        Gmail's real availability/authorization
+                           (OAuth via a token file - see
+                           scripts/authorize_gmail.py - never a typed
+                           credential)
+  connections <service>    that service's connected accounts
+  connections <service> connect <account-id> <credential> [model]
+                           connect a service (e.g. whatsapp, telegram) -
+                           never disconnects any other service
+  connections <service> disconnect <account-id>
+                           disconnect one account - every other
+                           connection is unaffected
+  connections <service> validate [credential]
+                           real construction where a backend exists;
+                           an honest refusal otherwise, never fabricated
+
+  Connections are additive: WhatsApp, Telegram and Gmail (and any
+  future service) can all be connected at once. There is no single
+  "active connection" the way there is one active LLM/voice/video
+  backend - connecting or disconnecting one never touches another.
+
+  RELOAD / RESTART REQUIRED: 'provider ... add/select/revoke' and
+  'connections ... connect/disconnect' persist to disk immediately, but
+  the already-running Manager was already built from whatever was
+  active at startup - runtime.provider/media/communication/speech are
+  each constructed once and do not hot-swap. Two ways to make a change
+  live: type 'reload' right here to rebuild this session in place
+  (ephemeral memory, if configured, is discarded by this - persisted
+  memory is not), or restart scripts/control_center.py/export_ui.py/
+  heartbeat.py, all of which read the same persisted state.
+
+  reload                   rebuild this session now from current
+                           settings and persisted accounts/connections
+  reload <field>=<value>   also switch which BACKEND is active for this
+                           session (e.g. 'reload provider=openai') -
+                           the one thing 'provider ... select' cannot
+                           do, since that only ever changes which
+                           ACCOUNT authorises an already-selected
+                           backend. Session-scoped, not persisted - set
+                           the matching MANAGER_<FIELD> environment
+                           variable to make it the default on every
+                           future start.
+  ecosystem                the whole ecosystem's real inventory: Alfred,
+                           every specialist, every provider/connection
+                           category, Brain mode, and the system/schema
+                           Upgrade Manifest
+  ecosystem <component>    one component's detail, version, and every
+                           proposal on record for it
+  ecosystem <component> propose <new-version> <risk> <reason>|<benefit>
+                           propose a governed component upgrade (risk:
+                           low/medium/high/critical)
+  ecosystem <component> propose-content <path.md> <risk> <reason>|<benefit>
+                           specialist/Alfred identity evolution only -
+                           the real new document content, staged and
+                           hashed, never a bare version string
+  ecosystem <component> run <proposal-id> yes|no
+                           evaluate -> approve -> apply -> verify ->
+                           activate a proposal in one governed step -
+                           the real side effect exists today for:
+                           provider.<category> (an account's model),
+                           alfred / specialist.<key> (the real identity
+                           document, backed up first), tool.document_generation
+                           (its real output directory),
+                           capability.general_conversation (real
+                           context-turn count), connection.gmail (its
+                           real adapter version - never the account).
+                           Anything else is refused honestly, never
+                           fabricated.
+  ecosystem <component> rollback <proposal-id> yes|no
+                           reverse an ACTIVE proposal's real effect
+  ecosystem history [component]
+                           every governed transition on record
+  ecosystem memory <agent> a real, developmental memory snapshot
+                           (retained knowledge by kind, corrections,
+                           learning sessions) - never a version, never
+                           "more records means more capable"
+  ecosystem brain <agent>  Brain development - reasoning mode,
+                           corrections learned, lessons recorded -
+                           read-only: never conflated with which
+                           provider vendor answers (that is
+                           provider.llm_provider)
+  ecosystem system         the existing SYSTEM_VERSION/schema/visual-
+                           environment Upgrade Manifest
+  ecosystem system upgrade <target-system-version> yes|no
+                           the real, existing governed system upgrade
+                           pipeline (plan -> execute -> verify)
   help                     this
   quit                     leave
 """.strip("\n")
+
+# Natural Conversation: how many recent turns a capability handler that
+# consults the Brain (open_conversation, knowledge_inquiry,
+# live_information) is offered as background. Small on purpose - this is
+# short-term context for a follow-up, not a transcript replay; a handful
+# of turns is what a person means by "what were we just talking about".
+CONVERSATION_HISTORY_LIMIT = 6
 
 
 def build(settings: Settings):
@@ -84,8 +279,42 @@ def build(settings: Settings):
     Same composition root, same per-run documents. The Control Center observes
     what everything else already builds rather than arranging its own version,
     which is what keeps the screen describing the real program.
+
+    **Universal provider/connection management repair.** Before this,
+    ``build_runtime`` was called bare here - the persisted
+    ``CredentialStore`` (``data/credentials/accounts.json``, the very
+    file the ``provider <category> add/select/revoke`` command writes)
+    was never consulted by the actual running system, for any category.
+    An account added or selected through this Control Center genuinely
+    updated the file and nothing else. Fixed by loading that same store
+    once, here, and passing each category's currently-active account
+    into ``build_runtime`` exactly as ``test_phase_1_5_provider_accounts.py``
+    already exercises directly - the identical, pre-existing seam, now
+    actually reached from the real production entry point rather than
+    only from a test.
+
+    **What this does not yet do.** This makes a selection made *before*
+    this process starts take effect *at* that start - restart, not live
+    reload. Changing an account while this Control Center is already
+    running still has no effect on it; the next command still only
+    writes the file. Live, in-session activation remains a separate,
+    unimplemented gap (see the ``provider`` command's own help text).
     """
-    runtime = build_runtime(settings)
+    accounts = load_credential_store(DEFAULT_ACCOUNTS_PATH)
+    config = load_governed_config(DEFAULT_CONFIG_PATH)
+    runtime = build_runtime(
+        settings,
+        accounts=accounts,
+        video_generation_account=accounts.active(settings.video_generation),
+        speech_account=accounts.active(settings.speech),
+        communication_account=accounts.active(settings.communication_provider),
+        # Full Alfred OS Ecosystem Evolution: the one real, governed
+        # connection-*adapter* axis this checkpoint added - genuinely
+        # distinct from the account/credential `accounts` above already
+        # governs. Defaults to "1" (this project's own prior, unchanged
+        # behaviour) unless a real evolution selected "2".
+        connection_adapter_version=config.get(CONNECTION_GMAIL_ADAPTER, DEFAULT_GMAIL_ADAPTER_VERSION),
+    )
 
     try:
         profile = load_profile(settings.profile_path)
@@ -100,12 +329,846 @@ def build(settings: Settings):
         mailbox=build_mailbox(settings),
         profile=profile,
         schedule=load_schedule(settings.schedule_path),
+        # Stage 14: the one real tool Alfred is equipped with on this,
+        # the actual production conversation path (this function is also
+        # what scripts/serve_ui.py builds through). Backed by whatever
+        # runtime.live_info resolved to - honestly empty (NullLiveInfoProvider)
+        # unless MANAGER_LIVE_INFO_PROVIDER was deliberately configured.
+        # Phase 3 (Knowledge, Research & Live Information): "web_search" is
+        # no longer unfilled - WebSearchTool wraps this same runtime.live_info
+        # provider under the tool name general_assistance's own "research"
+        # GeneralCapability already names, so a real, governed research path
+        # exists with no new backend and no change to that capability's own
+        # routing. "code_assistant" remains unfilled on purpose; this is a
+        # different, genuinely real capability.
+        #
+        # Stage 15 granted only CommunicationReadTool here - deliberately,
+        # while send/call had no confirmation gate at all, so "a Brain
+        # producing text" could never by itself become "a message actually
+        # sent." Phase 4 (Real-World Communication) built that gate
+        # (PendingConfirmation, see src/manager/guided_interaction.py) and
+        # grants Send/Call here now: every attempt still describes itself
+        # and waits for an explicit yes/no before anything with a real
+        # external effect happens, backed by whatever runtime.communication
+        # actually resolved to - honestly UNAVAILABLE (NullCommunicationProvider)
+        # unless a real provider is deliberately configured, the identical
+        # opt-in default every other real capability here already follows.
+        tools=ToolSet([
+            LiveInformationTool(runtime.live_info),
+            WebSearchTool(runtime.live_info),
+            CommunicationReadTool(runtime.communication),
+            CommunicationSendTool(runtime.communication),
+            CommunicationCallTool(runtime.communication),
+            # Stage 18: read-only access to the documents, books and notes
+            # the user themselves put in runtime.knowledge's folder. It
+            # sits beside live_information rather than replacing it -
+            # "what the world looks like now" and "what this person gave
+            # me" are separate reaches, separately granted - and it
+            # honours this file's own read-only invariant: a knowledge
+            # source can be quoted and can do nothing else.
+            KnowledgeLookupTool(runtime.knowledge),
+            # Creative-media / AI video-generation checkpoints: real
+            # narration/image/video production and, separately, real AI
+            # video generation, backed by runtime.media - honestly absent
+            # (every Null* collaborator) unless MANAGER_MEDIA and/or
+            # MANAGER_VIDEO_GENERATION were deliberately configured, the
+            # identical opt-in default every other real capability here
+            # already follows.
+            MediaProductionTool(
+                runtime.media.narrator,
+                runtime.media.illustrator,
+                runtime.media.composer,
+                runtime.media.video_generator,
+                asset_dir=Path(settings.media_asset_dir),
+            ),
+            # Phase 3: real, saved text documents ("create a report from
+            # these findings") - a governed write boundary, the identical
+            # role MediaProductionTool's own asset_dir plays for media.
+            # Full Alfred OS Ecosystem Evolution: the output directory is
+            # now a real, governed tool-configuration value
+            # (tool.document_generation) - config.get(...) falls back to
+            # settings.documents_dir unchanged when nothing was ever
+            # evolved, so an unconfigured installation behaves identically.
+            DocumentGenerationTool(output_dir=Path(config.get(TOOL_DOCUMENT_GENERATION, settings.documents_dir))),
+            # Files/Documents completion: real visual reasoning reaches
+            # Alfred through the Brain's own analyze_image question
+            # (bound below via ManagerSkills, exactly like converse) -
+            # never a Tool, since a Tool must never hold an LLMProvider
+            # directly. Nothing to grant here.
+        ]),
     )
-    return runtime, manager
+    # The door onto that Manager, built by the composition root rather than
+    # here. This file used to reach the Manager directly and construct its own
+    # NoSpeech to report on; both are now decisions taken in one place, which
+    # is what makes the screen describe the real program instead of a local
+    # copy of it.
+    conversation = build_conversation(manager)
+
+    # Natural Conversation: the real Conversation exists only from this
+    # point on, so this is the one place - the identical construction-order
+    # reason own_skills.bind_retain is called from composition.py rather
+    # than passed to ManagerSkills directly - that can close the loop.
+    # Bound, never handed over as the Conversation object itself: a
+    # capability handler receives only recent lines to reason over, never
+    # a way to read, join or say anything into the room.
+    if manager.own_skills is not None:
+        # Full Alfred OS Ecosystem Evolution: the turn count is now a
+        # real, governed capability-configuration value
+        # (capability.general_conversation) - falls back to this
+        # module's own, unchanged CONVERSATION_HISTORY_LIMIT default
+        # when nothing was ever evolved.
+        history_limit = int(config.get(CAPABILITY_GENERAL_CONVERSATION, DEFAULT_CONVERSATION_HISTORY_LIMIT))
+        manager.own_skills.bind_conversation_history(
+            lambda: [f"{u.speaker}: {u.text}" for u in conversation.latest(history_limit)]
+            if len(conversation)
+            else []
+        )
+
+    return (
+        runtime,
+        manager,
+        build_channel(runtime, manager),
+        conversation,
+    )
 
 
-def run_command(centre: ControlCenter, command: str, columns: int) -> str:
-    """One command, one screen. Overview first, detail on demand."""
+# ---------------------------------------------------------------------------
+# Files, Documents & Control Center completion: the real capability matrix
+# and provider-management surface, reusing the Universal Ecosystem registry
+# and the file-backed CredentialStore exactly as built for those - never a
+# second UI, never a second credential mechanism, never a hardcoded provider
+# switch. This is the Control Center's own user-facing management path:
+# routine provider/component changes happen here, at a terminal a person
+# already has open, never by editing source code.
+# ---------------------------------------------------------------------------
+
+
+def _capability_row(name: str, *, ready: bool, detail: str) -> str:
+    state = "READY" if ready else "UNAVAILABLE"
+    return f"  [{state:^11}] {name} - {detail}"
+
+
+def render_capabilities(centre: "ControlCenter") -> str:
+    """The real capability matrix - never a card shown because a class
+    exists. Every line below reads an actual runtime fact (a granted
+    tool, the Manager's own assessed Brain mode, a configured provider's
+    real name) and reports a state a person can act on, exactly as
+    Section 9 of this checkpoint's own brief asks for.
+    """
+    runtime = centre.runtime
+    manager = centre.manager
+    tools = manager.own_skills.tools if manager.own_skills is not None else None
+    brain = assess_manager(manager)
+
+    def permits(tool_name: str) -> bool:
+        return tools is not None and tools.permits(tool_name)
+
+    lines = ["CAPABILITIES - the real, current state, not what merely exists in code", ""]
+
+    lines.append(_capability_row(
+        "General Knowledge", ready=brain.is_full_brain and runtime.knowledge.name != "null",
+        detail=(
+            f"knowledge source={runtime.knowledge.name}, brain={brain.mode.label}"
+            if brain.is_full_brain else
+            f"requires Full Brain (currently {brain.mode.label}: {brain.reason})"
+        ),
+    ))
+    lines.append(_capability_row(
+        "Live Information", ready=brain.is_full_brain and permits("live_information") and runtime.live_info.name != "null",
+        detail=f"source={runtime.live_info.name}, brain={brain.mode.label}",
+    ))
+    lines.append(_capability_row(
+        "Research", ready=brain.is_full_brain and permits("web_search") and runtime.live_info.name != "null",
+        detail=(
+            f"web_search tool={'granted' if permits('web_search') else 'not granted'}, "
+            f"source={runtime.live_info.name}, brain={brain.mode.label}"
+        ),
+    ))
+    documents_name = runtime.knowledge.name
+    lines.append(_capability_row(
+        "Files: Text/PDF/Spreadsheet/Presentation",
+        ready=brain.is_full_brain and permits("knowledge_lookup") and documents_name != "null",
+        detail=(
+            f"knowledge source={documents_name}"
+            + (f" ({runtime.knowledge.directory})" if hasattr(runtime.knowledge, "directory") else "")
+            + f", brain={brain.mode.label}"
+        ),
+    ))
+    vision_capable = hasattr(runtime.provider, "analyze_image")
+    lines.append(_capability_row(
+        "Image Analysis (visual reasoning)",
+        ready=vision_capable,
+        detail=(
+            f"provider={runtime.provider.name} supports vision"
+            if vision_capable else
+            f"current provider ('{runtime.provider.name}') cannot perform visual "
+            "reasoning - select a vision-capable provider via 'provider llm_provider'"
+        ),
+    ))
+    lines.append(_capability_row(
+        "Document Generation", ready=brain.is_full_brain and permits("document_generation"),
+        detail=f"document_generation tool={'granted' if permits('document_generation') else 'not granted'}, brain={brain.mode.label}",
+    ))
+
+    # Whole-System Reality Audit: the matrix above (Phase 3's own scope)
+    # widened to the rest of the real system, per this audit's own
+    # broader Section 6 - every row below is the identical "read an
+    # actual runtime fact, never a class's mere existence" discipline.
+    media = runtime.media
+    lines.append(_capability_row(
+        "AI Image Generation", ready=media.illustrator.name != "null",
+        detail=f"provider={media.illustrator.name}",
+    ))
+    lines.append(_capability_row(
+        "Narration", ready=media.narrator.name != "null",
+        detail=f"provider={media.narrator.name}",
+    ))
+    lines.append(_capability_row(
+        "Video Composition", ready=media.composer.name != "null",
+        detail=f"provider={media.composer.name}",
+    ))
+    lines.append(_capability_row(
+        "AI Video Generation", ready=media.video_generator.name != "null",
+        detail=(
+            f"provider={media.video_generator.name}"
+            if media.video_generator.name != "null" else
+            "no video-generation provider configured - see 'provider video_generation_provider'"
+        ),
+    ))
+    lines.append(_capability_row(
+        "Voice (speech I/O)", ready=runtime.speech.name != "none",
+        detail=f"engine={runtime.speech.name}",
+    ))
+    lines.append(_capability_row(
+        "Avatar", ready=True,
+        detail=f"provider={runtime.avatar_provider.name} - manage with 'avatar <agent> <choice>'",
+    ))
+    lines.append(_capability_row(
+        "Environment", ready=True,
+        detail=f"provider={runtime.environment_provider.name} - manage with 'environment <agent> <choice>'",
+    ))
+    lines.append(_capability_row(
+        "Connection", ready=runtime.connection.name != "null",
+        detail=f"provider={runtime.connection.name} - manage with 'provider connection'",
+    ))
+    lines.append(_capability_row(
+        "Communication (messaging/calling, any recipient)",
+        ready=runtime.communication.name != "null",
+        detail=(
+            f"provider={runtime.communication.name} - manage with 'provider communication_provider'"
+            if runtime.communication.name != "null" else
+            "no communication provider configured - see 'provider communication_provider'"
+        ),
+    ))
+    lines.append(_capability_row(
+        "Memory", ready=True,
+        detail=f"backend={type(manager.memory).__name__} - genuinely persistent unless 'ephemeral' is selected",
+    ))
+
+    lines.append("")
+    lines.append("Use 'provider' to see and manage the providers backing these capabilities.")
+    return "\n".join(lines)
+
+
+def _require_category(registry, category: str):
+    adapter = registry.adapter_for(category)
+    if adapter is None:
+        known = ", ".join(registry.categories())
+        return None, f"no such category '{category}'. Known categories: {known}"
+    return adapter, None
+
+
+def _require_backend(adapter, category: str, backend: str):
+    """A backend key must actually belong to this category's own,
+    honest catalog (``adapter.available()``) - the identical "no
+    fabricated access" discipline every other real capability in this
+    project already holds itself to, applied to which vendor an account
+    is allowed to claim it authorises.
+    """
+    known = {descriptor.key for descriptor in adapter.available()}
+    if backend not in known:
+        listing = ", ".join(sorted(known)) or "(none registered)"
+        return f"no such backend '{backend}' in category '{category}'. Known backends: {listing}"
+    return None
+
+
+def run_provider_command(centre: "ControlCenter", rest: str) -> str:
+    """The Control Center's own provider-management surface - the exact
+    mechanism ``scripts/ecosystem_cli.py`` already established, reached
+    from the same terminal a person already has open rather than a
+    second tool they would have to know exists. Every operation below
+    goes through the real ``EcosystemRegistry``/``CredentialStore`` this
+    project already built; nothing here is a second implementation of
+    either.
+
+    **Universal provider/connection management repair.** Accounts are
+    now persisted keyed by *backend* (``account.provider`` = "anthropic",
+    "runway", "elevenlabs", "null", ...), never by *category*
+    ("llm_provider", "video_generation_provider", ...). This is not a
+    new convention - it is the one ``build_provider``/``build_media``/
+    ``build_speech``/``build_communication_provider`` already require
+    (each reads ``account.provider`` to decide which concrete builder to
+    call; see their own docstrings) and the one Phase 1.5's own tests
+    already construct accounts under
+    (``ProviderAccount(provider="anthropic", ...)``,
+    ``provider="runway"``, never a category string). Before this fix,
+    ``add``/``select``/``revoke``/``accounts`` persisted and looked
+    accounts up by *category* - which meant a persisted account could
+    never actually reach a real provider construction (feeding it into
+    ``build_runtime`` would have raised "Unknown provider
+    'llm_provider'"), the exact disconnect CHECK's audit found between
+    this command surface and the live system. ``category`` still
+    selects which registered ecosystem category's own backend catalog
+    an account must belong to (``_require_backend``, an honest refusal
+    for a name that category does not recognise) - it is no longer
+    conflated with the credential's own storage key.
+    """
+    registry = build_ecosystem_registry(centre.runtime.settings)
+    args = rest.split()
+
+    if not args:
+        return registry.describe_all()
+
+    category, *rest_args = args
+    adapter, error = _require_category(registry, category)
+    if error:
+        return error
+
+    if not rest_args:
+        lines = [adapter.describe()]
+        active = adapter.active()
+        lines.append(f"active: {active.key if active is not None else '(none)'}")
+        dependents = adapter.dependents()
+        if dependents:
+            lines.append("depends on this category being configured:")
+            lines.extend(f"  - {line}" for line in dependents)
+        return "\n".join(lines)
+
+    action, *action_args = rest_args
+    store = load_credential_store(DEFAULT_ACCOUNTS_PATH)
+
+    if action == "accounts":
+        backends = {descriptor.key for descriptor in adapter.available()}
+        accounts = [account for backend in backends for account in store.accounts_for(backend)]
+        if not accounts:
+            return f"no accounts registered for '{category}'"
+        lines = []
+        for account in accounts:
+            active = store.active(account.provider)
+            marker = "*" if active is not None and active.account_id == account.account_id else " "
+            model = f" model={account.model}" if account.model else ""
+            lines.append(f"[{marker}] {account.describe()}{model}")
+        return "\n".join(lines)
+
+    if action == "add":
+        if len(action_args) < 3:
+            return "usage: provider <category> add <backend> <account-id> <credential> [model]"
+        backend, account_id, credential, *model_args = action_args
+        backend_error = _require_backend(adapter, category, backend)
+        if backend_error:
+            return backend_error
+        account = ProviderAccount(
+            provider=backend, account_id=account_id, credential=credential,
+            model=model_args[0] if model_args else None,
+        )
+        store.add(account)
+        save_credential_store(store, DEFAULT_ACCOUNTS_PATH)
+        return (
+            f"added {account.describe()} (active) - no secret is ever echoed back. "
+            "Persisted only - not yet active on this running process. "
+            "Type 'reload' now to make it live in this session, or restart."
+        )
+
+    if action == "select":
+        if len(action_args) < 2:
+            return "usage: provider <category> select <backend> <account-id>"
+        backend, account_id = action_args[0], action_args[1]
+        backend_error = _require_backend(adapter, category, backend)
+        if backend_error:
+            return backend_error
+        try:
+            store.select(backend, account_id)
+        except KeyError as exc:
+            return f"FAILED: {exc}"
+        save_credential_store(store, DEFAULT_ACCOUNTS_PATH)
+        return (
+            f"{backend}/{account_id} is now active. "
+            "Persisted only - not yet active on this running process. "
+            "Type 'reload' now to make it live in this session, or restart."
+        )
+
+    if action == "revoke":
+        if len(action_args) < 2:
+            return "usage: provider <category> revoke <backend> <account-id>"
+        backend, account_id = action_args[0], action_args[1]
+        backend_error = _require_backend(adapter, category, backend)
+        if backend_error:
+            return backend_error
+        store.revoke(backend, account_id)
+        save_credential_store(store, DEFAULT_ACCOUNTS_PATH)
+        return f"revoked {backend}/{account_id}"
+
+    if action == "validate":
+        if not action_args:
+            return "usage: provider <category> validate <key> [credential]"
+        key = action_args[0]
+        credential = action_args[1] if len(action_args) > 1 else None
+        outcome = adapter.validate(key, credential=credential)
+        detail = (
+            f"{'OK' if outcome.ok else 'FAILED'}: {outcome.detail}\n"
+            "(Real construction only - no live external call was made. "
+            "This is IMPLEMENTED/TEST-VERIFIED evidence, never LIVE EXTERNAL VERIFIED.)"
+        )
+        return detail
+
+    return f"unknown provider action '{action}'. Try: accounts, add, select, revoke, validate"
+
+
+# ---------------------------------------------------------------------------
+# Independent-manageability repair: PROVIDERS (above - one active backend
+# per category, e.g. LLM/voice/video) are architecturally distinct from
+# CONNECTIONS (below) - external applications/services (Gmail, and, in
+# future, WhatsApp/Telegram/X/Spotify/...) that are ADDITIVE: many can be
+# connected at once, connecting one never disconnects another, and there is
+# no single "active connection" across unrelated services. This is not a
+# second credential system - it reuses the identical CredentialStore/
+# ProviderAccount every provider account already lives in, addressed
+# directly by the service's own name instead of through an
+# EcosystemRegistry category (a category implies "pick one active
+# backend", which is exactly the shape connections must not have).
+# ---------------------------------------------------------------------------
+
+
+def _provider_axis_backend_names() -> set[str]:
+    """Backend keys belonging to the *provider* axis (LLM/voice/video) -
+    single-active-per-category, never an external app connection. Excluded
+    from the additive connections listing so 'anthropic'/'runway'/
+    'elevenlabs' are never mistaken for a connected service."""
+    return (
+        set(available_providers())
+        | set(available_speech_providers())
+        | set(available_video_generation_backends())
+    )
+
+
+def _gmail_connection_status(settings: Settings) -> list[str]:
+    """Gmail's real status, independent of whichever backend the
+    single-active 'connection' ecosystem category currently has selected -
+    ``replace(..., connection_provider="gmail")`` builds Gmail specifically,
+    the identical seam that category's own ``validate("gmail")`` already
+    uses internally, so this reports the truth about Gmail even when
+    ``settings.connection_provider`` is presently "null".
+
+    Gmail authenticates via a real, already-working OAuth flow
+    (``scripts/authorize_gmail.py``, a token file, never a typed secret) -
+    never routed through CredentialStore, and never faked here as though
+    it were one.
+    """
+    connection = build_connection(replace(settings, connection_provider="gmail"))
+    lines = [
+        "gmail (OAuth - connected via a token file, not a typed credential):",
+        f"  availability : {connection.availability.state.value}",
+        f"  authorization: {connection.authorization.value}",
+        f"  operations   : {', '.join(connection.supported_operations) or '(none)'}",
+    ]
+    if connection.authorization != AuthorizationState.AUTHORIZED:
+        lines.append("  connect with : python scripts/authorize_gmail.py")
+    lines.append(f"  disconnect by: deleting '{settings.gmail_token_path}'")
+    return lines
+
+
+def run_connections_command(centre: "ControlCenter", rest: str) -> str:
+    """The additive connection-management surface: connect/disconnect/list/
+    status/validate for external applications and services, none of which
+    ever displaces another. Reuses the same persisted ``CredentialStore``
+    every provider account already lives in - a connection's credential is
+    a ``ProviderAccount`` like any other, keyed by the service's own name
+    ("whatsapp", "telegram", ...) rather than by an ecosystem category,
+    since there is no "pick one active service" concept to enforce here.
+
+    Any service name is accepted - open-ended on purpose (Phase 4's own
+    "examples are not boundaries" principle): a future service needs no
+    change here to become connectable, only a name.
+
+    Gmail is the one connection with a genuinely different authentication
+    shape today (OAuth via a token file, not a single secret string) and is
+    reported through its own real mechanism (see ``_gmail_connection_status``)
+    rather than forced into the string-credential shape that fits
+    WhatsApp/Telegram-style access tokens correctly but would misrepresent
+    Gmail's own.
+    """
+    settings = centre.runtime.settings
+    args = rest.split()
+    store = load_credential_store(DEFAULT_ACCOUNTS_PATH)
+    excluded = _provider_axis_backend_names() | {"null"}
+    connected_services = sorted(p for p in store.providers() if p not in excluded and p != "gmail")
+
+    if not args:
+        lines = ["CONNECTIONS (persistent, additive - connecting one never disconnects another)", ""]
+        lines.extend(_gmail_connection_status(settings))
+        lines.append("")
+        if connected_services:
+            for service in connected_services:
+                lines.append(f"{service}: connected ({len(store.accounts_for(service))} account(s))")
+        else:
+            lines.append("no other services connected yet")
+        lines.append("")
+        lines.append("connect a new one with: connections <service> connect <account-id> <credential> [model]")
+        return "\n".join(lines)
+
+    service, *rest_args = args
+
+    if service == "gmail":
+        if not rest_args or rest_args[0] == "status":
+            return "\n".join(_gmail_connection_status(settings))
+        action = rest_args[0]
+        if action in ("connect", "disconnect"):
+            return (
+                "gmail authenticates via OAuth, not a typed credential - "
+                "connect with 'python scripts/authorize_gmail.py'; "
+                f"disconnect by deleting '{settings.gmail_token_path}'."
+            )
+        if action == "validate":
+            registry = build_ecosystem_registry(settings)
+            outcome = registry.adapter_for("connection").validate("gmail")
+            return (
+                f"{'OK' if outcome.ok else 'FAILED'}: {outcome.detail}\n"
+                "(Real construction only - no live external call was made.)"
+            )
+        return f"unknown connections action '{action}' for gmail. Try: status, validate"
+
+    if service in _provider_axis_backend_names():
+        return (
+            f"'{service}' is a provider backend (LLM/voice/video), not an external app "
+            f"connection - manage it with 'provider <category> ...' instead."
+        )
+
+    if not rest_args:
+        accounts = store.accounts_for(service)
+        if not accounts:
+            return (
+                f"'{service}' is not connected. "
+                f"Connect with: connections {service} connect <account-id> <credential> [model]"
+            )
+        active = store.active(service)
+        lines = [f"{service}:"]
+        for account in accounts:
+            marker = "*" if active is not None and active.account_id == account.account_id else " "
+            model = f" model={account.model}" if account.model else ""
+            lines.append(f"  [{marker}] {account.describe()}{model}")
+        return "\n".join(lines)
+
+    action, *action_args = rest_args
+
+    if action == "connect":
+        if len(action_args) < 2:
+            return "usage: connections <service> connect <account-id> <credential> [model]"
+        account_id, credential, *model_args = action_args
+        account = ProviderAccount(
+            provider=service, account_id=account_id, credential=credential,
+            model=model_args[0] if model_args else None,
+        )
+        store.add(account)
+        save_credential_store(store, DEFAULT_ACCOUNTS_PATH)
+        return (
+            f"connected {account.describe()} - no secret is ever echoed back. "
+            f"'{service}' stays connected independently of every other service. "
+            "Persisted only - not yet active on this running process. "
+            "Type 'reload' now to make it live in this session, or restart."
+        )
+
+    if action == "disconnect":
+        if not action_args:
+            return "usage: connections <service> disconnect <account-id>"
+        store.revoke(service, action_args[0])
+        save_credential_store(store, DEFAULT_ACCOUNTS_PATH)
+        return f"disconnected {service}/{action_args[0]} - every other connection is unaffected."
+
+    if action == "status":
+        accounts = store.accounts_for(service)
+        if not accounts:
+            return f"'{service}' is not connected."
+        active = store.active(service)
+        lines = [f"{service}:"]
+        for account in accounts:
+            marker = "*" if active is not None and active.account_id == account.account_id else " "
+            model = f" model={account.model}" if account.model else ""
+            lines.append(f"  [{marker}] {account.describe()}{model}")
+        return "\n".join(lines)
+
+    if action == "validate":
+        registry = build_ecosystem_registry(settings)
+        credential = action_args[0] if action_args else None
+        for category in ("communication_provider", "connection"):
+            adapter = registry.adapter_for(category)
+            if service in {descriptor.key for descriptor in adapter.available()}:
+                outcome = adapter.validate(service, credential=credential)
+                return (
+                    f"{'OK' if outcome.ok else 'FAILED'}: {outcome.detail}\n"
+                    "(Real construction only - no live external call was made.)"
+                )
+        return (
+            f"no automated validation exists yet for '{service}' - the credential is "
+            "stored, but its correctness cannot be mechanically checked without a real "
+            "integration for this service."
+        )
+
+    return f"unknown connections action '{action}'. Try: connect, disconnect, status, validate"
+
+
+# ---------------------------------------------------------------------------
+# Full Alfred OS Ecosystem Evolution: a real, governed management surface
+# spanning the whole ecosystem - providers, connections, specialists,
+# Brain mode, and the existing system/schema/visual-environment Upgrade
+# Manifest - not only Alfred's own LLM. Reuses everything already built:
+# EcosystemRegistry/CredentialStore for providers and connections,
+# runtime.specialists for specialists, src.evolution's own governed
+# ledger for the propose/evaluate/approve/apply/verify/activate/rollback
+# lifecycle, and src.control_center.manifest/upgrade_lifecycle for the
+# system-version/schema axis this project already has a complete,
+# separate governed pipeline for. Memory participates as a *developmental*
+# read-only report (`ecosystem memory <agent>`), never through this same
+# propose/apply pipeline - see src/services/evolution/ecosystem_evolution.py's
+# own docstring for why conflating the two would misrepresent what memory
+# actually is.
+# ---------------------------------------------------------------------------
+
+
+def run_ecosystem_command(centre: "ControlCenter", rest: str) -> str:
+    settings = centre.runtime.settings
+    args = rest.split()
+
+    state = load_evolution_state(DEFAULT_LEDGER_PATH)
+    components = discover_components(
+        centre.runtime, centre.manager, accounts_path=DEFAULT_ACCOUNTS_PATH, config_path=DEFAULT_CONFIG_PATH,
+    )
+    state = ecosystem_evolution.seed_component_versions(state, components)
+    ecosystem_evolution.save_evolution_state(state, DEFAULT_LEDGER_PATH)
+
+    if not args:
+        lines = ["ECOSYSTEM INVENTORY (real, currently-installed components)"]
+        by_category: dict[str, list] = {}
+        for component in components:
+            by_category.setdefault(component.category, []).append(component)
+        for category in sorted(by_category):
+            lines.append(f"\n{category}:")
+            for component in by_category[category]:
+                lines.append(f"  {component.describe()}")
+        lines.append(
+            "\nUse 'ecosystem <component-id>' for detail, 'ecosystem memory <agent>' for a "
+            "development snapshot, 'ecosystem brain <agent>' for Brain development, "
+            "'ecosystem history' for what has happened, or 'ecosystem system' for the "
+            "system/schema/visual-environment Upgrade Manifest."
+        )
+        return "\n".join(lines)
+
+    if args[0] == "history":
+        component_filter = args[1] if len(args) > 1 else None
+        entries = state.history_for(component_filter)
+        if not entries:
+            return "no evolution history yet" + (f" for '{component_filter}'" if component_filter else "")
+        return "\n".join(entry.describe() for entry in entries)
+
+    if args[0] == "memory":
+        if len(args) < 2:
+            return "usage: ecosystem memory <agent-name>"
+        agent_name = args[1]
+        memory = memory_for(centre.manager, agent_name)
+        if memory is None:
+            return f"'{agent_name}' has no memory to report on"
+        return memory_development_snapshot(agent_name, memory).describe()
+
+    if args[0] == "brain":
+        if len(args) < 2:
+            return "usage: ecosystem brain <agent-name>"
+        agent_name = args[1]
+        memory = memory_for(centre.manager, agent_name)
+        if memory is None:
+            return f"'{agent_name}' has no memory to report Brain development from"
+        mode = settings.brain if agent_name == centre.manager.own_skills.name else settings.specialist_brain
+        return brain_development_snapshot(agent_name, memory, reasoning_mode=mode)
+
+    if args[0] == "system":
+        return _run_system_upgrade_command(centre, args[1:])
+
+    component_id, *rest_args = args
+    component = next((c for c in components if c.component_id == component_id), None)
+    if component is None:
+        known = ", ".join(c.component_id for c in components)
+        return f"no such component '{component_id}'. Known components: {known}"
+
+    if not rest_args:
+        lines = [component.describe()]
+        if component.detail:
+            lines.append(f"  detail: {component.detail}")
+        proposals = state.proposals_for(component_id)
+        if proposals:
+            lines.append("  proposals:")
+            for proposal in proposals:
+                lines.append(
+                    f"    {proposal.proposal_id}: {proposal.status.value} "
+                    f"({proposal.current_version} -> {proposal.proposed_version}) - {proposal.reason}"
+                )
+        else:
+            lines.append("  no proposals yet")
+        return "\n".join(lines)
+
+    action, *action_args = rest_args
+
+    if action == "propose":
+        if len(action_args) < 3:
+            return "usage: ecosystem <component> propose <new-version> <risk> <reason>|<expected-benefit>"
+        proposed_version, risk_name, *remainder = action_args
+        try:
+            risk = RiskLevel(risk_name.lower())
+        except ValueError:
+            return f"'{risk_name}' is not a real risk level. Try: low, medium, high, critical"
+        text = " ".join(remainder)
+        reason, sep, benefit = text.partition("|")
+        if not sep:
+            return "usage: ecosystem <component> propose <new-version> <risk> <reason>|<expected-benefit>"
+        result = ecosystem_evolution.propose(
+            state, component_id=component_id, proposed_version=proposed_version,
+            proposed_change=f"{component_id}: {component.version} -> {proposed_version}",
+            reason=reason.strip(), expected_benefit=benefit.strip(), risk_level=risk,
+            ledger_path=DEFAULT_LEDGER_PATH,
+        )
+        if not result.success:
+            return f"FAILED: {result.reason}"
+        return f"proposed '{result.proposal.proposal_id}': {component.version} -> {proposed_version} ({result.reason})"
+
+    if action == "propose-content":
+        if len(action_args) < 3:
+            return "usage: ecosystem <component> propose-content <path-to-new-content.md> <risk> <reason>|<expected-benefit>"
+        content_path, risk_name, *remainder = action_args
+        try:
+            risk = RiskLevel(risk_name.lower())
+        except ValueError:
+            return f"'{risk_name}' is not a real risk level. Try: low, medium, high, critical"
+        text = " ".join(remainder)
+        reason, sep, benefit = text.partition("|")
+        if not sep:
+            return "usage: ecosystem <component> propose-content <path-to-new-content.md> <risk> <reason>|<expected-benefit>"
+        result = ecosystem_evolution.propose_identity_content(
+            state, component_id=component_id, new_content_path=content_path,
+            reason=reason.strip(), expected_benefit=benefit.strip(), risk_level=risk,
+            ledger_path=DEFAULT_LEDGER_PATH, staging_dir=DEFAULT_STAGING_DIR,
+        )
+        if not result.success:
+            return f"FAILED: {result.reason}"
+        return f"proposed '{result.proposal.proposal_id}': {component.version} -> {result.proposal.proposed_version} ({result.reason})"
+
+    if action == "run":
+        if len(action_args) < 2:
+            return "usage: ecosystem <component> run <proposal-id> yes|no"
+        proposal_id, decision = action_args[0], action_args[1]
+        approved = decision.lower() in ("yes", "y", "true")
+        result = ecosystem_evolution.run(
+            state, proposal_id=proposal_id, approved=approved, settings=settings,
+            ledger_path=DEFAULT_LEDGER_PATH, accounts_path=DEFAULT_ACCOUNTS_PATH,
+            config_path=DEFAULT_CONFIG_PATH, staging_dir=DEFAULT_STAGING_DIR, backups_dir=DEFAULT_BACKUPS_DIR,
+        )
+        status = result.proposal.status.value if result.proposal else "(unknown)"
+        detail = (
+            f"{'OK' if result.success else 'FAILED'}: {result.reason} (status: {status})"
+        )
+        if result.success and component_id.startswith("provider."):
+            detail += (
+                "\nPersisted and independently re-verified. This running process still "
+                "holds the previous object - type 'reload' to make it live in this "
+                "session, or restart."
+            )
+        elif result.success:
+            detail += (
+                "\nPersisted and independently re-verified. This running process still "
+                "holds the previous state - build a fresh session (or 'reload') to make "
+                "it live."
+            )
+        return detail
+
+    if action == "rollback":
+        if len(action_args) < 2:
+            return "usage: ecosystem <component> rollback <proposal-id> yes|no"
+        proposal_id, decision = action_args[0], action_args[1]
+        approved = decision.lower() in ("yes", "y", "true")
+        result = ecosystem_evolution.rollback(
+            state, proposal_id=proposal_id, approved=approved, settings=settings,
+            ledger_path=DEFAULT_LEDGER_PATH, accounts_path=DEFAULT_ACCOUNTS_PATH,
+            config_path=DEFAULT_CONFIG_PATH, staging_dir=DEFAULT_STAGING_DIR, backups_dir=DEFAULT_BACKUPS_DIR,
+        )
+        status = result.proposal.status.value if result.proposal else "(unknown)"
+        return f"{'OK' if result.success else 'FAILED'}: {result.reason} (status: {status})"
+
+    return f"unknown ecosystem action '{action}'. Try: propose, propose-content, run, rollback"
+
+
+def _run_system_upgrade_command(centre: "ControlCenter", args: list[str]) -> str:
+    """The real, existing Stage 6-9 Upgrade Manifest/Planner/Executor/
+    Lifecycle (src/control_center/manifest.py, upgrade_planner.py,
+    src/upgrade_executor.py, src/upgrade_lifecycle.py) - complete and
+    already tested, never duplicated here. Only the command surface is
+    new: nothing before this checkpoint ever called ``run_upgrade`` from
+    the Control Center at all.
+    """
+    from src.control_center.manifest import upgrade_manifest
+    from src.control_center.snapshot import SNAPSHOT_VERSION
+    from src.control_center.upgrade_planner import UpgradeRequest
+    from src.upgrade_lifecycle import run_upgrade
+
+    manifest = upgrade_manifest(snapshot_version=SNAPSHOT_VERSION)
+
+    if not args:
+        lines = [
+            "SYSTEM UPGRADE MANIFEST (real, currently-installed compatibility contracts)",
+            f"  system_version       : {manifest.system_version}",
+            f"  snapshot_version     : {manifest.snapshot_version}",
+            f"  memory_schema_version: {manifest.memory_schema_version}",
+            f"  state_schema_version : {manifest.state_schema_version}",
+        ]
+        for entry in manifest.visual_environments:
+            lines.append(f"  visual_environment[{entry.surface}]: {entry.id}:{entry.version}")
+        lines.append("")
+        lines.append("upgrade with: ecosystem system upgrade <target-system-version> yes|no")
+        return "\n".join(lines)
+
+    if args[0] != "upgrade":
+        return f"unknown 'system' action '{args[0]}'. Try: (nothing), upgrade"
+    if len(args) < 3:
+        return "usage: ecosystem system upgrade <target-system-version> yes|no"
+
+    target_version, decision = args[1], args[2]
+    approved = decision.lower() in ("yes", "y", "true")
+    request = UpgradeRequest(target_system_version=target_version)
+    result = run_upgrade(request, approved=approved, current_manifest=manifest)
+
+    lines = [
+        f"plan status : {result.plan.status.value}",
+        f"reason      : {result.reason}",
+        f"executed    : {result.executed}",
+        f"verified    : {result.verified}",
+    ]
+    if result.execution is not None and result.execution.stores_affected:
+        lines.append(f"stores affected: {', '.join(result.execution.stores_affected)}")
+    return "\n".join(lines)
+
+
+def run_command(
+    centre: ControlCenter,
+    command: str,
+    columns: int,
+    channel: Channel,
+    conversation: Conversation,
+) -> str:
+    """One command, one screen. Overview first, detail on demand.
+
+    ``channel`` and ``conversation`` are required rather than
+    optional-with-a-default, deliberately. A default would have to build its
+    own, and every caller that took it - including every test - would then be
+    exercising something the composition root never made. The point of these
+    phases is that requests travel through the composed door and are recorded
+    in the composed room; a parameter that can be skipped is a door that can be
+    walked around.
+    """
     command = command.strip()
     if not command:
         return ""
@@ -138,21 +1201,266 @@ def run_command(centre: ControlCenter, command: str, columns: int) -> str:
             )
         return render_history(view, columns)
 
+    if verb == "unresolved":
+        # Stage 12 closure: genuine, currently-unresolved personal
+        # uncertainty - "mom's birthday is either March 24 or May 24".
+        # Read-only, like history/status: resolving one happens by
+        # saying the correct date to Alfred (the "talk" command above),
+        # never from this screen.
+        return render_unresolved_facts(centre.unresolved_facts(), columns)
+
+    if verb == "avatar":
+        # Stage 17: a governed preference, read and changed here through
+        # the same AvatarProvider/set_avatar_preference() this project's
+        # `POST /avatar` route also calls - one write path, two entry
+        # points. Choosing an avatar never builds, replaces or renames an
+        # agent: it only ever changes what an already-registered agent
+        # looks like.
+        provider = centre.runtime.avatar_provider
+        agent_name, _, avatar_id = rest.partition(" ")
+        agent_name, avatar_id = agent_name.strip(), avatar_id.strip()
+
+        if not agent_name:
+            lines = ["AVATAR"]
+            for view in centre.overview().agents:
+                presence = view.presence
+                if presence is None:
+                    continue
+                lines.append(
+                    f"  {view.name}: {presence.avatar.label} "
+                    f"({presence.avatar.avatar_id}) - {presence.state.value}"
+                )
+            return "\n".join(lines)
+
+        view = centre.overview().agent(agent_name)
+        if view is None:
+            known = ", ".join(a.name for a in centre.overview().agents)
+            return f"no agent called '{agent_name}'. Registered: {known}"
+
+        if not avatar_id:
+            lines = [f"AVATAR - {view.name}"]
+            if view.presence is not None:
+                lines.append(
+                    f"  current: {view.presence.avatar.label} "
+                    f"({view.presence.avatar.avatar_id})"
+                )
+            lines.append("  choices:")
+            for profile in provider.catalog():
+                lines.append(f"    {profile.avatar_id}: {profile.label}")
+            lines.append(f"  choose with: avatar {view.name} <avatar_id>")
+            return "\n".join(lines)
+
+        memory = memory_for(centre.manager, view.name)
+        if memory is None:
+            return f"'{view.name}' has no memory to store an avatar preference in"
+
+        ok = set_avatar_preference(
+            view.name,
+            avatar_id,
+            provider=provider,
+            recall=memory.recall,
+            remember=memory.remember,
+            forget=memory.forget,
+        )
+        if not ok:
+            known = ", ".join(p.avatar_id for p in provider.catalog())
+            return f"no such avatar '{avatar_id}'. Choices: {known}"
+        return f"{view.name}'s avatar is now {avatar_id.strip().lower()}"
+
+    if verb == "environment":
+        # Whole-System Reality Audit: the identical governed-preference
+        # pattern the 'avatar' command above already uses, extended to
+        # the environment axis - found missing during that audit. One
+        # write path (set_environment_preference), reached here; never
+        # a second implementation of what avatar already established.
+        # Choosing an environment never builds, replaces or renames an
+        # agent, and never touches Brain/Memory/Voice/Avatar - only
+        # what space an already-registered agent is described as being
+        # presented within.
+        env_provider = centre.runtime.environment_provider
+        agent_name, _, environment_id = rest.partition(" ")
+        agent_name, environment_id = agent_name.strip(), environment_id.strip()
+
+        if not agent_name:
+            lines = ["ENVIRONMENT"]
+            for view in centre.overview().agents:
+                memory = memory_for(centre.manager, view.name)
+                current = environment_for(
+                    view.name, provider=env_provider,
+                    recall=memory.recall if memory is not None else None,
+                )
+                lines.append(f"  {view.name}: {current.label} ({current.environment_id})")
+            return "\n".join(lines)
+
+        view = centre.overview().agent(agent_name)
+        if view is None:
+            known = ", ".join(a.name for a in centre.overview().agents)
+            return f"no agent called '{agent_name}'. Registered: {known}"
+
+        memory = memory_for(centre.manager, view.name)
+
+        if not environment_id:
+            current = environment_for(
+                view.name, provider=env_provider,
+                recall=memory.recall if memory is not None else None,
+            )
+            lines = [f"ENVIRONMENT - {view.name}", f"  current: {current.label} ({current.environment_id})"]
+            lines.append("  choices:")
+            for profile in env_provider.catalog():
+                lines.append(f"    {profile.environment_id}: {profile.label}")
+            lines.append(f"  choose with: environment {view.name} <environment_id>")
+            return "\n".join(lines)
+
+        if memory is None:
+            return f"'{view.name}' has no memory to store an environment preference in"
+
+        ok = set_environment_preference(
+            view.name,
+            environment_id,
+            provider=env_provider,
+            recall=memory.recall,
+            remember=memory.remember,
+            forget=memory.forget,
+        )
+        if not ok:
+            known = ", ".join(p.environment_id for p in env_provider.catalog())
+            return f"no such environment '{environment_id}'. Choices: {known}"
+        return f"{view.name}'s environment is now {environment_id.strip().lower()}"
+
+    if verb == "profile":
+        # Stage 17.4: the *other* dimensions of a DigitalHumanProfile -
+        # posture, clothing, idle/listening/speaking behaviour,
+        # expression and gesture style. Never the avatar itself, which
+        # stays the `avatar` command above; this is another caller of
+        # the same governed set_digital_human_style() write `POST
+        # /profile` also calls - one write path, two entry points, the
+        # identical shape the avatar command already established.
+        agent_name, _, remainder = rest.partition(" ")
+        agent_name = agent_name.strip()
+
+        if not agent_name:
+            lines = ["PROFILE"]
+            for view in centre.overview().agents:
+                lines.append(f"  {view.name}")
+            lines.append("  see one with: profile <agent>")
+            return "\n".join(lines)
+
+        view = centre.overview().agent(agent_name)
+        if view is None:
+            known = ", ".join(a.name for a in centre.overview().agents)
+            return f"no agent called '{agent_name}'. Registered: {known}"
+
+        field, _, value = remainder.strip().partition(" ")
+        field, value = field.strip(), value.strip()
+
+        if not field:
+            lines = [f"PROFILE - {view.name}"]
+            if view.presence is not None and view.presence.profile is not None:
+                for name in DIGITAL_HUMAN_STYLE_FIELDS:
+                    current = getattr(view.presence.profile, name) or "—"
+                    lines.append(f"  {name}: {current}")
+            lines.append(
+                f"  set one with: profile {view.name} <field> <value> "
+                f"(fields: {', '.join(DIGITAL_HUMAN_STYLE_FIELDS)})"
+            )
+            return "\n".join(lines)
+
+        if not value:
+            return f"say what {field} should be: profile {view.name} {field} <value>"
+
+        memory = memory_for(centre.manager, view.name)
+        if memory is None:
+            return f"'{view.name}' has no memory to store a presentation style in"
+
+        ok = set_digital_human_style(
+            view.name, {field: value},
+            recall=memory.recall, remember=memory.remember, forget=memory.forget,
+        )
+        if not ok:
+            return (
+                f"no such field '{field}'. Fields: {', '.join(DIGITAL_HUMAN_STYLE_FIELDS)}"
+            )
+        return f"{view.name}'s {field} is now '{value}'"
+
     if verb == "voice":
         # Reported, never asserted. What is shown is the adapter's own
         # Availability - three states, not a boolean - so an engine that has
         # not been proven reads as unproven rather than as missing.
         #
-        # NoSpeech is still constructed here rather than obtained from the
-        # composition root, because nothing composes a speech adapter yet.
-        # That is honest today - it is genuinely what the system has - and it
-        # is the one line that changes when speech joins the Runtime.
-        from src.channels.speech import NoSpeech
+        # Read from the channel the composition root built, not constructed
+        # here. This used to build its own NoSpeech, which meant the screen
+        # reported a fact about this function rather than about the running
+        # system - and would have gone on saying "no speech engine" after one
+        # was installed.
+        # Duck-typed, in the same spirit as availability_of and
+        # describe_interface: a door that carries a speech engine is asked for
+        # it, and one that does not says so. A TextChannel genuinely has no
+        # engine, and that is a truthful answer rather than a missing case.
+        speech = getattr(channel, "speech", None)
 
-        speech = NoSpeech()
-        return render_voice(
-            VoiceView(engine=speech.name, availability=speech.availability), columns
+        # 0.2 Reality Audit: `voice` alone stays exactly the engine-status
+        # report above - unchanged. `voice <agent>` and `voice <agent>
+        # <name>` are additive, the same governed-preference shape
+        # `avatar`/`avatar <agent> <id>` already established, applied to
+        # which real voice an agent is heard in rather than which avatar
+        # it is drawn as.
+        agent_name, _, voice_name = rest.partition(" ")
+        agent_name, voice_name = agent_name.strip(), voice_name.strip()
+
+        if not agent_name:
+            if speech is None:
+                return f"VOICE\n  the {channel.name} channel carries no speech engine"
+            return render_voice(
+                VoiceView(engine=speech.name, availability=speech.availability), columns
+            )
+
+        view = centre.overview().agent(agent_name)
+        if view is None:
+            known = ", ".join(a.name for a in centre.overview().agents)
+            return f"no agent called '{agent_name}'. Registered: {known}"
+
+        memory = memory_for(centre.manager, view.name)
+        if memory is None:
+            return f"'{view.name}' has no memory to store a voice preference in"
+
+        agent = (
+            centre.manager.own_skills
+            if view.name == (centre.manager.own_skills.name if centre.manager.own_skills else None)
+            else centre.manager.registry.get(view.name)
         )
+        current = effective_voice_for(agent, recall=memory.recall) if agent is not None else None
+
+        # Only a Windows-style engine can enumerate its own installed
+        # voices (SpeechAdapter's own contract carries no such method -
+        # see channels/speech.py's docstring on why); duck-typed, exactly
+        # as `_select_voice_name` itself already reads this.
+        catalog_fn = getattr(speech, "installed_voice_names", None)
+        available = tuple(catalog_fn()) if callable(catalog_fn) else None
+
+        if not voice_name:
+            lines = [f"VOICE - {view.name}"]
+            lines.append(f"  current preferred_voice: {current.preferred_voice if current else '(none declared)'}")
+            if available is not None:
+                lines.append("  choices (this engine's installed voices):")
+                for name in available:
+                    lines.append(f"    {name}")
+            else:
+                lines.append("  choices: unknown for this engine - type the exact voice name it reports")
+            lines.append(f"  choose with: voice {view.name} <name>")
+            return "\n".join(lines)
+
+        ok = set_voice_preference(
+            view.name,
+            voice_name,
+            available=available,
+            recall=memory.recall,
+            remember=memory.remember,
+            forget=memory.forget,
+        )
+        if not ok:
+            known = ", ".join(available) if available else "(unknown - this engine cannot list its own voices)"
+            return f"no such voice '{voice_name}' for this engine. Choices: {known}"
+        return f"{view.name}'s voice is now '{voice_name.strip()}'"
 
     if verb == "review":
         # Observation only. Nothing here changes anything, and there is no
@@ -174,17 +1482,111 @@ def run_command(centre: ControlCenter, command: str, columns: int) -> str:
                 lines.append(f"    {proposal.change.value}: {proposal.rationale}")
         return "\n".join(lines)
 
+    if verb == "capabilities":
+        return render_capabilities(centre)
+
+    if verb == "provider":
+        return run_provider_command(centre, rest)
+
+    if verb == "connections":
+        return run_connections_command(centre, rest)
+
+    if verb == "ecosystem":
+        return run_ecosystem_command(centre, rest)
+
     if verb == "talk":
         if not rest:
             return "say what you would like Alfred to do, for example: talk scan my inbox"
-        return render_turn(observe(centre.manager, Task(description=rest)), columns)
+        return render_turn(exchange(channel, conversation, rest), columns)
 
     # Anything else is treated as something to say to Alfred. Talking is the
     # primary mode, so it should not need a keyword.
-    return render_turn(observe(centre.manager, Task(description=command)), columns)
+    #
+    # Through the channel rather than straight to observe(). The call this
+    # replaces went directly to the Manager, which meant the door existed and
+    # nothing ever walked through it. Channel.ask calls the same observe() this
+    # file used to call - so no orchestration moved - and the trail it produces
+    # is the same one. What changed is that text and voice now share one path
+    # instead of voice having a path nobody used.
+    return render_turn(exchange(channel, conversation, command), columns)
 
 
-def interactive(centre: ControlCenter, columns: int) -> int:
+def _reload_session(centre: "ControlCenter", command: str):
+    """Rebuild the whole session through the real ``build()`` every
+    entry point already uses - the smallest safe activation this
+    architecture supports (see ``interactive``'s own comment on why
+    this is a whole-session rebuild, never a hot-swap of one provider
+    object inside an already-running Manager).
+
+    ``command`` is the raw ``"reload ..."`` line; anything after the
+    verb is parsed as ``field=value`` overrides onto this session's own
+    ``Settings`` - e.g. ``reload provider=openai`` switches *which
+    backend* is active for this session, the one thing
+    ``provider <category> select`` cannot do (that command only ever
+    changes which *account* authorises an already-selected backend -
+    see this file's own HELP text). Session-scoped only: nothing here
+    is written to disk or to the environment, so it does not survive a
+    real restart on its own - the matching ``MANAGER_*`` environment
+    variable is what makes a backend choice the default on every future
+    start, exactly as it already was before this command existed.
+
+    Prints its own result and returns ``None`` on a bad override
+    (nothing rebuilt, the prior session is untouched), or the new
+    ``(centre, channel, conversation)`` on success.
+    """
+    _, _, rest = command.partition(" ")
+    valid_fields = {f.name for f in fields(Settings)}
+    overrides: dict[str, str] = {}
+    for pair in rest.split():
+        key, sep, value = pair.partition("=")
+        if not sep or not key:
+            print(f"ignoring '{pair}' - expected field=value, e.g. provider=openai")
+            continue
+        if key not in valid_fields:
+            print(
+                f"'{key}' is not a real Settings field - nothing was reloaded. "
+                "Examples: provider, video_generation, speech, communication_provider, connection_provider."
+            )
+            return None
+        overrides[key] = value
+
+    settings = centre.runtime.settings
+    if overrides:
+        settings = replace(settings, **overrides)
+
+    try:
+        runtime, manager, channel, conversation = build(settings)
+    except (ConfigurationError, ProviderConfigurationError, TimezoneError) as exc:
+        print(f"reload failed, nothing changed: {exc}")
+        return None
+
+    new_centre = ControlCenter(runtime, manager)
+
+    message = "Reloaded"
+    if overrides:
+        shown = ", ".join(f"{k}={v}" for k, v in overrides.items())
+        message += f" with this session's own override(s) ({shown})"
+    message += " - runtime rebuilt from current settings and persisted accounts/connections."
+    if overrides:
+        message += (
+            " Session-scoped only, not persisted: set the matching MANAGER_* "
+            "environment variable to make this the default on every future start."
+        )
+    if type(manager.memory).__name__ == "EphemeralMemory":
+        message += (
+            "\nNote: memory for this run is ephemeral - anything remembered "
+            "since this session started was just discarded by the rebuild."
+        )
+    print(message)
+    return new_centre, channel, conversation
+
+
+def interactive(
+    centre: ControlCenter,
+    columns: int,
+    channel: Channel,
+    conversation: Conversation,
+) -> int:
     print(render_overview(centre.overview(), columns))
     print()
     print("type 'help' for commands, or just say what you want.")
@@ -197,8 +1599,38 @@ def interactive(centre: ControlCenter, columns: int) -> int:
             return 0
         if command.lower() in ("quit", "exit"):
             return 0
+        if command.lower() == "reload" or command.lower().startswith("reload "):
+            # The smallest safe activation this project's architecture
+            # actually supports: not hot-swapping one provider object
+            # inside a live Manager (runtime.provider/media/communication/
+            # speech are each bound once, directly into ToolSet/tool
+            # construction - see ARCHITECTURE.md 52.27), but rebuilding
+            # the whole session the identical way a restart already
+            # would, without leaving this terminal. Calls the exact same
+            # `build()` every entry point uses - never a second
+            # construction path - so this reads the accounts/connections
+            # exactly as they stand right now.
+            #
+            # Optional `field=value` overrides (e.g. `reload
+            # provider=openai`) are this session's own answer to
+            # "switch the active *backend*, not just the active account
+            # for one backend" - a genuinely different axis from
+            # `provider <category> select`, which only ever changes
+            # which account authorises an already-selected backend.
+            # Session-scoped only, by design: it never touches
+            # environment variables or any file, so it never survives a
+            # real restart on its own - reload without an override, or
+            # a fresh restart, both read Settings from the environment
+            # exactly as before. Setting the matching MANAGER_* variable
+            # is what makes a backend choice the default on every future
+            # start.
+            print()
+            reloaded = _reload_session(centre, command)
+            if reloaded is not None:
+                centre, channel, conversation = reloaded
+            continue
         print()
-        print(run_command(centre, command, columns))
+        print(run_command(centre, command, columns, channel, conversation))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -221,7 +1653,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         check_configuration(settings)
-        runtime, manager = build(settings)
+        runtime, manager, channel, conversation = build(settings)
     except (ConfigurationError, ProviderConfigurationError, TimezoneError) as exc:
         # Stop before showing anything. A Control Center that opened on a
         # misconfigured system would describe a program that is not running.
@@ -232,12 +1664,12 @@ def main(argv: list[str] | None = None) -> int:
     columns = args.width or width()
 
     if not args.command:
-        return interactive(centre, columns)
+        return interactive(centre, columns, channel, conversation)
 
     command = " ".join(args.command)
     if args.category and command.strip().lower().startswith("history"):
         command = f"history {args.category}"
-    print(run_command(centre, command, columns))
+    print(run_command(centre, command, columns, channel, conversation))
     return 0
 
 

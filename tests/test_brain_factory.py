@@ -322,9 +322,9 @@ class TestTheCompositionRoots:
         seen = {}
         real_build = composition.build_brain
 
-        def recording_build(config, provider):
+        def recording_build(config, provider, personality=None):
             seen["provider"] = provider
-            return real_build(config, provider)
+            return real_build(config, provider, personality)
 
         # Patched on src.composition rather than on the entry point. Construction
         # moved to the shared composition root, so that is where these names now

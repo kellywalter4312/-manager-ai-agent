@@ -67,7 +67,127 @@ class Settings:
 
     log_level: str = "INFO"
     provider: str = "null"
+    # How this installation hears and speaks. Selected by name, the same rule
+    # `provider` above already lives under: never inferred from whether a
+    # library happens to be importable or a key happens to be present. "none"
+    # (NoSpeech, honestly UNAVAILABLE) is the only shipped option and the
+    # default - see src/providers/speech_factory.py for why a second entry is
+    # not invented here just to look complete.
+    speech: str = "none"
     router: str = "capability"
+    # Stage 14: where Alfred's current-information tool actually reaches
+    # for real evidence, selected by name exactly as `provider` above
+    # already is. "null" (no real source, honestly empty) is the default
+    # for the same reason `provider` defaults to "null" - a real backend
+    # is always a deliberate MANAGER_LIVE_INFO_PROVIDER=wikipedia, never
+    # a side effect of upgrading, and the default keeps every existing
+    # test hermetic (see conftest.py's own network-blocking fixture).
+    # "wikipedia" needs no key and no signup - see
+    # src/providers/wikipedia_live_info_provider.py.
+    live_info_provider: str = "null"
+    # Creative-media checkpoint: which real narration/image/video
+    # backend the media_production tool is built from, selected by name
+    # exactly as `live_info_provider` above already is.
+    #   null     the default; no engine, media_production reports so honestly
+    #   local    genuine local production - Kokoro narration, a local
+    #            title-card image renderer, and FFmpeg composition - no
+    #            vendor credential, no network call, ever
+    #   ai_image genuine AI image generation (pollinations.ai - free,
+    #            keyless) alongside the same local Kokoro narration and
+    #            FFmpeg composition "local" already uses - see
+    #            src/providers/media/image.py for why this vendor
+    media: str = "null"
+    # AI video-generation checkpoint: a genuinely independent axis from
+    # `media` above - narration/image/composition ("local"/"ai_image")
+    # is one choice, whether a real AI video-*generation* vendor is
+    # configured is a separate one, exactly the way `provider` and
+    # `specialist_brain` are two independent switches rather than one.
+    #   null    the default; no vendor, media_production reports so honestly
+    #   runway  a real, mature, credentialed provider - see
+    #           src/providers/media/video_generation.py for why this one
+    #   veo     a second, independently-chosen real vendor (Google's Veo,
+    #           via the Gemini API) - added specifically to prove the
+    #           VideoGenerationProvider abstraction is genuinely neutral,
+    #           not shaped around Runway alone (see that module's own
+    #           docstring)
+    video_generation: str = "null"
+    # Model identifier for each video-generation vendor, the identical
+    # per-vendor-field discipline `openai_model`/`xai_model` already
+    # establish for the Brain's own providers - one field per vendor
+    # rather than a shared one, so neither name is ever a foreign
+    # vendor's model string reaching the wrong builder.
+    runway_model: str = "gen4_turbo"
+    veo_model: str = "veo-3.1-generate-preview"
+    # Stage 15: where Alfred's governed communication tools actually
+    # reach for a real phone/messaging connection, selected by name
+    # exactly as `live_info_provider` above already is. "null" (no
+    # authorized connection, honestly unavailable) is the only shipped
+    # option and the default - this stage's own brief explicitly asks
+    # for the honest null implementation rather than a real external
+    # service added just to demonstrate the concept.
+    communication_provider: str = "null"
+    # Stage 18: where Alfred's knowledge tool reaches for the documents,
+    # books and notes the *user themselves* supplied - selected by name
+    # exactly as `live_info_provider` above already is, and kept a
+    # separate axis from it because they are separate kinds of knowing
+    # (see src/providers/knowledge.py's own docstring).
+    #
+    # "documents" rather than "null" is the default, and unlike
+    # live_info_provider that is safe: it reads a local folder, touches no
+    # network, needs no key and no signup, and an installation where the
+    # folder is absent or empty gets an honestly empty result - the same
+    # answer "null" would give. The choice matches memory's own default
+    # for the same reason: the capability is useless switched off, and its
+    # risk is nil.
+    knowledge_provider: str = "documents"
+    # Where those documents live. The user puts anything they want Alfred
+    # to be able to quote in here - a book, a set of notes, a syllabus, a
+    # transcript. Nothing in this project knows or cares what is in it.
+    knowledge_dir: str = "data/knowledge"
+    # Stage 12 closure: where a genuine milestone celebration's
+    # presentation reaction actually comes from, selected by name for the
+    # same replaceability every sibling provider above already has. Unlike
+    # them, "default" is not an honestly-empty placeholder - it is the one
+    # real implementation this project ships (see
+    # src/providers/default_celebration_provider.py for why no "null"
+    # variant exists), and it is also the default here for the identical
+    # reason every other default is the safe, always-working choice.
+    celebration_provider: str = "default"
+    # Stage 12 closure: where Alfred's temporal-event engine reaches for
+    # named, recurring calendar occasions (Christmas, Valentine's Day,
+    # Easter) - selected by name for the same replaceability every
+    # sibling provider above already has. "default" is a genuinely
+    # computed set (see src/providers/default_calendar_event_provider.py),
+    # not an empty placeholder - the same reasoning celebration_provider's
+    # own default already follows.
+    calendar_event_provider: str = "default"
+    # Stage 16: where Alfred's governed connection tools reach for a
+    # real external, authenticated service - selected by name for the
+    # same replaceability every provider above already has. "null"
+    # (honestly unavailable) is the default, the identical reasoning
+    # communication_provider already follows: a connection is
+    # consequential, so a real one is always a deliberate
+    # MANAGER_CONNECTION_PROVIDER=gmail, never a side effect of upgrading.
+    connection_provider: str = "null"
+    # Stage 17: where an agent's presence gets its avatar profile from -
+    # selected by name for the same replaceability every provider above
+    # already has. "default" (a small, deterministic, no-network
+    # catalog - see that module's own docstring) is what an
+    # unconfigured installation gets, the same choice celebration_provider
+    # already makes: nothing here carries external risk, so there is
+    # nothing to be null about.
+    avatar_provider: str = "default"
+    # Universal Ecosystem checkpoint: where an agent's presence reaches
+    # for its *scene* description (mood/lighting/backdrop), selected by
+    # name for the same replaceability every provider above already
+    # has, and kept a genuinely separate axis from avatar_provider - the
+    # identical "two independent questions" reasoning
+    # src/providers/environment.py's own docstring states: what an
+    # agent looks like is not what the space around it looks like.
+    # "default" (a small, deterministic, no-network catalog - see that
+    # module's own docstring) is what an unconfigured installation
+    # gets, the same choice avatar_provider's own default already makes.
+    environment_provider: str = "default"
     # Reasoning is off by default, matching the router's conservative default.
     # "llm" is still safe: the brain receives whatever build_provider returned,
     # which is the null provider unless a provider was deliberately configured.
@@ -77,13 +197,30 @@ class Settings:
     # orchestrator to deliberate while its specialists stay deterministic, or
     # the reverse. One switch for both would make that impossible to express.
     specialist_brain: str = "null"
-    # Where what an agent remembers actually lives. "ephemeral" keeps records
-    # in the process and loses them on exit, which is the behaviour every
-    # caller has today; "persistent" writes them under memory_dir so a rebuilt
-    # Manager - the heartbeat builds one per tick - can recall what the last
-    # one learned. Deliberate opt-in: durability decides where a person's data
-    # sits, and that should never arrive as a side effect of an upgrade.
-    memory: str = "ephemeral"
+    # Where what an agent remembers actually lives.
+    #
+    #   persistent   records are written under memory_dir, so a rebuilt agent -
+    #                the heartbeat builds one per tick - can recall what the
+    #                last one learned. The default.
+    #   ephemeral    records live in the process and die with it. Still fully
+    #                supported, and the right choice for a test, a one-off
+    #                inspection, or anywhere durability would be a surprise.
+    #
+    # This defaulted to "ephemeral" on the argument that durability decides
+    # where a person's data sits and should never arrive as a side effect of an
+    # upgrade. That argument is sound about *surprise* and turned out to be
+    # wrong about the default, because it made forgetting the surprise instead:
+    # an agent whose whole purpose is to notice things for somebody, running on
+    # an hourly heartbeat, began every tick knowing nothing. Continuity was not
+    # merely off - no memory file had ever been written.
+    #
+    # An agent that cannot remember is not a safer agent, it is a less useful
+    # one, and the confidentiality question is answered by what the policy
+    # admits rather than by whether the store survives a restart. Records still
+    # pass MemoryPolicy first, still exclude secrets, and can still be removed:
+    # forget() and clear() are part of the Memory contract precisely so
+    # durability never means "kept forever whether you like it or not".
+    memory: str = "persistent"
     memory_dir: str = "data/memory"
     # Which human calendar decides what "today" means. Storage stays UTC - a
     # MemoryRecord's created_at is never reinterpreted - and this only decides
@@ -93,6 +230,17 @@ class Settings:
     # not import the things it configures.
     timezone: str = "Africa/Lagos"
     model: str = "claude-opus-5"
+    # Phase 1.4: each provider owns its own model configuration rather than
+    # sharing the field above, which is anthropic's - a name like
+    # "claude-opus-5" reaching the openai or xai builder would be a foreign
+    # vendor's model string, not a sensible default for either. Two more
+    # fields rather than turning `model` into a mapping, for the same reason
+    # every other per-vendor setting above is its own field: from_env()
+    # derives MANAGER_OPENAI_MODEL / MANAGER_XAI_MODEL from the field name
+    # automatically, and each is independently overridable without touching
+    # the others.
+    openai_model: str = "gpt-5"
+    xai_model: str = "grok-4"
     mailbox: str = "memory"
     profile_path: str = "USER.md"
     # Where the user's schedule document lives. Separate from profile_path
@@ -120,6 +268,17 @@ class Settings:
     heartbeat_fetch_limit: str = "25"
     state_path: str = "data/state/processed.json"
     reports_dir: str = "data/reports"
+    # Where media_production writes real, produced narration/image/video
+    # assets - configurable for the identical reason state_path/reports_dir
+    # already are: a test must be able to redirect production writes to a
+    # tmp_path rather than the real data/ directory.
+    media_asset_dir: str = "data/media/assets"
+    # Phase 3 (Knowledge, Research & Live Information): where
+    # generate_document's real, saved output goes - configurable for the
+    # identical reason media_asset_dir already is: a test must be able to
+    # redirect production writes to a tmp_path rather than the real data/
+    # directory.
+    documents_dir: str = "data/documents/generated"
 
     # Paths to credential files - NOT the credentials themselves. Both live
     # under data/, which is gitignored. Storing a path here means a secret
@@ -146,10 +305,80 @@ class Settings:
             raise ValueError("Settings.provider must not be empty")
         object.__setattr__(self, "provider", provider)
 
+        speech = self.speech.strip().lower()
+        if not speech:
+            raise ValueError("Settings.speech must not be empty")
+        object.__setattr__(self, "speech", speech)
+
         router = self.router.strip().lower()
         if not router:
             raise ValueError("Settings.router must not be empty")
         object.__setattr__(self, "router", router)
+
+        live_info_provider = self.live_info_provider.strip().lower()
+        if not live_info_provider:
+            raise ValueError("Settings.live_info_provider must not be empty")
+        object.__setattr__(self, "live_info_provider", live_info_provider)
+
+        media = self.media.strip().lower()
+        if not media:
+            raise ValueError("Settings.media must not be empty")
+        object.__setattr__(self, "media", media)
+
+        video_generation = self.video_generation.strip().lower()
+        if not video_generation:
+            raise ValueError("Settings.video_generation must not be empty")
+        object.__setattr__(self, "video_generation", video_generation)
+
+        runway_model = self.runway_model.strip()
+        if not runway_model:
+            raise ValueError("Settings.runway_model must not be empty")
+        object.__setattr__(self, "runway_model", runway_model)
+
+        veo_model = self.veo_model.strip()
+        if not veo_model:
+            raise ValueError("Settings.veo_model must not be empty")
+        object.__setattr__(self, "veo_model", veo_model)
+
+        communication_provider = self.communication_provider.strip().lower()
+        if not communication_provider:
+            raise ValueError("Settings.communication_provider must not be empty")
+        object.__setattr__(self, "communication_provider", communication_provider)
+
+        knowledge_provider = self.knowledge_provider.strip().lower()
+        if not knowledge_provider:
+            raise ValueError("Settings.knowledge_provider must not be empty")
+        object.__setattr__(self, "knowledge_provider", knowledge_provider)
+
+        knowledge_dir = self.knowledge_dir.strip()
+        if not knowledge_dir:
+            raise ValueError("Settings.knowledge_dir must not be empty")
+        object.__setattr__(self, "knowledge_dir", knowledge_dir)
+
+        celebration_provider = self.celebration_provider.strip().lower()
+        if not celebration_provider:
+            raise ValueError("Settings.celebration_provider must not be empty")
+        object.__setattr__(self, "celebration_provider", celebration_provider)
+
+        calendar_event_provider = self.calendar_event_provider.strip().lower()
+        if not calendar_event_provider:
+            raise ValueError("Settings.calendar_event_provider must not be empty")
+        object.__setattr__(self, "calendar_event_provider", calendar_event_provider)
+
+        connection_provider = self.connection_provider.strip().lower()
+        if not connection_provider:
+            raise ValueError("Settings.connection_provider must not be empty")
+        object.__setattr__(self, "connection_provider", connection_provider)
+
+        avatar_provider = self.avatar_provider.strip().lower()
+        if not avatar_provider:
+            raise ValueError("Settings.avatar_provider must not be empty")
+        object.__setattr__(self, "avatar_provider", avatar_provider)
+
+        environment_provider = self.environment_provider.strip().lower()
+        if not environment_provider:
+            raise ValueError("Settings.environment_provider must not be empty")
+        object.__setattr__(self, "environment_provider", environment_provider)
 
         brain = self.brain.strip().lower()
         if not brain:
@@ -189,6 +418,16 @@ class Settings:
         # Not lowercased: model identifiers are opaque strings owned by the
         # provider, so normalizing their case could invent an invalid name.
         object.__setattr__(self, "model", model)
+
+        openai_model = self.openai_model.strip()
+        if not openai_model:
+            raise ValueError("Settings.openai_model must not be empty")
+        object.__setattr__(self, "openai_model", openai_model)
+
+        xai_model = self.xai_model.strip()
+        if not xai_model:
+            raise ValueError("Settings.xai_model must not be empty")
+        object.__setattr__(self, "xai_model", xai_model)
 
         # An empty or whitespace-only key is treated as "not supplied" rather
         # than as a key, so a blank environment variable cannot be mistaken for
@@ -262,9 +501,20 @@ class Settings:
         """
         return (
             f"log_level={self.log_level} provider={self.provider} "
-            f"router={self.router} brain={self.brain} "
+            f"speech={self.speech} "
+            f"router={self.router} live_info_provider={self.live_info_provider} "
+            f"media={self.media} video_generation={self.video_generation} "
+            f"communication_provider={self.communication_provider} "
+            f"knowledge_provider={self.knowledge_provider} "
+            f"celebration_provider={self.celebration_provider} "
+            f"calendar_event_provider={self.calendar_event_provider} "
+            f"connection_provider={self.connection_provider} "
+            f"avatar_provider={self.avatar_provider} "
+            f"environment_provider={self.environment_provider} "
+            f"brain={self.brain} "
             f"specialist_brain={self.specialist_brain} memory={self.memory} "
             f"timezone={self.timezone} model={self.model} "
+            f"openai_model={self.openai_model} xai_model={self.xai_model} "
             f"mailbox={self.mailbox} "
             f"api_key={'set' if self.has_api_key else 'unset'}"
         )

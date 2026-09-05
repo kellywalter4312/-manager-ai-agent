@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 from src.utils.logging import get_logger
 
@@ -88,11 +88,88 @@ def _explain(opportunity: Any) -> str:
     return explain() if callable(explain) else str(opportunity)
 
 
-def write_report(text: str, when: datetime, directory: str | Path = DEFAULT_REPORTS_DIR) -> Path:
-    """Write a report and return its path."""
+def write_report(
+    text: str,
+    when: datetime,
+    directory: str | Path = DEFAULT_REPORTS_DIR,
+    *,
+    suffix: str = "opportunities",
+) -> Path:
+    """Write a report and return its path.
+
+    ``suffix`` names what kind of report this is in the filename -
+    defaulted to "opportunities" so every existing caller writes to
+    exactly the same filename shape as before. Stage 12's proactive
+    milestone report (``render_proactive_report`` below) is the one
+    other kind this project writes, via ``suffix="proactive"`` - the
+    same directory, the same atomic write, never a second reporting
+    channel.
+    """
     target = Path(directory)
     target.mkdir(parents=True, exist_ok=True)
-    path = target / f"{when.strftime('%Y%m%d-%H%M%S')}-opportunities.md"
+    path = target / f"{when.strftime('%Y%m%d-%H%M%S')}-{suffix}.md"
     path.write_text(text, encoding="utf-8")
-    logger.info("wrote opportunity report to '%s'", path)
+    logger.info("wrote %s report to '%s'", suffix, path)
     return path
+
+
+def render_proactive_report(
+    records: Sequence[Any],
+    when: datetime | None = None,
+    *,
+    celebrations: "Mapping[str, Mapping[str, object]] | None" = None,
+) -> str:
+    """Render today's due proactive events as markdown.
+
+    Plain and factual, deliberately not composed through a Brain: this
+    file is written by the heartbeat, a per-tick process with no live
+    conversation to compose warm, personal wording into - see
+    ``src/manager/proactive_milestones.py``'s own docstring for where
+    that boundary sits. How something recognised here is actually
+    mentioned to the person - in Alfred's own voice - is a live
+    conversation's job, not a report file's.
+
+    Accepts either a plain ``MemoryRecord`` (the original Stage 12
+    closure shape - ``.context``/``.content``/``.kind``) or a Stage 12
+    closure "temporal awareness" ``ProactiveEvent`` (``.event_type``/
+    ``.label``) duck-typed, so an existing caller passing records is
+    unaffected. ``celebrations``, when given, is a genuine
+    ``CelebrationReaction.to_dict()`` per event's own ``dedup_key`` -
+    the presentation data reaching this report's own boundary, never
+    re-selected here.
+    """
+    stamp = (when or datetime.now()).strftime("%Y-%m-%d %H:%M")
+    lines = [
+        f"# Proactive event report - {stamp}",
+        "",
+        f"- due today: {len(records)}",
+        "",
+    ]
+    if records:
+        lines.append("## Due today")
+        lines.append("")
+        for record in records:
+            event_type = getattr(record, "event_type", None)
+            if event_type is not None:
+                label = event_type
+                content = getattr(record, "label", event_type)
+            else:
+                context = getattr(record, "context", None) or {}
+                label = context.get("fact_type") or context.get("milestone_type") or getattr(record, "kind", "fact")
+                content = getattr(record, "content", str(record))
+            lines.append(f"- **{label}**: {content}")
+
+            reaction = (celebrations or {}).get(getattr(record, "dedup_key", ""))
+            if reaction and reaction.get("enabled"):
+                lines.append(
+                    f"  - celebration: {reaction.get('intensity')} "
+                    f"avatar={reaction.get('avatar_action')} "
+                    f"environment={reaction.get('environment_action')}"
+                )
+        lines.append("")
+    lines.append("---")
+    lines.append(
+        "_Recognition only. Whether and how this is actually mentioned is "
+        "decided the next time you talk to Alfred, never by this report._"
+    )
+    return "\n".join(lines)

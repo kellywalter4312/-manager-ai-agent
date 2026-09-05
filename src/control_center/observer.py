@@ -38,6 +38,8 @@ from typing import Any, Sequence
 
 from src.agents.base_agent import BaseAgent
 from src.control_center.interfaces import describe_interface
+from src.core.versioning import SYSTEM_VERSION
+from src.events.narrator import compose
 from src.control_center.views import (
     AgentView,
     BrainView,
@@ -50,10 +52,12 @@ from src.control_center.views import (
     OverviewView,
     SystemView,
     ToolView,
+    UnresolvedFactView,
 )
-from src.manager.capabilities import GENERAL_CAPABILITIES
+from src.manager.capabilities import GENERAL_CAPABILITIES, PERSON_BIRTHDAY_FACT_TYPE
 from src.manager.cognition import assess_cognition, assess_manager
 from src.manager.manager import ManagerAgent
+from src.services.identity.presence import presence_for
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -205,6 +209,15 @@ class ControlCenter:
     def manager(self) -> ManagerAgent:
         return self._manager
 
+    @property
+    def runtime(self) -> Any:
+        """The composed Runtime this centre observes - exposed so a
+        caller that needs a specific collaborator (Stage 17: an
+        entry point resolving ``runtime.avatar_provider`` for the
+        ``avatar`` command/route) reads the one the composition root
+        actually built, rather than assembling its own."""
+        return self._runtime
+
     def manager_view(self) -> AgentView:
         """The Manager, with his own brain, memory, capabilities and tools."""
         identity = self._runtime.identity
@@ -222,6 +235,19 @@ class ControlCenter:
             capabilities=_capability_views(skills, tools) if skills is not None else (),
             tools=_tool_views(tools),
             interface=describe_interface(skills) if skills is not None else None,
+            # Stage 17: read from the Manager's own canonical Memory -
+            # own_skills itself exposes no .memory (see presence.py's
+            # own module docstring for why every presence function
+            # takes a bound recall rather than an agent object).
+            presence=presence_for(
+                identity.name,
+                provider=self._runtime.avatar_provider,
+                recall=self._manager.memory.recall if self._manager.memory is not None else None,
+                # Stage 17.2: a real, live SPEAKING signal (written only
+                # by VoiceChannel.deliver() around a real speak() call)
+                # wins over the IDLE default the moment it is true.
+                live=self._runtime.presence_registry,
+            ),
         )
 
     def specialist_views(self) -> tuple[AgentView, ...]:
@@ -266,6 +292,15 @@ class ControlCenter:
             # a workspace gets one offered; one that declares nothing gets
             # conversation, and neither needs this file to know it exists.
             interface=describe_interface(agent),
+            # Stage 17: a specialist's own Memory is directly on the
+            # agent (unlike the Manager's own_skills), so this reaches
+            # it the same way _memory_view above already does.
+            presence=presence_for(
+                agent.name,
+                provider=self._runtime.avatar_provider,
+                recall=memory.recall if memory is not None else None,
+                live=self._runtime.presence_registry,
+            ),
         )
 
     def _wiring_for(self, agent: BaseAgent) -> Any:
@@ -302,6 +337,7 @@ class ControlCenter:
             warnings.append("no tools are installed; capabilities needing one cannot run")
 
         return SystemView(
+            system_version=SYSTEM_VERSION,
             heartbeat=self.heartbeat_view(),
             mailbox=settings.mailbox,
             gmail_scope=GMAIL_READONLY_SCOPE,
@@ -378,12 +414,36 @@ class ControlCenter:
     ) -> HistoryView:
         """What happened, filtered before it reaches a screen.
 
-        Built from what the system genuinely recorded: memories each agent
-        retained, and the reports the heartbeat wrote. Nothing is synthesised
-        to fill the screen - a system that has done little shows little, which
-        is the truthful rendering.
+        Built from what the system genuinely recorded: the events the Manager
+        raised, the memories each agent retained, and the reports the heartbeat
+        wrote. Nothing is synthesised to fill the screen - a system that has
+        done little shows little, which is the truthful rendering.
+
+        **This reads events; it never raises one.** The Manager owns the log
+        and is the only thing that appends to it, because only the Manager
+        knows it delegated. A Control Center that raised its own events would
+        be a second account of what happened, and the first time the two
+        disagreed a person would believe the screen. Wording comes from the
+        narrator for the same reason: a screen that wrote its own sentences
+        would become the system's vocabulary.
         """
         events: list[HistoryEvent] = []
+
+        for event in self._manager.events.all():
+            if not event.significance.worth_recording:
+                # ROUTINE is dropped here rather than filtered later. The event
+                # carries how far it deserves to travel, so a future source of
+                # events cannot become chatty by forgetting a check.
+                continue
+            events.append(
+                HistoryEvent(
+                    when=event.when,
+                    category="event",
+                    actor=event.actor,
+                    summary=compose(event),
+                    detail=event.describe(),
+                )
+            )
 
         for view in (self.manager_view(),) + self.specialist_views():
             for record in view.memory.recent:
@@ -432,6 +492,43 @@ class ControlCenter:
             filtered_by=filtered_by,
             total_available=total,
         )
+
+    def unresolved_facts(self) -> tuple[UnresolvedFactView, ...]:
+        """Genuine, currently-unresolved uncertainty in Alfred's own
+        Memory - Stage 12 closure's own example: "mom's birthday is
+        either March 24 or May 24, unconfirmed".
+
+        Read-only, like every other view here: this presents what is
+        already stored, exactly as stored - it does not resolve
+        anything, and there is no field here through which it could.
+        Confirming one happens by restating the fact through the
+        ordinary conversational path (``personal_recurring_events`` in
+        ``src/manager/capabilities.py``), and once that governed write
+        lands, the record this method reads no longer has
+        ``confirmed=False`` - so it stops appearing here on its own,
+        with nothing here needing to know that happened.
+        """
+        memory = self._manager.memory
+        if memory is None:
+            return ()
+
+        views: list[UnresolvedFactView] = []
+        for record in memory.recall(kind="user_context", tags={PERSON_BIRTHDAY_FACT_TYPE}, limit=200):
+            context = record.context or {}
+            if context.get("confirmed", True):
+                continue
+            alternatives = tuple(
+                f"{alt.get('month')}/{alt.get('day')}" for alt in (context.get("alternatives") or ())
+            )
+            views.append(
+                UnresolvedFactView(
+                    record_id=record.id,
+                    person=str(context.get("person", "")),
+                    fact_type=str(context.get("fact_type", "")),
+                    alternatives=alternatives,
+                )
+            )
+        return tuple(views)
 
 
 class _EmptyTools:

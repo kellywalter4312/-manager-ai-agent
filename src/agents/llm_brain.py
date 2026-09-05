@@ -36,13 +36,16 @@ from typing import Sequence
 
 from src.agents.brain import Insight, SpecialistBrain
 from src.agents.brain_prompts import (
+    SPECIALIST_CONVERSE_SYSTEM_PROMPT,
     SPECIALIST_SYSTEM_PROMPT,
     build_consideration_prompt,
+    build_conversation_prompt,
     parse_insight_or_none,
 )
 from src.core.contracts import Task
 from src.providers.base import LLMProvider
 from src.providers.availability import Availability, AvailabilityState
+from src.services.identity.personality import AgentPersonality, personality_prompt_fragment
 from src.utils.logging import get_logger, task_logger
 
 logger = get_logger(__name__)
@@ -55,7 +58,13 @@ DEFAULT_DOMAIN = ""
 class LLMSpecialistBrain(SpecialistBrain):
     """Forms a view about one area of work by consulting an LLMProvider."""
 
-    def __init__(self, provider: LLMProvider, domain: str = DEFAULT_DOMAIN) -> None:
+    def __init__(
+        self,
+        provider: LLMProvider,
+        domain: str = DEFAULT_DOMAIN,
+        *,
+        personality: AgentPersonality | None = None,
+    ) -> None:
         """The provider is injected - this class never constructs one.
 
         Same pattern as LLMRouter, LLMManagerBrain and OpportunityInterpreter:
@@ -66,11 +75,25 @@ class LLMSpecialistBrain(SpecialistBrain):
         ``domain`` is one sentence describing this specialist's area, supplied
         by whoever builds the agent. It keeps the class reusable across
         specialists without any of them being named here.
+
+        ``personality`` is optional and additive, and reaches only
+        ``converse()``'s prompt below - never ``consider()``'s. The same
+        reasoning ``LLMManagerBrain.discern_retention`` states for why its
+        own prompt stays personality-free applies to ``consider()`` here in
+        reverse: an Insight is a judgement about the person's own work,
+        read back as evidence, not a reply presented to them - a
+        personality's tone has no business shaping it. An open-ended
+        answer to the person, by contrast, is exactly what should sound
+        like this specialist rather than a generic raw model response.
         """
         self._provider = provider
         # UNKNOWN until a call is actually made.
         self._availability = Availability()
         self._domain = " ".join(str(domain).split())
+        self._converse_system_prompt = SPECIALIST_CONVERSE_SYSTEM_PROMPT
+        fragment = personality_prompt_fragment(personality)
+        if fragment:
+            self._converse_system_prompt = f"{SPECIALIST_CONVERSE_SYSTEM_PROMPT}\n\n{fragment}"
 
     @property
     def name(self) -> str:
@@ -155,3 +178,51 @@ class LLMSpecialistBrain(SpecialistBrain):
         insight = parse_insight_or_none(completion.text, source=source)
         log.debug("considered: %s", insight.describe())
         return insight
+
+    def converse(self, task: Task, notes: Sequence[str] = ()) -> Insight:
+        """Compose a natural, open-ended answer via the same provider
+        ``consider()`` uses - a different prompt, the same call, the
+        same honesty rules. See ``SpecialistBrain.converse``'s own
+        docstring for the question this answers and why it differs from
+        domain consideration.
+
+        Never raises, for the same three reasons ``consider()`` does
+        not: a failing provider, an empty response, and (here) nothing
+        further to parse - the model's own words are the answer, so
+        there is no JSON to fail to read.
+        """
+        log = task_logger(logger, task.id)
+        prompt = build_conversation_prompt(task, notes)
+
+        try:
+            completion = self._provider.complete(prompt, system=self._converse_system_prompt)
+        except Exception as exc:  # noqa: BLE001 - deliberate boundary catch
+            self._availability = Availability(
+                state=AvailabilityState.UNAVAILABLE,
+                reason=str(exc) or type(exc).__name__,
+                error_type=type(exc).__name__,
+            )
+            log.exception(
+                "provider '%s' failed while conversing: %s",
+                self.provider_name,
+                type(exc).__name__,
+            )
+            return Insight.none(
+                reason=f"the provider failed: {type(exc).__name__}: {exc}",
+                source=self.name,
+            )
+
+        self._availability = Availability(
+            state=AvailabilityState.AVAILABLE, reason="a call succeeded"
+        )
+        log.debug("conversed (%s)", completion.describe())
+
+        if completion.is_empty:
+            return Insight.none(reason="the model returned no text", source=self.name)
+
+        source = f"llm:{completion.model or completion.provider}"
+        # Full confidence: this is the model's direct, composed answer to
+        # the person, not a partial judgement with room to be more sure -
+        # the identical stance LLMManagerBrain.converse takes returning
+        # action=REPORT unconditionally rather than a graded confidence.
+        return Insight(summary=completion.text, confidence=1.0, source=source)

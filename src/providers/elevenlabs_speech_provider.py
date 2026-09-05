@@ -1,0 +1,182 @@
+"""A second, real speech engine behind the same seam - ElevenLabs, cloud TTS.
+
+Exists to prove the claim ``windows_speech_provider.py`` already makes true
+for one engine: that a second one arrives as an additive change, never a
+redesign. Nothing in ``src/channels/speech.py`` or ``VoiceProfile`` changed to
+add this file; only this module and ``speech_factory.py``'s registry did.
+
+**Discovery is real but deliberately not the same shape as Windows'.**
+``WindowsSpeechAdapter.installed_voice_names()`` queries a small, local,
+free, already-running engine on every ``speak()`` when nothing is cached -
+cheap because it costs one subprocess call to a service already on the
+machine. ElevenLabs' voice catalog is neither small nor free to ask about: a
+real account can hold hundreds of voices, and every request to list or
+synthesise counts against a paid quota. Re-listing the whole catalog before
+every utterance to compute a fallback would be genuine waste for no benefit
+this provider's one caller needs, so ``speak()`` here does not do it.
+``available_voices()`` still exists - the real, live discovery seam a
+provider is expected to publish - and is what resolves a voice's stable id
+from its name, once, rather than ever guessing one.
+
+**Where the chosen voice lives, and why nothing here names Alfred.** A
+``VoiceProfile`` never learns a vendor exists (see that module's own
+docstring) - so an ElevenLabs voice id is exactly the kind of provider-
+specific fact ``VoiceProfile.style`` already exists to carry, opaque and
+unread by anything but the provider that put it there. This module reads
+``style["elevenlabs_voice_id"]`` off whatever profile it is given; it has no
+knowledge of which agent that profile belongs to, so a future specialist
+gets a distinct ElevenLabs voice the same way Alfred does - by declaring one
+in its own identity document, not by this file learning a second name.
+
+**Playback.** ElevenLabs returns audio bytes, not sound - there is no
+"default output device" call the way SAPI has one. ``_play_wav_bytes`` asks
+for a WAV-formatted response (``output_format="wav_24000"``) and plays it
+with the standard library's own ``winsound``, the same "no new dependency"
+discipline the Windows provider already follows, at the cost of that one
+function assuming Windows for now - honestly reported as UNAVAILABLE rather
+than crashing this module's import, should this ever run somewhere winsound
+does not exist.
+"""
+
+from __future__ import annotations
+
+import tempfile
+from pathlib import Path
+from typing import Any
+
+from elevenlabs.client import ElevenLabs
+
+from src.channels.speech import SpeechAdapter, SpeechUnavailable
+from src.providers.availability import Availability, AvailabilityState
+from src.services.identity.voice import VoiceProfile
+from src.utils.logging import get_logger
+
+logger = get_logger(__name__)
+
+# A real, complete WAV container (RIFF header included) rather than raw PCM -
+# so nothing here has to build a header by hand, and so a played file is
+# byte-for-byte the same kind of artifact this project's own genuine
+# verification already checks (real WAV, real frame count).
+_OUTPUT_FORMAT = "wav_24000"
+
+
+def _voice_id_for(voice: VoiceProfile | None) -> str | None:
+    """The stable ElevenLabs voice id this profile carries, if any.
+
+    Read from ``style`` - never a typed ``VoiceProfile`` field - because a
+    voice id is exactly the provider-specific fact that field exists to
+    hold without ``VoiceProfile`` itself having to know ElevenLabs exists.
+    Never derived from ``preferred_voice`` (a display name) by guessing:
+    a name is not an id, and this provider does not invent one.
+    """
+    if voice is None:
+        return None
+    raw = voice.style.get("elevenlabs_voice_id")
+    text = str(raw or "").strip()
+    return text or None
+
+
+def _play_wav_bytes(audio: bytes) -> bool:
+    """Play a complete WAV file synchronously, honestly, on this machine.
+
+    Blocking on purpose: ``speak()`` must not return True until the audio has
+    actually been produced, the same guarantee the Windows provider's
+    ``$synth.Speak()`` already gives by blocking until finished.
+    """
+    try:
+        import winsound
+    except ImportError:
+        logger.warning("elevenlabs playback requires winsound, which is not available here")
+        return False
+
+    path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as handle:
+            handle.write(audio)
+            path = handle.name
+        winsound.PlaySound(path, winsound.SND_FILENAME)
+        return True
+    except OSError as exc:
+        logger.warning("elevenlabs playback failed: %s", exc)
+        return False
+    finally:
+        if path is not None:
+            Path(path).unlink(missing_ok=True)
+
+
+class ElevenLabsSpeechAdapter(SpeechAdapter):
+    """Text-to-speech via the real ElevenLabs API. Speaking only.
+
+    No ``listen()`` - this project has not asked for ElevenLabs speech
+    recognition, and adding it unasked would be exactly the speculative
+    abstraction this stage was told not to build. ``listen()`` raises
+    honestly, the same stance ``NoSpeech`` already takes for the half of the
+    contract it does not implement.
+    """
+
+    def __init__(self, api_key: str) -> None:
+        self._client = ElevenLabs(api_key=api_key)
+        self._availability = Availability()
+
+    @property
+    def name(self) -> str:
+        return "elevenlabs"
+
+    @property
+    def availability(self) -> Availability:
+        return self._availability
+
+    def listen(self, timeout: float | None = None) -> str:
+        raise SpeechUnavailable(
+            "the elevenlabs provider is text-to-speech only; it does not "
+            "listen. Type instead, or select a provider that hears."
+        )
+
+    def available_voices(self) -> tuple[tuple[str, str], ...]:
+        """(voice_id, name) pairs from this account's real voice library.
+
+        The live discovery seam - what a person or a future resolution step
+        actually calls to turn a voice's display name into a stable id, the
+        same role ``installed_voice_names()`` plays for Windows. Never
+        cached: unlike a
+        local engine's fixed roster, an account's ElevenLabs library can
+        change between calls, and pretending otherwise would be the same
+        mistake ``Availability`` already exists to prevent - stale evidence
+        presented as current.
+        """
+        try:
+            response = self._client.voices.get_all()
+        except Exception as exc:  # noqa: BLE001 - a paid HTTP API fails in more ways than OSError
+            logger.warning("elevenlabs voice catalog could not be listed: %s", exc)
+            return ()
+        return tuple((v.voice_id, v.name) for v in response.voices if v.voice_id and v.name)
+
+    def speak(self, text: str, voice: VoiceProfile | None = None) -> bool:
+        voice_id = _voice_id_for(voice)
+        if voice_id is None:
+            reason = (
+                f"no elevenlabs voice id configured for '{voice.key}'"
+                if voice is not None
+                else "no voice profile supplied and elevenlabs has no default voice"
+            )
+            self._availability = Availability(state=AvailabilityState.UNAVAILABLE, reason=reason)
+            return False
+
+        try:
+            chunks: Any = self._client.text_to_speech.convert(
+                voice_id, text=text, output_format=_OUTPUT_FORMAT
+            )
+            audio = b"".join(chunks)
+        except Exception as exc:  # noqa: BLE001 - a paid HTTP API fails in more ways than OSError
+            self._availability = Availability(state=AvailabilityState.UNAVAILABLE, reason=str(exc))
+            return False
+
+        if not _play_wav_bytes(audio):
+            self._availability = Availability(
+                state=AvailabilityState.UNAVAILABLE,
+                reason="synthesis succeeded but local playback failed",
+            )
+            return False
+
+        self._availability = Availability(state=AvailabilityState.AVAILABLE)
+        return True

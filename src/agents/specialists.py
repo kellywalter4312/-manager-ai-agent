@@ -37,21 +37,30 @@ records are still on disk under the old name.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from src.agents.base_agent import BaseAgent
 from src.agents.brain import SpecialistBrain
 from src.agents.brain_factory import domain_for
+from src.agents.tools.toolset import ToolSet
 from src.agents.email.analyzers import JobOpportunityAnalyzer
 from src.agents.email_agent import EmailAgent
 from src.config.settings import Settings
 from src.providers.base import LLMProvider
+from src.providers.celebration import CelebrationProvider
 from src.services.email.mailbox import Mailbox
 from src.services.identity.specialist import (
     DEFAULT_IDENTITIES_DIR,
     SpecialistIdentity,
     load_specialist_identity,
+)
+from src.services.identity.personality import AgentPersonality, default_personality
+from src.services.identity.voice import (
+    VoiceActivation,
+    VoiceProfile,
+    default_activation,
+    default_voice,
 )
 from src.services.memory.day import Calendar
 from src.services.memory.factory import EMAIL_AGENT, build_memory
@@ -113,6 +122,55 @@ class SpecialistWiring:
         if self.identity is not None and self.identity.area_of_responsibility:
             return self.identity.area_of_responsibility
         return self.fallback_domain
+
+    @property
+    def voice(self) -> "VoiceProfile":
+        """How this specialist sounds. The fourth thing one identity decides.
+
+        Name, memory owner and brain domain already come from here for the
+        reason this class exists: three facts that must agree, derived once so
+        disagreeing is not something that can be typed. A voice is a fourth,
+        and it belongs for exactly the same reason - a specialist whose voice
+        was configured somewhere else could drift from its own identity, and
+        nobody would notice until two agents sounded alike.
+
+        Falls back to a voice derived from the specialist's *own name* rather
+        than to a shared default. Two specialists that both declare nothing
+        must still be distinguishable, and a shared default object would give
+        them one voice - the failure this whole layer exists to prevent.
+        """
+        declared = self.identity.voice if self.identity is not None else None
+        return declared if declared is not None else default_voice(self.name)
+
+    @property
+    def activation(self) -> "VoiceActivation":
+        """How this specialist is addressed by voice. A fifth thing this one
+        identity decides, for the same reason voice above is the fourth: an
+        activation identity configured somewhere else could drift from this
+        specialist's own name and document, and this class exists precisely
+        so that cannot happen.
+
+        Falls back to a phrase list derived from the specialist's *own
+        name*, never to a shared default - two specialists that both
+        declare nothing must still be addressable as themselves, not as
+        each other.
+        """
+        declared = self.identity.activation if self.identity is not None else None
+        return declared if declared is not None else default_activation(self.name)
+
+    @property
+    def personality(self) -> "AgentPersonality":
+        """How this specialist tends to communicate. A sixth thing this
+        one identity decides, for the same reason voice/activation above
+        are: a personality configured somewhere else could drift from this
+        specialist's own document.
+
+        Falls back to an unconfigured, name-keyed personality - two
+        specialists that both declare nothing must still be distinguishable
+        by key, not given one shared communication style.
+        """
+        declared = self.identity.personality if self.identity is not None else None
+        return declared if declared is not None else default_personality(self.name)
 
     @property
     def has_identity_document(self) -> bool:
@@ -178,10 +236,31 @@ class SpecialistContext:
     # This specialist's own brain, built from its own domain. Never shared
     # with the Manager and never shared with another specialist.
     brain: SpecialistBrain
+    # What this specialist is equipped to reach in the world.
+    #
+    # **Access is a grant, never an identity.** An identity document says who a
+    # specialist is; it has no field in which a tool, a credential or an
+    # endpoint could be written, and that is deliberate. What an agent may
+    # *reach* is decided here, in composition, by somebody wiring the system
+    # together - the same separation that keeps a capability word from granting
+    # a capability.
+    #
+    # Empty by default, and per specialist. An integration handed to every
+    # agent because one needed it would make "who can read that mailbox" a
+    # question nobody could answer, so a specialist nobody equipped can do
+    # nothing - the same rule the Manager's own ToolSet already lives under.
+    tools: ToolSet = field(default_factory=ToolSet)
     profile: UserProfile | None = None
     mailbox: Mailbox | None = None
     fetch_limit: int | None = None
     interpreter: Any | None = None
+    # Stage 12 closure: the same, single, shared CelebrationProvider every
+    # other agent's own presentation reaction ultimately comes from -
+    # selected once by build_celebration_provider, never a second instance
+    # per specialist. None (the honest "nothing was supplied" default) lets
+    # a builder fall back to its own agent's constructor default, exactly
+    # as every builder already does for a caller that does not care.
+    celebration: CelebrationProvider | None = None
 
     def memory(self) -> Memory:
         """This specialist's own store, selected by its own name.
@@ -237,8 +316,18 @@ def build_email_specialist(context: SpecialistContext) -> BaseAgent:
         ],
         brain=context.brain,
         memory=context.memory(),
+        # Whatever this specialist was equipped with, and nothing more. An
+        # empty ToolSet is the honest default: the agent then names what it
+        # cannot do rather than guessing.
+        tools=context.tools,
         calendar=context.calendar,
         identity=context.wiring.identity,
+        # Stage 12 closure: the shared, Settings-selected provider when the
+        # composition root supplied one; None falls back to EmailAgent's
+        # own constructor default (DefaultCelebrationProvider()) exactly
+        # as before, for any caller - a test, an older composition path -
+        # that does not supply one.
+        celebration=context.celebration,
         **options,
     )
 

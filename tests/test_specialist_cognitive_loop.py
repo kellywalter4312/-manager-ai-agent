@@ -539,7 +539,14 @@ class TestRecording:
         assert len(agent.memory) == 0
 
     def test_the_specialist_writes_only_through_the_gated_path(self):
-        """One write site, and it is the one that consults the policy."""
+        """Two write sites now, not one - Stage 12 added
+        ``CognitiveAgent.retain``, the specialist's own counterpart to
+        ``ManagerAgent.retain`` for an explicit capture request - and
+        both are gated: neither reaches ``remember`` without going
+        through the policy first (see the identical, more detailed
+        assertion in test_specialist_memory.py's own
+        ``test_there_is_no_write_that_skips_the_policy``, which also
+        checks ``writers <= judges``)."""
         import ast
 
         import src.agents.cognitive_agent as cognitive
@@ -557,7 +564,7 @@ class TestRecording:
                             writers.add(node.name)
                         assert inner.func.attr not in ("forget", "clear")
 
-        assert writers == {"remember_experience"}
+        assert writers == {"remember_experience", "retain"}
 
     def test_a_specialist_memory_policy_exists_and_is_not_the_managers(self):
         from src.agents.memory_policy import SpecialistMemoryPolicy

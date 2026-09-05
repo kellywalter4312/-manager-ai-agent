@@ -72,6 +72,73 @@ class AnthropicProvider(LLMProvider):
     def model(self) -> str:
         return self._model
 
+    def analyze_image(
+        self, image_bytes: bytes, prompt: str, *, media_type: str = "image/png"
+    ) -> Completion:
+        """Real visual reasoning over a real image - genuinely different
+        from ``complete()``, never a fabricated extension of it. Claude's
+        own Messages API accepts an image content block alongside text in
+        the same user turn; this is that real call, nothing simulated.
+
+        Deliberately **not** part of the ``LLMProvider`` contract
+        (``base.py``'s own "one method, plain strings in and out" is
+        stated as a deliberate choice, not an oversight) - adding an
+        image parameter there would force OpenAI/xAI/Null to grow a
+        parameter none of them can honour identically, and would touch
+        every existing caller of ``complete()`` for a capability only one
+        vendor here currently has real support for. This method exists
+        beside the contract, reached only by a caller that has already
+        confirmed (via ``hasattr``) that this specific provider offers
+        it - see ``src/agents/tools/image_analysis.py`` for that caller
+        and the honest refusal every other provider still gets.
+
+        Raises on an empty prompt or empty image bytes, the identical
+        rule ``complete()`` already holds for an empty prompt.
+        """
+        if not prompt.strip():
+            raise ValueError("prompt must not be empty")
+        if not image_bytes:
+            raise ValueError("image_bytes must not be empty")
+
+        import base64
+
+        encoded = base64.b64encode(image_bytes).decode("ascii")
+        message = self._get_client().messages.create(
+            model=self._model,
+            max_tokens=self._max_tokens,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {"type": "base64", "media_type": media_type, "data": encoded},
+                        },
+                        {"type": "text", "text": prompt},
+                    ],
+                }
+            ],
+            thinking={"type": "adaptive"},
+            output_config={"effort": "low"},
+        )
+
+        if message is None:
+            raise ProviderResponseError(
+                "the Anthropic client returned no message object"
+            )
+
+        stop_reason = getattr(message, "stop_reason", None)
+        text = "" if stop_reason == "refusal" else self._extract_text(message)
+
+        usage = getattr(message, "usage", None)
+        return Completion(
+            text=text,
+            provider=self.name,
+            model=self._reported_model(message),
+            input_tokens=self._token_count(usage, "input_tokens"),
+            output_tokens=self._token_count(usage, "output_tokens"),
+        )
+
     def complete(self, prompt: str, *, system: str | None = None) -> Completion:
         if not prompt.strip():
             raise ValueError("prompt must not be empty")

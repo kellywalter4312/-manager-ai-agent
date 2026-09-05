@@ -586,10 +586,38 @@ class TestItIsOnlyALens:
 
 
 class TestIsolation:
-    def test_no_production_memory_directory_is_created(self):
+    def test_writing_to_the_real_memory_directory_is_structurally_blocked(self):
+        """Stage 17.15: replaces a fragile global-state check.
+
+        The old version asserted ``data/memory`` does not exist at all -
+        which cannot tell "a test created this" apart from "this already
+        exists because the real, governed live path (a genuinely served
+        Avatar Studio session) was used outside this test run, exactly
+        as Stage 17.13-17.14's own checkpoints did." That is real,
+        intentional user data, not something a test should ever require
+        the *absence* of to pass.
+
+        The actual guarantee this suite needs - that nothing a test does
+        can write into the real data/memory directory - is already
+        enforced by conftest.py's own autouse ``_no_production_writes``
+        fixture. This test now proves that enforcement directly, with
+        isolated/ephemeral test storage of its own: constructing a real
+        ``PersistentMemory`` over a path inside the real directory and
+        attempting to ``remember()`` into it must raise, structurally,
+        regardless of whatever the directory already legitimately
+        contains.
+        """
         from conftest import PRODUCTION_DATA_DIR
 
-        assert not (PRODUCTION_DATA_DIR / "memory").exists()
+        canary_path = PRODUCTION_DATA_DIR / "memory" / "test-isolation-guard-canary.json"
+        memory = PersistentMemory(canary_path)
+        with pytest.raises(AssertionError, match="production data directory"):
+            memory.remember(MemoryRecord(content="canary - must never actually be written"))
+        # The guard raises before any byte reaches disk - confirmed, not
+        # just assumed, so a regression in the guard's own ordering
+        # (blocking mkdir but not the write, for instance) would still
+        # be caught here.
+        assert not canary_path.exists()
 
     def test_the_default_memory_dir_is_guarded(self):
         from conftest import _is_production_data

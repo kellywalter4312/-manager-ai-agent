@@ -56,7 +56,16 @@ from src.providers.availability import Availability, AvailabilityState
 from src.services.email.in_memory_mailbox import InMemoryMailbox
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-NEW_PACKAGES = ("src/channels", "src/events", "src/improvement")
+NEW_PACKAGES = (
+    "src/channels",
+    "src/events",
+    "src/improvement",
+    # The conversation package joins this list rather than growing its own
+    # copy of these rules. A room that could import an agent, a brain or a
+    # registry would be the exact leak it exists to prevent, and the three
+    # checks below already say so - so isolation costs one line here.
+    "src/conversation",
+)
 
 
 def docstring_nodes(tree):
@@ -127,6 +136,9 @@ class FakeSpeech(SpeechAdapter):
         # UNKNOWN until a call happens, exactly as a real engine begins.
         self._availability = Availability()
         self.said: list[str] = []
+        # Which voice each utterance was asked for, positionally alongside
+        # `said`. None means the caller expressed no preference.
+        self.voices: list[object] = []
 
     @property
     def name(self):
@@ -163,12 +175,19 @@ class FakeSpeech(SpeechAdapter):
         self._succeeded()
         return self._hears
 
-    def speak(self, text):
+    def speak(self, text, voice=None):
+        """Records the voice it was asked for as well as the words.
+
+        This is how per-agent voices are proven without an engine: the double
+        cannot make a sound, but it can say truthfully which voice was
+        requested, and that is the architectural claim.
+        """
         if not self.works:
             self._failed(SpeechUnavailable("nothing to speak with"))
             return False
         self._succeeded()
         self.said.append(text)
+        self.voices.append(voice)
         return True
 
 
@@ -976,9 +995,14 @@ class TestTheNewLayersOwnNothing:
             assert absent not in requirements, absent
 
     def test_the_new_packages_import_only_the_standard_library(self):
+        # An allow-list of the standard-library modules these packages actually
+        # use. Adding one does not soften the claim - the claim is "only the
+        # standard library", and uuid is standard library. It arrived with the
+        # conversation package, which gives a room an id the same way
+        # MemoryRecord gives a record one.
         allowed = {
             "__future__", "abc", "ast", "dataclasses", "datetime", "enum",
-            "pathlib", "typing", "src",
+            "pathlib", "typing", "uuid", "src",
         }
         for package in NEW_PACKAGES:
             for path in sorted((REPO_ROOT / package).rglob("*.py")):

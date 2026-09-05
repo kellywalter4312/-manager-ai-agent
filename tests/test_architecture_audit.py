@@ -190,12 +190,17 @@ class TestFullBrainIsEarnedNotConfigured:
         """An API key is a credential, never evidence of anything working.
 
         Cognition must not read one, and neither must anything that decides a
-        mode. Keys stay confined to configuration and the provider layer.
+        mode. Keys stay confined to configuration and the provider layer -
+        which, since Phase 1.5, includes the credential/account layer
+        (``src/services/credentials/``) that constructs and names
+        ``ProviderAccount``s for that same provider layer to consume; it
+        carries no cognition of its own either.
         """
         allowed = {"src/config/settings.py"}
+        allowed_prefixes = ("src/providers/", "src/services/credentials/")
         for path in source_files():
             relative = path.relative_to(REPO_ROOT).as_posix()
-            if relative in allowed or relative.startswith("src/providers/"):
+            if relative in allowed or relative.startswith(allowed_prefixes):
                 continue
             source = read(path)
             assert "api_key" not in source.replace('"api_key"', "").replace("'api_key'", ""), relative
@@ -500,7 +505,14 @@ class TestOwnershipIsNeverShared:
         from src.services.memory.factory import build_memory
         from src.services.memory.persistent import PersistentMemory
 
-        assert isinstance(build_memory(settings(), "someone"), EphemeralMemory)
+        # Both named explicitly rather than one leaning on the default.
+        # The claim is that the two kinds stay distinct and selectable,
+        # which must not quietly become a claim about which one is
+        # configured - the default moved to persistent and this test kept
+        # passing for the wrong reason until it did not.
+        assert isinstance(
+            build_memory(settings(memory="ephemeral"), "someone"), EphemeralMemory
+        )
         assert isinstance(
             build_memory(settings(memory="persistent", memory_dir="data/x"), "someone"),
             PersistentMemory,
@@ -721,20 +733,37 @@ class TestNoFuturePhaseHasStarted:
         for path in source_files():
             assert "control" not in path.stem.lower(), path.name
 
-    def test_no_web_search_or_coding_tool_is_falsely_shipped(self):
-        """The honest position: those are named extension points and nothing
-        fills them. When one is built this test is what says so out loud."""
+    def test_no_coding_tool_is_falsely_shipped(self):
+        """The honest position: "code_assistant" is a named extension
+        point and nothing fills it. When it is built this test is what
+        says so out loud.
+
+        "web_search" left this list in Phase 3 (Knowledge, Research &
+        Live Information): ``WebSearchTool`` (``src/agents/tools/
+        web_search.py``) is a real, deliberately-built tool - see
+        ARCHITECTURE.md's own Phase 3 record - so asserting its absence
+        would now be asserting something false, not honest. This test is
+        narrowed the identical way it was already narrowed once before
+        (Stage 14, for ``live_information``): the check that matters is
+        that ``code_assistant`` - the one name still genuinely unfilled -
+        stays unfilled, never that no ``Tool`` subclass may ever claim a
+        name this list used to include.
+        """
         from src.agents.tools.tool import Tool
 
         _, manager = assembled()
         assert manager.own_skills.tools.is_empty
 
-        implementations = []
+        claimed_names: set[str] = set()
         for path in source_files():
-            tree = ast.parse(read(path))
+            source = read(path)
+            tree = ast.parse(source)
             for node in ast.walk(tree):
                 if isinstance(node, ast.ClassDef):
                     bases = {getattr(b, "id", getattr(b, "attr", "")) for b in node.bases}
                     if "Tool" in bases:
-                        implementations.append(node.name)
-        assert implementations == [], implementations
+                        class_source = ast.get_source_segment(source, node) or ""
+                        for literal in ('"code_assistant"', "'code_assistant'"):
+                            if literal in class_source:
+                                claimed_names.add(literal.strip("'\""))
+        assert claimed_names == set(), claimed_names

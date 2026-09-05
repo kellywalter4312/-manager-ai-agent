@@ -74,10 +74,22 @@ def docstring_nodes(tree):
 
 
 def settings(**overrides):
-    """Settings built from an empty environment, so tests never read os.environ."""
+    """Settings built from an empty environment, so tests never read os.environ.
+
+    ``memory="ephemeral"`` by default - this file's own helper never had
+    it, unlike every other test module's own settings() in this project,
+    which meant every test built through centre()/with_profile() was
+    silently reading/writing the real default data/memory/manager.json
+    the whole time. That went unnoticed only because the file never
+    happened to exist; the moment something else in this project
+    (Stage 17's own live-served Avatar Studio) genuinely wrote to it for
+    the first time, tests here that assume empty history started
+    failing on real, unrelated user data. Explicit now, matching the
+    isolation every other test file already has.
+    """
     from src.config.settings import Settings
 
-    return Settings.from_env(env={}, **overrides)
+    return Settings.from_env(env={}, memory="ephemeral", **overrides)
 
 
 def centre(mailbox=None, profile=None, **overrides):
@@ -93,6 +105,31 @@ def centre(mailbox=None, profile=None, **overrides):
     return ControlCenter(runtime, manager)
 
 
+def door(window):
+    """The channel the composition root builds for one Control Center.
+
+    Built through build_channel rather than constructed here, so a test that
+    drives run_command is travelling the same door production does. A
+    hand-made TextChannel would pass just as readily and prove nothing about
+    what main() actually assembles.
+    """
+    from src.composition import build_channel
+
+    return build_channel(window._runtime, window.manager)
+
+
+def room(window):
+    """The conversation the composition root opens for one Manager.
+
+    Built through build_conversation for the same reason door() is built
+    through build_channel: a hand-made Conversation would pass and prove
+    nothing about what main() actually assembles.
+    """
+    from src.composition import build_conversation
+
+    return build_conversation(window.manager)
+
+
 def with_profile(**overrides):
     from src.services.profile.loader import parse_profile
 
@@ -106,6 +143,529 @@ def with_profile(**overrides):
 # ---------------------------------------------------------------------------
 # The three ways in
 # ---------------------------------------------------------------------------
+
+
+class TestTheManagerRaisesRealDelegationEvents:
+    """Alfred reports his own orchestration. Nothing downstream infers it.
+
+    A delegation is a decision the Manager made, so the Manager is the only
+    thing that can truthfully say it happened. A screen noticing that a result
+    carried somebody else's name would be inferring the decision rather than
+    reporting it, and the first time the two disagreed there would be no way to
+    say which was real.
+    """
+
+    def test_delegating_raises_an_event_from_the_manager(self):
+        window = with_profile()
+        assert len(window.manager.events) == 0
+
+        window.manager.handle_task(Task(description="scan my inbox for opportunities"))
+
+        raised = window.manager.events.of_kind("delegation")
+        assert raised, "delegating must raise a delegation event"
+        assert raised[0].fact("specialist") == "Arthur"
+
+    def test_the_event_carries_the_routers_own_reasoning(self):
+        """Facts the architecture already produced, never a phrase invented
+        for the occasion."""
+        window = with_profile()
+        task = Task(description="scan my inbox for opportunities")
+        expected = window.manager.diagnose(task).reason
+
+        window.manager.handle_task(task)
+
+        assert window.manager.events.of_kind("delegation")[0].fact("reason") == expected
+
+    def test_handling_it_himself_raises_no_delegation(self):
+        """Alfred is not a router. Work he takes on is not a handover, and
+        recording one would make the count of handovers quietly wrong."""
+        window = centre()
+
+        result = window.manager.handle_task(Task(description="roster"))
+
+        assert result.agent_name == "Alfred"
+        assert window.manager.events.of_kind("delegation") == ()
+
+    def test_the_manager_can_still_do_small_work_itself(self):
+        """Depth, not an absolute wall. A task within Alfred's own capabilities
+        is answered by Alfred, and no specialist is involved."""
+        window = centre()
+        result = window.manager.handle_task(Task(description="list your capabilities"))
+        assert result.succeeded
+        assert result.agent_name == "Alfred"
+        assert window.manager.events.of_kind("delegation") == ()
+
+    def test_delegation_remains_capability_driven(self):
+        """The event describes a routing outcome; it does not cause one. Which
+        agent runs is still decided by scoring declared capabilities."""
+        window = with_profile()
+        task = Task(description="scan my inbox for opportunities")
+        assert window.manager.diagnose(task).agent_name == "Arthur"
+
+        window.manager.handle_task(task)
+
+        assert window.manager.events.of_kind("delegation")[0].fact("specialist") == "Arthur"
+
+    def test_the_event_reaches_the_control_center_history(self):
+        """Through the existing event architecture: the Manager's log, phrased
+        by the narrator, rendered as ordinary history."""
+        window = with_profile()
+        window.manager.handle_task(Task(description="scan my inbox for opportunities"))
+
+        view = window.history()
+
+        assert "event" in view.categories
+        entries = [e for e in view.events if e.category == "event"]
+        assert entries, "a raised event must be observable in history"
+        assert "Arthur" in entries[0].summary
+
+    def test_the_history_wording_comes_from_the_narrator(self):
+        """Not from a sentence the screen wrote for itself."""
+        from src.events.narrator import compose
+
+        window = with_profile()
+        window.manager.handle_task(Task(description="scan my inbox for opportunities"))
+
+        raised = window.manager.events.of_kind("delegation")[0]
+        entries = [e for e in window.history().events if e.category == "event"]
+        assert entries[0].summary == compose(raised)
+
+    def test_the_control_center_raises_no_events_of_its_own(self):
+        """Structural. Reading a log is observation; appending to it is being
+        the source of truth, and there must be exactly one of those."""
+        for path in sorted(CONTROL_CENTER.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                    assert node.func.attr != "record", (path.name, "events.record")
+
+    def test_rendering_a_screen_raises_nothing(self):
+        """An event must describe something that happened, never the fact that
+        somebody looked."""
+        window = with_profile()
+        window.manager.handle_task(Task(description="scan my inbox for opportunities"))
+        before = len(window.manager.events)
+
+        window.history()
+        window.overview()
+        render_overview(window.overview(), 80)
+
+        assert len(window.manager.events) == before
+
+    def test_the_event_log_is_not_a_second_memory(self):
+        """Different questions, different stores, and no bridge between them.
+
+        "What happened" and "what should change a future decision" are not the
+        same claim. Raising an event must not put anything in memory, and what
+        memory keeps about a delegation goes through the policy as it always
+        did - so the two records of the same moment stay independently
+        explainable.
+        """
+        window = with_profile()
+        manager = window.manager
+        assert manager.events is not manager.memory
+
+        before = len(manager.memory.recall(limit=200))
+        manager.handle_task(Task(description="scan my inbox for opportunities"))
+
+        raised = manager.events.of_kind("delegation")
+        assert raised
+
+        # Whatever memory kept, it was admitted by the policy - the event
+        # itself was never handed to remember().
+        for record in manager.memory.recall(limit=200):
+            assert record.kind != raised[0].kind
+            assert manager.memory_policy.permits(record)
+
+        # And an event is not a memory: the log grew without memory growing on
+        # its account.
+        assert len(manager.events) >= 1
+        assert len(manager.memory.recall(limit=200)) >= before
+
+
+class TestTheConversationIsReachableFromProduction:
+    """The room is used, not merely available.
+
+    Written in the style of test_production_reachability.py: drive what
+    production calls and inspect what came back. A test that built a
+    Conversation itself would prove the class works and nothing about whether
+    any entry point opens one.
+    """
+
+    def test_the_entry_point_opens_a_conversation(self, monkeypatch):
+        import scripts.control_center as cc
+
+        monkeypatch.setattr(cc, "load_profile", lambda path: None)
+        monkeypatch.setattr(cc, "load_schedule", lambda path: None)
+        _, manager, _, conversation = cc.build(settings(log_level="CRITICAL"))
+
+        from src.conversation.conversation import Conversation
+
+        assert isinstance(conversation, Conversation)
+        assert conversation.has(manager.own_skills.name)
+
+    def test_the_room_starts_with_the_person_and_the_manager_only(self):
+        """Not a roster. Alfred brings a specialist in when work needs one, so
+        pre-populating from the registry would make "bring X into this"
+        meaningless - X would already be sitting there."""
+        window = centre()
+        conversation = room(window)
+
+        assert conversation.has(window.manager.own_skills.name)
+        assert len(conversation.agents) == 1
+        assert not conversation.has("Arthur")
+
+    def test_talking_is_recorded_in_the_room(self):
+        import scripts.control_center as cc
+
+        window = centre()
+        conversation = room(window)
+
+        cc.run_command(window, "talk roster", 80, door(window), conversation)
+
+        speakers = [u.speaker for u in conversation.utterances]
+        assert "you" in speakers
+        assert window.manager.own_skills.name in speakers
+
+    def test_talking_without_the_keyword_is_recorded_too(self):
+        """Two paths reach Alfred - "talk roster" and bare "roster" - and the
+        bare one is the primary mode. A mutation check found this branch
+        untested: bypassing the room here passed every other test.
+        """
+        import scripts.control_center as cc
+
+        window = centre()
+        conversation = room(window)
+
+        cc.run_command(window, "roster", 80, door(window), conversation)
+
+        speakers = [u.speaker for u in conversation.utterances]
+        assert "you" in speakers
+        assert window.manager.own_skills.name in speakers
+
+    def test_the_answer_recorded_is_the_answer_given(self):
+        import scripts.control_center as cc
+
+        window = centre()
+        conversation = room(window)
+
+        cc.run_command(window, "talk roster", 80, door(window), conversation)
+
+        answer = conversation.said_by(window.manager.own_skills.name)[0]
+        assert answer.text.strip()
+        assert answer.detail is not None  # the trail rides along, uninterpreted
+
+    def test_addressing_is_recorded_even_though_nothing_routes_on_it_yet(self):
+        """The seam voice will use. Recorded now because a transcript that
+        never captured it could not be asked afterwards."""
+        import scripts.control_center as cc
+
+        window = centre()
+        conversation = room(window)
+        alfred = window.manager.own_skills.name
+
+        cc.run_command(window, f"talk {alfred}, roster", 80, door(window), conversation)
+
+        assert conversation.utterances[0].addressed == alfred
+
+    def test_the_room_records_an_address_but_does_not_act_on_it(self):
+        """The room hands over context; the orchestrator decides what it means.
+
+        This used to assert that an addressed request and a plain one produced
+        identical output, which was true only while addressing did nothing.
+        Phase 4 is the change that makes an address matter, so asserting
+        sameness would now be asserting that the feature does not work.
+
+        The invariant that actually matters survives and is asserted here: the
+        Conversation resolves *who was spoken to* and records it, and it holds
+        no way to select, invoke or notify anybody.
+        """
+        window = centre()
+        conversation = room(window)
+        alfred = window.manager.own_skills.name
+
+        assert conversation.addressed_in(f"{alfred}, roster") == alfred
+        for forbidden in ("route", "diagnose", "handle_task", "decide", "delegate"):
+            assert not hasattr(conversation, forbidden), forbidden
+
+    def test_a_second_agent_could_join_without_the_model_changing(self):
+        """The scaling claim, at the conversation layer: a future specialist
+        takes part by being named. Nothing in the room learns it exists."""
+        from src.conversation.conversation import Participant, ParticipantKind
+
+        window = centre()
+        conversation = room(window)
+
+        conversation.join(Participant("Some Future Specialist", ParticipantKind.AGENT))
+
+        assert conversation.has("Some Future Specialist")
+        assert len(conversation.agents) == 2
+
+    def test_the_entry_point_holds_no_conversation_logic(self):
+        """Structural. The screen records what was said; it must not grow its
+        own idea of participants, addressing or transcripts."""
+        source = (REPO_ROOT / "scripts" / "control_center.py").read_text(encoding="utf-8")
+        for invented in ("participants =", "transcript =", "def addressed"):
+            assert invented not in source, invented
+
+
+class TestSpecialistsSpeakForThemselves:
+    """Alfred orchestrates participation. He does not talk for anybody.
+
+    The words in a delegated answer come from that specialist's own brain,
+    memory and tools - verified: the text is byte-identical to what the agent
+    produces when driven directly, because the Manager assesses a result and
+    never rewrites one. Putting the Manager's name on those words would be a
+    lie about who did the work.
+
+    Found by mutation. Attributing a specialist's answer to the Manager passed
+    every test in the suite, and the transcript was worse than wrong: because
+    the room opens with only the person and the Manager, a delegated answer was
+    silently dropped and the record showed a question with no reply.
+    """
+
+    def _delegating_window(self):
+        from src.services.profile.loader import parse_profile
+
+        return centre(
+            mailbox=sample_inbox(),
+            profile=parse_profile("## Skills\n### Strong\npython\n"),
+        )
+
+    def test_a_delegated_answer_is_recorded_at_all(self):
+        """The bug this class was written for: the reply used to vanish."""
+        import scripts.control_center as cc
+
+        window = self._delegating_window()
+        conversation = room(window)
+
+        cc.run_command(
+            window, "talk scan my inbox for opportunities", 80,
+            door(window), conversation,
+        )
+
+        assert len(conversation) == 2, "a question and its answer"
+
+    def test_the_specialist_is_recorded_as_the_speaker(self):
+        import scripts.control_center as cc
+
+        window = self._delegating_window()
+        conversation = room(window)
+
+        cc.run_command(
+            window, "talk scan my inbox for opportunities", 80,
+            door(window), conversation,
+        )
+
+        answer = conversation.utterances[-1]
+        assert answer.speaker == "Arthur"
+        assert answer.speaker != window.manager.own_skills.name
+
+    def test_the_manager_never_utters_the_specialists_words(self):
+        """The load-bearing assertion. Whatever else changes, the Manager must
+        not appear as the author of an answer he did not produce."""
+        import scripts.control_center as cc
+
+        window = self._delegating_window()
+        conversation = room(window)
+        alfred = window.manager.own_skills.name
+
+        cc.run_command(
+            window, "talk scan my inbox for opportunities", 80,
+            door(window), conversation,
+        )
+
+        spoken_by_alfred = [u.text for u in conversation.said_by(alfred)]
+        assert spoken_by_alfred == [], (
+            "the Manager spoke a specialist's answer: " + repr(spoken_by_alfred[:1])
+        )
+
+    def test_the_specialist_joins_the_room_to_answer(self):
+        """Delegation *is* participation. The room opens with the person and
+        the Manager and gains a specialist when one does the work."""
+        import scripts.control_center as cc
+
+        window = self._delegating_window()
+        conversation = room(window)
+        assert not conversation.has("Arthur")
+
+        cc.run_command(
+            window, "talk scan my inbox for opportunities", 80,
+            door(window), conversation,
+        )
+
+        assert conversation.has("Arthur")
+        assert len(conversation.agents) == 2
+
+    def test_joining_to_answer_hands_over_no_agent(self):
+        """Participation must not become access. The specialist is in the room
+        as a name and a kind, exactly like everybody else."""
+        import scripts.control_center as cc
+
+        window = self._delegating_window()
+        conversation = room(window)
+
+        cc.run_command(
+            window, "talk scan my inbox for opportunities", 80,
+            door(window), conversation,
+        )
+
+        arthur = conversation.participant("Arthur")
+        assert set(vars(arthur)) == {"name", "kind"}
+        for forbidden in ("brain", "memory", "tools", "registry", "agent"):
+            assert not hasattr(arthur, forbidden), forbidden
+
+    def test_the_specialists_own_words_are_what_is_recorded(self):
+        """Not a summary, not a paraphrase - the result the specialist
+        produced, unchanged by the Manager assessing it."""
+        import scripts.control_center as cc
+
+        window = self._delegating_window()
+        conversation = room(window)
+
+        cc.run_command(
+            window, "talk scan my inbox for opportunities", 80,
+            door(window), conversation,
+        )
+
+        answer = conversation.utterances[-1]
+        assert answer.detail.handled_by == "Arthur"
+        assert answer.text.startswith(answer.detail.outcome[:40])
+
+    def test_work_the_manager_does_himself_is_still_his(self):
+        """The other half. Alfred is not a router: what he handles, he says."""
+        import scripts.control_center as cc
+
+        window = centre()
+        conversation = room(window)
+        alfred = window.manager.own_skills.name
+
+        cc.run_command(window, "talk roster", 80, door(window), conversation)
+
+        assert conversation.utterances[-1].speaker == alfred
+        assert not conversation.has("Arthur")
+
+
+class TestTheChannelIsReachableFromProduction:
+    """The channel seam stopped being a thing only tests could build.
+
+    Written in the style of test_production_reachability.py, and for its
+    reason: `wired != reachable != durable`. A test that constructs a
+    TextChannel and calls ask() proves the class works and proves nothing about
+    whether any entry point uses one. So these drive `build()` and `main()` -
+    the functions production actually calls - and inspect what came back.
+    """
+
+    def test_the_composition_root_builds_the_channel_not_the_screen(self):
+        """Composition owns the decision. Before this the entry point reached
+        the Manager directly and made its own speech adapter."""
+        import src.composition as composition
+
+        window = centre()
+        channel = composition.build_channel(window._runtime, window.manager)
+        assert channel.manager is window.manager
+
+    def test_the_entry_point_hands_back_a_composed_channel(self, monkeypatch):
+        """build() is what main() calls, so this is the production assembly."""
+        import scripts.control_center as cc
+
+        monkeypatch.setattr(cc, "load_profile", lambda path: None)
+        monkeypatch.setattr(cc, "load_schedule", lambda path: None)
+        runtime, manager, channel, conversation = cc.build(
+            settings(log_level="CRITICAL")
+        )
+
+        from src.channels.channel import Channel
+
+        assert isinstance(channel, Channel)
+        assert channel.manager is manager
+
+    def test_the_channel_carries_the_speech_runtime_composed(self):
+        """Not an adapter the channel made for itself, and not one the screen
+        made: the object Runtime holds."""
+        window = centre()
+        channel = door(window)
+        assert channel.speech is window._runtime.speech
+
+    def test_talking_travels_through_the_channel(self):
+        """The decisive one. run_command must not be able to answer without the
+        door, so a channel that refuses to carry anything produces no answer.
+
+        Asserting that some text came back would pass just as well with the old
+        direct call to observe(), which is exactly the weak test this replaces.
+        """
+        import scripts.control_center as cc
+
+        window = centre()
+
+        class RefusingChannel:
+            manager = window.manager
+            name = "refusing"
+
+            def ask(self, request, *, explain=True, addressed=None):
+                raise AssertionError("the request must reach this channel")
+
+        with pytest.raises(AssertionError, match="must reach this channel"):
+            cc.run_command(window, "talk roster", 80, RefusingChannel(), room(window))
+
+    def test_the_answer_is_the_channels_answer(self):
+        """And it is a real turn, not a rendered string handed back."""
+        import scripts.control_center as cc
+
+        window = centre()
+        channel = door(window)
+        screen = cc.run_command(window, "roster", 80, channel, room(window))
+        assert channel.ask("roster").turn.handled_by in screen
+
+    def test_the_channel_still_goes_through_the_one_observe(self):
+        """Structural. Routing talk through a channel must not have created a
+        second orchestration: the channel calls observe(), as it always did,
+        and the entry point no longer calls it at all.
+
+        Checked against parsed code rather than raw text, for the reason
+        TestTheThreeAxesNeverMerge gives: both files *discuss* observe() in
+        comments explaining this very rule, and a substring search would find
+        the explanation instead of testing the rule.
+        """
+
+        def called(path):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            names = set()
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                if isinstance(func, ast.Name):
+                    names.add(func.id)
+                elif isinstance(func, ast.Attribute):
+                    names.add(func.attr)
+            return names
+
+        entry = called(REPO_ROOT / "scripts" / "control_center.py")
+        channel = called(REPO_ROOT / "src" / "channels" / "channel.py")
+
+        assert "observe" in channel
+        assert "observe" not in entry
+        assert "handle_task" not in entry
+
+    def test_composing_a_channel_did_not_give_runtime_an_engine(self):
+        """Runtime holds the interface, never knowledge of how speech is done."""
+        source = (REPO_ROOT / "src" / "composition.py").read_text(encoding="utf-8")
+        for engine in ("pyttsx", "whisper", "pyaudio", "sounddevice", "elevenlabs"):
+            assert engine not in source.lower(), engine
+
+    def test_the_composed_channel_has_no_availability_pre_gate(self):
+        """R1 must not come back through the composition root. A fresh UNKNOWN
+        engine is still attempted, or it could never prove itself."""
+        source = (REPO_ROOT / "src" / "channels" / "channel.py").read_text(encoding="utf-8")
+        assert "if not self._speech.available:" not in source
+
+    def test_a_channel_still_holds_no_brain_memory_or_registry(self):
+        """Composing one must not have widened what it carries."""
+        window = centre()
+        channel = door(window)
+        for forbidden in ("brain", "memory", "registry", "router", "tools"):
+            assert not hasattr(channel, forbidden), forbidden
 
 
 class TestVoiceStatusReportsEvidenceNotAClaim:
@@ -133,7 +693,8 @@ class TestVoiceStatusReportsEvidenceNotAClaim:
         must carry the shipped adapter's own reason."""
         import scripts.control_center as cc
 
-        screen = cc.run_command(centre(), "voice", 80)
+        window = centre()
+        screen = cc.run_command(window, "voice", 80, door(window), room(window))
         assert "no speech engine is installed" in screen
 
     def test_an_unproven_engine_is_not_reported_as_available(self):
@@ -197,17 +758,23 @@ class TestTheThreeModes:
         import scripts.control_center as cc
 
         window = centre()
+        channel, conversation = door(window), room(window)
         for command in ("status", "history"):
-            assert cc.run_command(window, command, 80).strip()
-        assert cc.run_command(window, "talk roster", 80).strip()
+            assert cc.run_command(window, command, 80, channel, conversation).strip()
+        assert cc.run_command(window, "talk roster", 80, channel, conversation).strip()
 
     def test_talking_needs_no_keyword(self):
         """Conversation is the primary mode, so it should not need one."""
         import scripts.control_center as cc
 
         window = centre()
-        keyed = cc.run_command(window, "talk list your capabilities", 80)
-        bare = cc.run_command(window, "list your capabilities", 80)
+        channel = door(window)
+        keyed = cc.run_command(
+            window, "talk list your capabilities", 80, channel, room(window)
+        )
+        bare = cc.run_command(
+            window, "list your capabilities", 80, channel, room(window)
+        )
         assert "RESULT" in keyed and "RESULT" in bare
 
     def test_the_user_never_picks_a_specialist(self):
@@ -220,7 +787,10 @@ class TestTheThreeModes:
     def test_an_unknown_agent_is_reported_rather_than_guessed(self):
         import scripts.control_center as cc
 
-        answer = cc.run_command(centre(), "status Nobody", 80)
+        window = centre()
+        answer = cc.run_command(
+            window, "status Nobody", 80, door(window), room(window)
+        )
         assert "no agent called" in answer
         assert "Alfred" in answer and "Arthur" in answer
 

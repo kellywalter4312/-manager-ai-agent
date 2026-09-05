@@ -165,6 +165,22 @@ class MemoryView:
 
 
 @dataclass(frozen=True)
+class UnresolvedFactView:
+    """One personal fact Alfred knows only as genuine uncertainty -
+    Stage 12 closure's own example: "mom's birthday is either March 24
+    or May 24, unconfirmed". Read-only, the same as every other view in
+    this file: resolving it happens through the ordinary conversational
+    path (restating the fact with the correct date), never from this
+    screen.
+    """
+
+    record_id: str
+    person: str
+    fact_type: str
+    alternatives: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class ToolView:
     """A concrete mechanism, and whether it is genuinely present.
 
@@ -223,6 +239,12 @@ class AgentView:
     # it declared nothing, which is a complete answer: conversation through
     # the Manager is a real way to work with an agent, not a gap.
     interface: Any | None = None
+    # Stage 17: this agent's own presence - a chosen or deterministic-
+    # default avatar, and whatever presence state the observer has
+    # genuine evidence for. None only for a caller that predates this
+    # field (an older test construction) - every real view built by
+    # observer.py supplies one.
+    presence: Any | None = None
 
     @property
     def is_manager(self) -> bool:
@@ -261,6 +283,11 @@ class HeartbeatView:
 class SystemView:
     """Everything that is about the installation rather than about an agent."""
 
+    # The assembled product's own version (src/core/versioning.py) - not a
+    # subsystem's SCHEMA_VERSION, not the snapshot format's own version.
+    # "What is Alfred OS today", the same kind of fact this view already
+    # reports for the provider or the memory backend.
+    system_version: str
     heartbeat: HeartbeatView
     mailbox: str
     gmail_scope: str
@@ -358,6 +385,25 @@ class ConversationTurn:
     memory_written: int = 0
     tool_used: str | None = None
     tool_available: bool | None = None
+    # Who the Manager resolved an invitation to, when the request was
+    # one. A name, never an agent - carried for the same reason
+    # `capability` and `tool_used` are: it is a fact the orchestration
+    # already produced, and re-deriving it downstream would mean
+    # something other than the Manager deciding who was meant.
+    invited: str | None = None
+    # Stage 12 closure: the presentation-shaped CelebrationReaction a
+    # genuine, already-stored milestone produced, as CelebrationReaction.to_dict()
+    # already renders it - never re-derived here, only carried. None for
+    # every ordinary turn (which is most of them); a real Off/dict with
+    # enabled=False for a milestone that was recorded with celebration
+    # turned off; a real dict with enabled=True carrying an avatar/
+    # environment/overlay/intensity/duration for a genuine celebration.
+    # This is the event/consumption boundary a presentation layer (today:
+    # this Control Center's own render_turn and serve_ui.py's JSON
+    # response; tomorrow: a real avatar/environment renderer) reads from -
+    # see src/providers/celebration.py's own docstring for why nothing
+    # upstream of this field ever reaches a Brain or a Memory to produce it.
+    celebration: dict[str, object] | None = None
 
 
 # ---------------------------------------------------------------------------

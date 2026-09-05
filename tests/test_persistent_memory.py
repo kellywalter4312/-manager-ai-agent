@@ -35,6 +35,7 @@ from src.services.memory.factory import (
     available_memories,
     build_memory,
 )
+from src.core.versioning import Migration, MigrationChain
 from src.services.memory.memory import Memory, MemoryRecord, MemoryStoreError
 from src.services.memory.persistent import SCHEMA_VERSION, PersistentMemory
 from src.services.profile.loader import load_profile
@@ -367,6 +368,147 @@ class TestRecovery:
 
 
 # ----------------------------------------------------------------------
+# Governed migration (src/core/versioning.py)
+#
+# Schema 1 has always been schema 1 - there is no real migration to test
+# against yet, so every test here registers a synthetic 0->1 migration on
+# MEMORY_MIGRATIONS (via monkeypatch, auto-reverted) purely to prove the
+# wiring works. That a store this deliberately synthetic still exercises
+# every safety rule is the point: the same code path a real future schema
+# bump runs through is proven correct before any real migration exists.
+# ----------------------------------------------------------------------
+
+
+class TestGovernedMigration:
+    def _register(self, monkeypatch, *migrations):
+        import src.services.memory.persistent as persistent_module
+
+        monkeypatch.setattr(persistent_module, "MEMORY_MIGRATIONS", MigrationChain(migrations))
+
+    def test_a_recognized_older_version_is_migrated_not_quarantined(self, tmp_path, monkeypatch):
+        self._register(
+            monkeypatch,
+            Migration(from_version=0, to_version=SCHEMA_VERSION, apply=lambda raw: {**raw, "version": SCHEMA_VERSION}),
+        )
+        good = PersistentMemory._serialise(record("kept across the migration"))
+        (tmp_path / "manager.json").write_text(
+            json.dumps({"version": 0, "records": [good]}), encoding="utf-8"
+        )
+
+        recovered = store(tmp_path)
+        assert len(recovered) == 1
+        assert recovered.recall("kept across the migration")[0].content == "kept across the migration"
+        assert not list(tmp_path.glob("manager.corrupt-*")), "a successful migration is not a quarantine"
+
+    def test_the_pre_migration_file_is_preserved_as_a_checkpoint(self, tmp_path, monkeypatch):
+        self._register(
+            monkeypatch,
+            Migration(from_version=0, to_version=SCHEMA_VERSION, apply=lambda raw: {**raw, "version": SCHEMA_VERSION}),
+        )
+        original = json.dumps({"version": 0, "records": []})
+        (tmp_path / "manager.json").write_text(original, encoding="utf-8")
+
+        store(tmp_path)
+
+        checkpoints = list(tmp_path.glob("manager.v0-checkpoint"))
+        assert checkpoints, "no checkpoint of the pre-migration file was kept"
+        assert checkpoints[0].read_text(encoding="utf-8") == original
+
+    def test_the_migrated_file_is_written_at_the_current_schema(self, tmp_path, monkeypatch):
+        self._register(
+            monkeypatch,
+            Migration(from_version=0, to_version=SCHEMA_VERSION, apply=lambda raw: {**raw, "version": SCHEMA_VERSION}),
+        )
+        (tmp_path / "manager.json").write_text(
+            json.dumps({"version": 0, "records": []}), encoding="utf-8"
+        )
+
+        store(tmp_path)
+
+        on_disk = json.loads((tmp_path / "manager.json").read_text(encoding="utf-8"))
+        assert on_disk["version"] == SCHEMA_VERSION
+
+    def test_a_migrated_store_survives_a_second_load(self, tmp_path, monkeypatch):
+        """The whole point: a rebuilt object (the way every Manager and
+        every specialist is actually reconstructed, per tick) sees the
+        already-migrated file and simply loads it - no second migration
+        attempt, no second checkpoint."""
+        self._register(
+            monkeypatch,
+            Migration(from_version=0, to_version=SCHEMA_VERSION, apply=lambda raw: {**raw, "version": SCHEMA_VERSION}),
+        )
+        good = PersistentMemory._serialise(record("still here on the next boot"))
+        (tmp_path / "manager.json").write_text(
+            json.dumps({"version": 0, "records": [good]}), encoding="utf-8"
+        )
+
+        store(tmp_path)  # first load: migrates
+        second = store(tmp_path)  # a fresh object over the same path
+
+        assert len(second) == 1
+        assert len(list(tmp_path.glob("manager.v0-checkpoint"))) == 1, "migrated a second time"
+
+    def test_a_version_with_no_registered_migration_is_still_quarantined(self, tmp_path, monkeypatch):
+        """The guarantee this whole seam must never weaken: registering a
+        migration for version 0 must not make version 999 - or any other
+        version nobody wrote a migration for - trustworthy. Exactly the
+        scenario test_an_unknown_schema_version_is_quarantined protects,
+        now proven to still hold with a real migration registered
+        alongside it."""
+        self._register(
+            monkeypatch,
+            Migration(from_version=0, to_version=SCHEMA_VERSION, apply=lambda raw: {**raw, "version": SCHEMA_VERSION}),
+        )
+        (tmp_path / "manager.json").write_text(
+            json.dumps({"version": 999, "records": []}), encoding="utf-8"
+        )
+
+        recovered = store(tmp_path)
+        assert len(recovered) == 0
+        assert list(tmp_path.glob("manager.corrupt-*"))
+
+    def test_a_migration_that_raises_falls_back_to_quarantine(self, tmp_path, monkeypatch):
+        def broken(_raw):
+            raise ValueError("simulated bug in a future migration")
+
+        self._register(monkeypatch, Migration(from_version=0, to_version=SCHEMA_VERSION, apply=broken))
+        (tmp_path / "manager.json").write_text(
+            json.dumps({"version": 0, "records": []}), encoding="utf-8"
+        )
+
+        recovered = store(tmp_path)
+        assert len(recovered) == 0
+        assert list(tmp_path.glob("manager.corrupt-*")), "a failed migration must not leave data unrecoverable"
+
+    def test_a_migration_producing_an_unusable_store_is_quarantined(self, tmp_path, monkeypatch):
+        self._register(
+            monkeypatch,
+            # drops "records" entirely - not a usable store, whatever else it is
+            Migration(from_version=0, to_version=SCHEMA_VERSION, apply=lambda raw: {"version": SCHEMA_VERSION}),
+        )
+        (tmp_path / "manager.json").write_text(
+            json.dumps({"version": 0, "records": []}), encoding="utf-8"
+        )
+
+        recovered = store(tmp_path)
+        assert len(recovered) == 0
+        assert list(tmp_path.glob("manager.corrupt-*"))
+
+    def test_no_migrations_registered_behaves_exactly_as_before_this_seam_existed(self, tmp_path):
+        """No monkeypatch here - MEMORY_MIGRATIONS is the real, empty chain
+        every store in this codebase is actually wired with today. An old
+        version with nothing registered for it must quarantine exactly as
+        it always has."""
+        (tmp_path / "manager.json").write_text(
+            json.dumps({"version": 0, "records": []}), encoding="utf-8"
+        )
+
+        recovered = store(tmp_path)
+        assert len(recovered) == 0
+        assert list(tmp_path.glob("manager.corrupt-*"))
+
+
+# ----------------------------------------------------------------------
 # Ephemeral is untouched
 # ----------------------------------------------------------------------
 
@@ -399,9 +541,23 @@ class TestEphemeralIsPreserved:
 
 
 class TestFactory:
-    def test_the_default_is_ephemeral(self):
-        assert settings().memory == "ephemeral"
-        assert isinstance(build_memory(settings(), MANAGER), EphemeralMemory)
+    def test_the_default_is_persistent(self):
+        """Continuity is the normal configuration, not an opt-in.
+
+        This asserted the opposite, and the opposite was the defect: an
+        agent running on an hourly heartbeat began every tick knowing
+        nothing, and no memory file had ever been written. Durability now
+        arrives by default; what may be kept is still decided by
+        MemoryPolicy, and forget() and clear() are still in the contract.
+        """
+        assert settings().memory == "persistent"
+        assert isinstance(build_memory(settings(), MANAGER), PersistentMemory)
+
+    def test_ephemeral_is_still_explicitly_selectable(self):
+        """Not deleted, not deprecated. A test, a one-off inspection or
+        anywhere durability would surprise somebody still asks for it."""
+        config = settings(memory="ephemeral")
+        assert isinstance(build_memory(config, MANAGER), EphemeralMemory)
 
     def test_persistent_is_selectable(self, tmp_path):
         config = settings(memory="persistent", memory_dir=str(tmp_path))
@@ -514,7 +670,9 @@ class TestManagerRecreation:
             assert rebuilt.recall_context(Task(description="inbox scanning")) != ()
 
     def test_an_ephemeral_manager_still_forgets(self, tmp_path):
-        config = settings(memory_dir=str(tmp_path))
+        """Ephemeral named explicitly. It used to arrive as the default,
+        so this proved the default rather than the kind."""
+        config = settings(memory="ephemeral", memory_dir=str(tmp_path))
         first = ManagerAgent(memory=build_memory(config, MANAGER))
         first.memory.remember(record())
         second = ManagerAgent(memory=build_memory(config, MANAGER))
@@ -563,9 +721,14 @@ class TestHeartbeatLifecycle:
         runner.tick()
         assert seen[0][0] is not seen[1][0], "the Manager unexpectedly survived"
 
-    def test_the_ephemeral_default_still_forgets_between_ticks(self, tmp_path):
-        """The previous behaviour, preserved and pinned."""
-        config = settings(memory_dir=str(tmp_path / "memory"))
+    def test_ephemeral_memory_still_forgets_between_ticks(self, tmp_path):
+        """Ephemeral behaviour, preserved and pinned - and now named.
+
+        It was "the ephemeral default"; ephemeral is no longer the
+        default, and the behaviour being pinned was never about which
+        one was configured.
+        """
+        config = settings(memory="ephemeral", memory_dir=str(tmp_path / "memory"))
         seen = []
         runner = self._runner(tmp_path, config, seen)
         runner.tick()

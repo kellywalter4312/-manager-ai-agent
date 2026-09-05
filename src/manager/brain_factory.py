@@ -30,6 +30,7 @@ from src.config.settings import Settings
 from src.manager.brain import ManagerBrain, NullBrain
 from src.manager.llm_brain import LLMManagerBrain
 from src.providers.base import LLMProvider
+from src.services.identity.personality import AgentPersonality
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -38,9 +39,9 @@ logger = get_logger(__name__)
 # constructed when it is actually selected - the same reasoning as the provider
 # registry, where an entry that needs a credential must not demand one merely
 # by existing.
-_BUILDERS: dict[str, Callable[[Settings, LLMProvider], ManagerBrain]] = {
-    "null": lambda settings, provider: NullBrain(),
-    "llm": lambda settings, provider: LLMManagerBrain(provider),
+_BUILDERS: dict[str, Callable[[Settings, LLMProvider, "AgentPersonality | None"], ManagerBrain]] = {
+    "null": lambda settings, provider, personality: NullBrain(),
+    "llm": lambda settings, provider, personality: LLMManagerBrain(provider, personality=personality),
 }
 
 
@@ -49,12 +50,22 @@ def available_brains() -> list[str]:
     return sorted(_BUILDERS)
 
 
-def build_brain(settings: Settings, provider: LLMProvider) -> ManagerBrain:
+def build_brain(
+    settings: Settings,
+    provider: LLMProvider,
+    personality: AgentPersonality | None = None,
+) -> ManagerBrain:
     """Construct the brain named by ``settings.brain``.
 
     Fails fast on an unknown name, listing the valid options - a typo in
     configuration should stop the program with a readable message rather than
     surface later as a Manager that mysteriously has no opinions.
+
+    ``personality`` is optional (Stage 11.1) and reaches only ``LLMManagerBrain``,
+    which is the one brain that ever builds a prompt a model reads; ``NullBrain``
+    has no prompt to shape and ignores it. Omitting it reproduces this
+    function's exact prior behaviour - every existing two-argument call
+    continues to work unchanged.
     """
     try:
         builder = _BUILDERS[settings.brain]
@@ -64,6 +75,6 @@ def build_brain(settings: Settings, provider: LLMProvider) -> ManagerBrain:
             f"Available brains: {', '.join(available_brains())}"
         ) from None
 
-    brain = builder(settings, provider)
+    brain = builder(settings, provider, personality)
     logger.info("brain ready: %s (%s)", settings.brain, type(brain).__name__)
     return brain

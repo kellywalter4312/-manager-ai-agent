@@ -111,15 +111,27 @@ class TestTheSpecialistPolicyIsSeparate:
             "domain_lesson",
             "domain_pattern",
             "domain_preference",
+            "recording",
         )
 
-    def test_there_are_exactly_three(self):
-        assert len(SpecialistMemoryCategory) == 3
+    def test_there_are_exactly_four(self):
+        """Stage 12 added RECORDING - the same explicit "record this
+        [for X]" capture Alfred has, available to an equipped specialist
+        too (capture.py's own docstring: "shared by every agent that
+        captures, never duplicated per agent")."""
+        assert len(SpecialistMemoryCategory) == 4
 
-    def test_no_category_overlaps_the_managers(self):
+    def test_no_category_overlaps_the_managers_except_the_shared_recording_concept(self):
+        """Every category still means something exclusive to its own
+        vocabulary, with one deliberate exception: RECORDING is the
+        identical concept in both - an explicit capture request - applied
+        to each agent's own separate store. Stage 12 asks for this
+        symmetry explicitly ("do not create separate Alfred and
+        specialist implementations"), so the two vocabularies sharing
+        this one name is by design, not a naming collision."""
         specialist = set(POLICY.category_names)
         manager = set(ManagerMemoryPolicy().category_names)
-        assert specialist & manager == set()
+        assert specialist & manager == {"recording"}
 
     @pytest.mark.parametrize("manager_kind", list(MANAGER_CATEGORIES))
     def test_a_manager_category_is_refused(self, manager_kind):
@@ -445,7 +457,15 @@ class TestThePolicyIsTheGate:
         assert len(strict.memory) == 0
 
     def test_there_is_no_write_that_skips_the_policy(self):
-        """Structural: one write site, and it consults the policy."""
+        """Structural: every write site consults the policy first.
+
+        Two now, not one - Stage 12 added ``CognitiveAgent.retain``, the
+        specialist's own counterpart to ``ManagerAgent.retain`` for an
+        explicit request (as opposed to ``remember_experience``, this
+        agent's own proposal about its own completed work). What matters
+        - ``writers <= judges`` - is unchanged: neither writer calls
+        ``remember`` without first calling ``evaluate``.
+        """
         import ast
 
         import src.agents.cognitive_agent as cognitive
@@ -464,7 +484,7 @@ class TestThePolicyIsTheGate:
                         if inner.func.attr == "evaluate":
                             judges.add(node.name)
 
-        assert writers == {"remember_experience"}
+        assert writers == {"remember_experience", "retain"}
         assert writers <= judges
 
     def test_the_specialist_never_deletes(self):

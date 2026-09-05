@@ -498,9 +498,15 @@ class TestExistingBehaviourIntact:
         assert scan(email_agent()).status is TaskStatus.COMPLETED
 
     def test_the_cognitive_agent_contract_is_unchanged(self):
+        """Six parameters, then a seventh: Stage 12's celebration
+        follow-up added ``celebration``, optional and untyped
+        (this base class imports nothing from src.providers - see
+        test_specialist_cognition.py's own TestNothingLeaksOut), and
+        left every existing parameter's name, order and default
+        untouched."""
         signature = inspect.signature(CognitiveAgent.__init__)
         assert list(signature.parameters) == [
-            "self", "brain", "memory", "memory_policy", "tools", "calendar"
+            "self", "brain", "memory", "memory_policy", "tools", "calendar", "celebration",
         ]
 
     def test_the_email_agent_signature_still_accepts_a_brain(self):

@@ -39,11 +39,21 @@ from src.agents.brain import (
 )
 from src.agents.memory_policy import SpecialistMemoryPolicy
 from src.agents.tools.toolset import ToolSet
-from src.core.contracts import Task
+from src.core.contracts import Task, TaskResult, tokenize
+from src.services.conversation_floor import (
+    GREETING_WORDS,
+    THANKS_WORDS,
+    conversational_intent,
+)
+from src.services.identity.introduction import (
+    greeting_from_identity,
+    identity_question,
+    self_introduction,
+)
 from src.services.memory.day import Calendar, DayView
 from src.services.memory.ephemeral import EphemeralMemory
 from src.services.memory.memory import Memory, MemoryRecord
-from src.services.memory.policy import MemoryPolicy
+from src.services.memory.policy import MemoryPolicy, PolicyVerdict
 from src.services.memory.query import distinctive_terms
 from src.utils.logging import get_logger, task_logger
 
@@ -66,6 +76,112 @@ class CognitiveAgent(BaseAgent):
     so this adds equipment without weakening the agent contract.
     """
 
+    # ---- the conversational floor ----------------------------------------
+    #
+    # Stage 17.22. A specialist had none, and the consequence was not
+    # subtle: every message that reached one was treated as domain work,
+    # so "hello Arthur" returned six email subjects and "who are you"
+    # returned the same six. The specialist was not misbehaving - it was
+    # being handed conversation and had only one thing it knew how to do
+    # with a Task.
+    #
+    # This is that floor, and it is the SAME one the orchestrator stands
+    # on: the identical vocabulary and the identical whole-message rule
+    # from src/services/conversation_floor.py, and the identical
+    # identity rendering from src/services/identity/introduction.py.
+    # Not a second conversation system, not a parallel router, and not a
+    # response library - it recognises two shapes of message and answers
+    # them from this agent's own already-loaded identity document.
+    #
+    # Deliberately returns None rather than a TaskResult for anything
+    # else, so a subclass calls it first and then carries on exactly as
+    # it did before for real work. Nothing about domain routing, memory,
+    # tools or the Brain changes, and no model is consulted: naming
+    # yourself from a document that names you needs no reasoning, and
+    # claiming it did was the original defect.
+    def conversational_reply(self, task: Task) -> "TaskResult | None":
+        """An answer to a greeting or a "who are you", or None.
+
+        None means "this is not conversation" - the caller does its own
+        work, unchanged. A specialist whose identity document declares no
+        name gets None for the identity case too, so it falls through to
+        its ordinary behaviour rather than answering with a blank.
+        """
+        identity = getattr(self, "identity", None)
+
+        if identity_question(task.description):
+            text = self_introduction(identity, self.spec.capabilities)
+            if text is not None:
+                return TaskResult.success(task, self.name, text)
+            return None
+
+        # Its own name is discounted, so "hello Arthur" is recognised as
+        # the greeting it is rather than failing on the name token.
+        if conversational_intent(task, participants=(self.name,)):
+            tokens = tokenize(task.description)
+            if tokens & THANKS_WORDS:
+                return TaskResult.success(task, self.name, "You're welcome!")
+            if tokens & GREETING_WORDS:
+                text = greeting_from_identity(identity)
+                if text is None:
+                    return None
+                return TaskResult.success(task, self.name, text)
+            return TaskResult.success(task, self.name, "Got it.")
+
+        return None
+
+    # ---- genuinely open-ended conversation --------------------------------
+    #
+    # 0.2 Final Surgical Pass. conversational_reply above recognises two
+    # narrow shapes (a greeting, a "who are you") and answers them without
+    # a model - correct for those two, and never enough on its own: a
+    # specialist asked something with real content that names none of its
+    # own domain vocabulary ("tell me about Napoleon", a joke, a follow-up
+    # in an ongoing conversation) has nowhere else to go, and before this
+    # existed it fell straight into whatever this agent's own domain
+    # default is - EmailAgent's own execute() shows the consequence: such
+    # a remark used to fetch and summarise the mailbox, because that
+    # method's fallback for "not obviously domain work" was "assume it is
+    # anyway."
+    #
+    # Reusable and undecided about *when* it applies on purpose: only the
+    # concrete specialist knows what its own domain vocabulary looks like
+    # (EmailAgent's is "email", "inbox", "send", its own analyzer words -
+    # this base class has never known any of that and must not start
+    # now), so the concrete specialist decides when nothing named its
+    # domain and calls this; what happens once that decision is made -
+    # consult this specialist's own brain, honestly, exactly the way the
+    # orchestrator's own open_conversation already does - is the one
+    # thing every specialist shares, and lives here exactly once.
+    def general_conversation(self, task: Task, notes: Sequence[str] = ()) -> TaskResult:
+        """Answer a genuinely open-ended remark by consulting this
+        specialist's own brain directly - the specialist's own
+        counterpart to the orchestrator's ``open_conversation`` capability
+        (``src/manager/capabilities.py``), mirroring its exact shape so
+        natural conversation is one reusable capability of the canonical
+        agent architecture rather than reimplemented per specialist.
+
+        Honest either way, the identical rule ``open_conversation``
+        itself lives under: a usable brain composes a genuine answer;
+        without one, this says so plainly rather than guessing or
+        silently falling back to unrelated domain work.
+        """
+        insight = self.brain.converse(task, notes)
+        if not insight.is_useful or not insight.summary.strip():
+            return TaskResult.failure(
+                task,
+                self.name,
+                "I don't have a way to reason about that yet - no language "
+                "model is configured for me right now, so I would rather "
+                "say so than guess.",
+            )
+        return TaskResult.success(
+            task,
+            self.name,
+            insight.summary,
+            payload={"handled_by": "general_conversation", "brain": insight.source},
+        )
+
     def __init__(
         self,
         brain: SpecialistBrain | None = None,
@@ -73,6 +189,16 @@ class CognitiveAgent(BaseAgent):
         memory_policy: MemoryPolicy | None = None,
         tools: ToolSet | None = None,
         calendar: Calendar | None = None,
+        # Untyped deliberately: this shared base class must import
+        # nothing from src.providers (the identical purity
+        # test_specialist_cognition.py's own TestNothingLeaksOut already
+        # holds src/agents/brain.py to - "no provider is imported"), so
+        # it cannot even name CelebrationProvider as a type. Any object
+        # exposing a duck-typed ``select(...)`` matching that ABC's
+        # contract works; a concrete specialist that wants the project's
+        # own default constructs one at its own construction site (see
+        # EmailAgent.__init__) and passes it in here.
+        celebration=None,
     ) -> None:
         """Both are injected, and both default to something safe.
 
@@ -119,6 +245,45 @@ class CognitiveAgent(BaseAgent):
         # The same temporal rules the Manager uses, over this specialist's own
         # store. Same rules, different memory - never a shared one.
         self.calendar = calendar if calendar is not None else Calendar.utc()
+
+        # Stage 12 follow-up: how this specialist's own genuine milestones
+        # are presented, kept entirely separate from what they mean - see
+        # src/providers/celebration.py's own docstring for the boundary.
+        # Stored exactly as given - None is a real, honest state (no
+        # celebration provider reaches this agent), the same shape
+        # ``converse``/``retain`` already have elsewhere in this project.
+        # Never defaulted here: this base class does not construct one,
+        # for the identical "no provider import" reason ``celebration``'s
+        # own parameter above is untyped. A concrete specialist that
+        # wants the project's own default supplies it at its own
+        # construction site (see EmailAgent.__init__).
+        self.celebration_provider = celebration
+
+    def celebration_reaction(self, milestone_type: str, *, occurrence: int = 0, intensity: str = "full"):
+        """A presentation-level reaction for one of this specialist's own
+        genuine milestones - never reasoning, never a write to Memory.
+
+        Style comes from this agent's own declared Personality
+        (``personality_for(self)``, duck-typed exactly as
+        ``snapshot.py``'s own reader already is), never from a name
+        checked here - a future specialist gets its own distinct
+        celebration identity by declaring its own Personality, with
+        nothing in this method changing.
+
+        Returns None when no celebration provider was supplied to this
+        agent - an honest absence, never a fabricated reaction.
+        """
+        if self.celebration_provider is None:
+            return None
+        from src.services.identity.personality import personality_for
+
+        return self.celebration_provider.select(
+            milestone_type=milestone_type,
+            agent_key=self.name,
+            personality=personality_for(self),
+            intensity=intensity,
+            occurrence=occurrence,
+        )
 
     @property
     def can_reason(self) -> bool:
@@ -227,6 +392,28 @@ class CognitiveAgent(BaseAgent):
         second policy interface to judge.
         """
         return None
+
+    def retain(self, record: MemoryRecord) -> PolicyVerdict:
+        """Offer one record to this specialist's own memory. The policy
+        decides.
+
+        The specialist's own counterpart to ``ManagerAgent.retain`` -
+        **the one governed write path** for anything asked of this
+        agent explicitly (Stage 12: "Arthur, record this for later"),
+        as opposed to ``remember_experience``, which is this agent's own
+        proposal about its own completed work. Both end at the same
+        rule: the policy is the authority, and there is no path from
+        here to the store that skips it.
+
+        Writes into **this agent's own** store and no other - the same
+        guarantee ``ManagerAgent.retain`` gives, restated here because a
+        specialist's memory is a different instance with the identical
+        rule, never a shared one.
+        """
+        verdict = self.memory_policy.evaluate(record)
+        if verdict.allowed:
+            self.memory.remember(record)
+        return verdict
 
     def remember_experience(
         self, task: Task, insight: Insight | None, outcome: object = None

@@ -59,6 +59,32 @@ class MemoryCategory(str, Enum):
     DECISION = "decision"
     DELEGATION_OUTCOME = "delegation_outcome"
     LESSON = "lesson"
+    # Stage 12 additions: an explicit "record this [for X]" capture is a
+    # different request from "remember that X" (see
+    # src/services/memory/capture.py's own docstring for the distinction)
+    # and a personal milestone is structured, dated, extensible data (see
+    # src/services/memory/milestones.py) - neither belongs under
+    # USER_CONTEXT, which would blur "the user asked this be kept" and
+    # "the user asked this be captured for later" into the one category
+    # that already existed.
+    RECORDING = "recording"
+    MILESTONE = "milestone"
+    # What the user is studying, reading or preparing for. Passes the
+    # admission test this module states for a category existing at all -
+    # it plainly changes what the Manager should do next time, because an
+    # explanation pitched at what someone is actually working on is a
+    # different explanation.
+    #
+    # Deliberately not folded into USER_CONTEXT. That category holds
+    # stable facts about the person; a course, a book or an exam is a
+    # fact with a *season* - true while it lasts, worth removing when it
+    # ends - and one category holding both would make "forget what I was
+    # studying" indistinguishable from "forget who I am". It is equally
+    # deliberately not a store of the material itself: a book belongs in
+    # the user's own documents (see src/providers/knowledge.py), and
+    # admitting one here would be the dump-under-a-plausible-category
+    # case MAX_CONTENT_CHARS already refuses.
+    LEARNING = "learning"
 
     @property
     def label(self) -> str:
@@ -67,6 +93,9 @@ class MemoryCategory(str, Enum):
             "decision": "ORCHESTRATION DECISION",
             "delegation_outcome": "DELEGATION OUTCOME",
             "lesson": "LESSON LEARNED",
+            "recording": "RECORDED FOR LATER",
+            "milestone": "MILESTONE",
+            "learning": "LEARNING CONTEXT",
         }[self.value]
 
     @property
@@ -88,6 +117,21 @@ class MemoryCategory(str, Enum):
             "lesson": (
                 "Something learned during execution that should change future "
                 "behaviour - a repeated failure, a better approach."
+            ),
+            "recording": (
+                "Something explicitly captured for later retrieval, with an "
+                "intended purpose - never ordinary conversation retained "
+                "automatically."
+            ),
+            "milestone": (
+                "A structured, dated personal milestone - a birthday, a first "
+                "client, a graduation - recognised or explicitly stated, "
+                "distinct from an ordinary durable fact."
+            ),
+            "learning": (
+                "What the person is currently studying, reading or preparing "
+                "for, so an explanation can be pitched at the work they are "
+                "actually doing - never the study material itself."
             ),
         }[self.value]
 

@@ -38,7 +38,7 @@ from src.services.identity.specialist import (
     load_specialist_identity,
     parse_specialist_identity,
 )
-from src.services.memory.factory import build_memory
+from src.services.memory.factory import MANAGER, build_memory
 from src.services.memory.persistent import PersistentMemory
 
 
@@ -416,14 +416,69 @@ class TestAlfredAndArthurArePeers:
         arthur = manager.registry.get("Arthur")
         assert arthur.brain is not manager.brain
 
-    def test_alfreds_store_follows_alfreds_own_name(self, tmp_path):
-        """The Manager is not exempt from the rule applied to the specialist.
+    def test_alfreds_store_is_keyed_by_his_stable_technical_owner(self, tmp_path):
+        """The Manager's memory owner is MANAGER, his stable technical key -
+        never his declared name, whatever IDENTITY.md currently says it is.
 
-        An agent that registers under one name and remembers under another is
-        precisely the divergence this milestone exists to make impossible.
+        Deliberately the opposite rule from the specialist's, tested right
+        beside it: Arthur's store *does* follow his declared name (see
+        test_a_rename_cannot_leave_the_store_under_the_old_name below), and
+        that is a separate, honest, already-tested policy this test does
+        not touch. The Manager gets the stable rule because MANAGER already
+        exists as an unused key for exactly this purpose, and because his
+        continuity is the one this whole system is least able to afford
+        losing to an edited display name.
         """
         _, manager = assembled(tmp_path, memory="persistent")
-        assert manager.memory.path.stem == "alfred"
+        assert manager.memory.path.stem == MANAGER == "manager"
+
+    def test_a_preexisting_legacy_alfred_file_is_adopted_through_real_composition(self, tmp_path):
+        """Not the adoption mechanism in isolation - the real composition
+        root, exactly as main.py and the heartbeat call it, seeing a file
+        left over from before this fix existed and bringing it forward
+        rather than starting Alfred over with no history."""
+        from src.services.memory.memory import MemoryRecord
+        from src.services.memory.persistent import PersistentMemory
+
+        legacy = PersistentMemory(tmp_path / "alfred.json")
+        legacy.remember(MemoryRecord(content="a memory from before the identity fix"))
+        del legacy
+
+        _, manager = assembled(tmp_path, memory="persistent")
+
+        assert manager.memory.path.stem == "manager"
+        recalled = manager.memory.recall("before")
+        assert recalled and recalled[0].content == "a memory from before the identity fix"
+        assert not (tmp_path / "alfred.json").exists()
+        assert list(tmp_path.glob("alfred.pre-stable-owner-checkpoint"))
+
+    def test_a_display_name_change_does_not_move_or_duplicate_alfreds_store(self, tmp_path):
+        """The guarantee this rule exists to protect, proved end to end
+        through the real composition root: editing IDENTITY.md's declared
+        name must never orphan Alfred's memory or silently start a second
+        store under the new name."""
+        from src.services.memory.memory import MemoryRecord
+
+        first_identity = tmp_path / "identity-v1.md"
+        first_identity.write_text(
+            "## Name\nAlfred\n\n## Capabilities\nresearch\n", encoding="utf-8"
+        )
+        _, first_manager = assembled(
+            tmp_path, memory="persistent", identity_path=str(first_identity)
+        )
+        first_manager.memory.remember(MemoryRecord(content="a fact worth keeping"))
+
+        second_identity = tmp_path / "identity-v2.md"
+        second_identity.write_text(
+            "## Name\nJarvis\n\n## Capabilities\nresearch\n", encoding="utf-8"
+        )
+        _, second_manager = assembled(
+            tmp_path, memory="persistent", identity_path=str(second_identity)
+        )
+
+        assert first_manager.memory.path == second_manager.memory.path
+        assert len(second_manager.memory.recall(limit=10)) == 1
+        assert second_manager.memory.recall("fact")[0].content == "a fact worth keeping"
 
 
 class TestTheDelegatesListIsNotTheRoster:
