@@ -154,6 +154,15 @@ class Calendar:
         """The current local calendar date."""
         return self.local_date(self.clock())
 
+    def now(self) -> datetime:
+        """The current local date and time.
+
+        ``astimezone`` for the same reason ``local_date`` uses it: the zone
+        decides the offset at this instant rather than a fixed one applied by
+        hand, so this stays correct across a daylight-saving change too.
+        """
+        return self.clock().astimezone(self.zone)
+
     def local_date(self, moment: datetime) -> date:
         """Which local calendar date an instant fell on.
 

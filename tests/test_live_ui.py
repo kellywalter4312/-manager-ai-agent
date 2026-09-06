@@ -29,9 +29,18 @@ import threading
 from pathlib import Path
 
 from scripts.export_ui import take_snapshot
-from scripts.serve_ui import DEFAULT_HOST, LiveSystem, build_live_system, route, route_message
+from scripts.serve_ui import (
+    DEFAULT_HOST,
+    LiveSystem,
+    MANAGEMENT_VERBS,
+    build_live_system,
+    route,
+    route_command,
+    route_message,
+)
 from src.config.settings import Settings
 from src.control_center.observer import ControlCenter
+from src.control_center.render import render_overview
 from src.services.email.in_memory_mailbox import InMemoryMailbox
 from src.services.email.sample_inbox import sample_inbox
 
@@ -150,6 +159,247 @@ class TestTheRouteFunction:
         _, second_body, _ = route("/snapshot.json", system)
         second = json.loads(second_body)
         assert second["agents"][0]["name"] != "mutated"
+
+
+class TestStatusAndActionsRoutes:
+    """Foundation Repair #5 (reconciliation audit, 2026-09-05): the same
+    questions a terminal session's `status`/`actions` commands already
+    answer, now reachable through this project's second door - reusing
+    the identical rendering/store, never a second JSON schema invented for
+    the same facts (see route()'s own comment)."""
+
+    def test_status_reuses_the_terminal_overview_rendering(self):
+        system = build_live_system(settings())
+        status, body, content_type = route("/status", system)
+        assert status == 200
+        assert content_type.startswith("text/plain")
+        rendered = body.decode("utf-8")
+        # The exact text a terminal session's own `status` command renders,
+        # from the identical ControlCenter.overview() - not a paraphrase.
+        assert rendered == render_overview(system.centre.overview())
+
+    def test_actions_is_honestly_empty_before_anything_consequential_happened(self, tmp_path, monkeypatch):
+        import scripts.serve_ui as serve_ui_module
+
+        monkeypatch.setattr(serve_ui_module, "DEFAULT_ACTION_LOG_PATH", tmp_path / "action_log.json")
+        system = build_live_system(settings())
+        status, body, content_type = route("/actions", system)
+        assert status == 200
+        assert content_type.startswith("text/plain")
+        assert body.decode("utf-8") == "no consequential actions recorded yet"
+
+    def test_actions_reflects_a_real_recorded_entry(self, tmp_path, monkeypatch):
+        import scripts.serve_ui as serve_ui_module
+        from src.services.audit.action_log import ActionLogEntry, record_action
+
+        log_path = tmp_path / "action_log.json"
+        monkeypatch.setattr(serve_ui_module, "DEFAULT_ACTION_LOG_PATH", log_path)
+        record_action(
+            ActionLogEntry(
+                timestamp="2026-09-05T12:00:00+00:00",
+                actor="Alfred",
+                capability="communication",
+                succeeded=True,
+            ),
+            path=log_path,
+        )
+
+        system = build_live_system(settings())
+        status, body, _ = route("/actions", system)
+        assert status == 200
+        assert "communication" in body.decode("utf-8")
+        assert "Alfred" in body.decode("utf-8")
+
+
+class TestCommandRoute:
+    """Foundation Repair #5, part 2 (reconciliation audit, 2026-09-05):
+    the administrative surface a terminal session already has -
+    provider/credential management, connections, capabilities, voice,
+    ecosystem - reachable through this project's second door. Every case
+    here proves reuse, never a parallel implementation: the same
+    run_command() a terminal calls, against the same real
+    CredentialStore/EcosystemRegistry a terminal reads and writes.
+    """
+
+    def test_talk_is_refused_here_and_pointed_at_message(self):
+        system = build_live_system(settings())
+        status, body, content_type = route_command("talk hello", system)
+        assert status == 400
+        assert content_type.startswith("application/json")
+        payload = json.loads(body)
+        assert "/message" in payload["error"]
+
+    def test_free_text_is_refused_the_same_way(self):
+        system = build_live_system(settings())
+        status, body, _ = route_command("what is the weather", system)
+        assert status == 400
+
+    def test_an_empty_command_is_rejected(self):
+        system = build_live_system(settings())
+        status, _, _ = route_command("", system)
+        assert status == 400
+
+    def test_a_non_string_command_is_rejected(self):
+        system = build_live_system(settings())
+        status, _, _ = route_command(None, system)
+        assert status == 400
+
+    def test_every_advertised_management_verb_is_actually_dispatchable(self, tmp_path, monkeypatch):
+        """MANAGEMENT_VERBS is a claim about what this route does - proven
+        here by actually calling every single one of them and confirming
+        none is refused as unrecognised. Isolated exactly like
+        TestCommandRouteProviderAccountManagement below: a bare `ecosystem`
+        genuinely writes version-tracking state even to just list
+        components (see run_ecosystem_command's own real behaviour), so
+        this must not run against the real installation's files either."""
+        import scripts.control_center as control_center_module
+
+        monkeypatch.setattr(control_center_module, "DEFAULT_ACCOUNTS_PATH", tmp_path / "accounts.json")
+        monkeypatch.setattr(control_center_module, "DEFAULT_LEDGER_PATH", tmp_path / "ledger.json")
+        system = build_live_system(settings())
+        for verb in MANAGEMENT_VERBS:
+            status, body, _ = route_command(verb, system)
+            assert status == 200, (verb, body)
+
+    def test_status_matches_the_terminal_rendering(self):
+        system = build_live_system(settings())
+        status, body, content_type = route_command("status", system)
+        assert status == 200
+        assert content_type.startswith("text/plain")
+        assert "AGENT CONTROL CENTER" in body.decode("utf-8")
+
+    def test_capabilities_reflects_the_real_registry(self):
+        system = build_live_system(settings())
+        _, body, _ = route_command("capabilities", system)
+        text = body.decode("utf-8")
+        assert "current_datetime" in text or "capabilit" in text.lower()
+
+    def test_provider_with_no_args_lists_the_real_ecosystem(self):
+        system = build_live_system(settings())
+        _, body, _ = route_command("provider", system)
+        assert "llm_provider" in body.decode("utf-8")
+
+    def test_connections_reflects_the_real_gmail_boundary(self):
+        system = build_live_system(settings())
+        status, body, _ = route_command("connections", system)
+        assert status == 200
+        assert "gmail" in body.decode("utf-8").lower()
+
+    def test_connections_management_actually_connects_a_real_service(self, tmp_path, monkeypatch):
+        """The write half of connection management: additive, and
+        persisted through the same CredentialStore provider accounts
+        already use - proven by reading it back."""
+        import scripts.control_center as control_center_module
+
+        monkeypatch.setattr(control_center_module, "DEFAULT_ACCOUNTS_PATH", tmp_path / "accounts.json")
+        system = build_live_system(settings())
+
+        status, body, _ = route_command("connections whatsapp connect acc-1 token-value", system)
+        assert status == 200
+        assert "token-value" not in body.decode("utf-8")
+
+        _, listing, _ = route_command("connections", system)
+        assert "whatsapp: connected" in listing.decode("utf-8")
+
+    def test_voice_reports_the_real_speech_configuration(self):
+        system = build_live_system(settings())
+        status, body, _ = route_command("voice", system)
+        assert status == 200
+
+    def test_voice_management_actually_sets_a_real_preference(self):
+        """The write half of voice management, not just visibility: the
+        same governed preference `avatar <agent> <id>` already uses,
+        applied to voice - proven by reading it back through a second,
+        independent /command call."""
+        system = build_live_system(settings())
+        set_status, set_body, _ = route_command("voice Arthur a-real-voice-name", system)
+        assert set_status == 200
+        assert "FAILED" not in set_body.decode("utf-8")
+
+        _, read_body, _ = route_command("voice Arthur", system)
+        assert "a-real-voice-name" in read_body.decode("utf-8")
+
+
+class TestCommandRouteProviderAccountManagement:
+    """The write path: adding, selecting and revoking a real, persisted
+    account through /command - the exact CredentialStore file a terminal
+    session's own `provider` command reads and writes, isolated to
+    tmp_path exactly the way test_independent_manageability.py's own
+    provider-management tests already isolate it."""
+
+    def _isolated(self, tmp_path, monkeypatch):
+        import scripts.control_center as control_center_module
+
+        monkeypatch.setattr(control_center_module, "DEFAULT_ACCOUNTS_PATH", tmp_path / "accounts.json")
+
+    def test_adding_an_account_actually_persists_it(self, tmp_path, monkeypatch):
+        self._isolated(tmp_path, monkeypatch)
+        system = build_live_system(settings())
+
+        status, body, _ = route_command(
+            "provider llm_provider add anthropic my-account super-secret-key-value", system
+        )
+        assert status == 200
+
+        _, listing, _ = route_command("provider llm_provider accounts", system)
+        assert "anthropic/my-account" in listing.decode("utf-8")
+
+    def test_the_secret_never_appears_in_the_http_response(self, tmp_path, monkeypatch):
+        """The decisive check: a real, sensitive-looking credential value
+        must never come back in any response body this route produces."""
+        self._isolated(tmp_path, monkeypatch)
+        system = build_live_system(settings())
+        secret = "sk-live-do-not-leak-this-9f8e7d6c"
+
+        status, add_body, _ = route_command(
+            f"provider llm_provider add anthropic my-account {secret}", system
+        )
+        assert secret not in add_body.decode("utf-8")
+
+        _, listing, _ = route_command("provider llm_provider accounts", system)
+        assert secret not in listing.decode("utf-8")
+
+        _, detail, _ = route_command("provider llm_provider", system)
+        assert secret not in detail.decode("utf-8")
+
+    def test_selecting_a_different_account_actually_changes_the_active_one(self, tmp_path, monkeypatch):
+        self._isolated(tmp_path, monkeypatch)
+        system = build_live_system(settings())
+        route_command("provider llm_provider add anthropic acc-a key-a", system)
+        route_command("provider llm_provider add anthropic acc-b key-b", system)
+
+        route_command("provider llm_provider select anthropic acc-a", system)
+        _, listing, _ = route_command("provider llm_provider accounts", system)
+        assert "[*] anthropic/acc-a" in listing.decode("utf-8")
+
+        route_command("provider llm_provider select anthropic acc-b", system)
+        _, listing2, _ = route_command("provider llm_provider accounts", system)
+        assert "[*] anthropic/acc-b" in listing2.decode("utf-8")
+
+    def test_revoking_an_account_actually_removes_it(self, tmp_path, monkeypatch):
+        self._isolated(tmp_path, monkeypatch)
+        system = build_live_system(settings())
+        route_command("provider llm_provider add anthropic temp-acc temp-key", system)
+        _, before, _ = route_command("provider llm_provider accounts", system)
+        assert "temp-acc" in before.decode("utf-8")
+
+        route_command("provider llm_provider revoke anthropic temp-acc", system)
+        _, after, _ = route_command("provider llm_provider accounts", system)
+        assert "temp-acc" not in after.decode("utf-8")
+
+    def test_this_route_never_touches_the_real_production_accounts_file(self, tmp_path, monkeypatch):
+        """Every write test above must be isolated - this proves the
+        isolation itself rather than assuming it: the real file's mtime
+        (or absence) is unaffected by a write through the isolated path."""
+        real_path = REPO_ROOT / "data" / "credentials" / "accounts.json"
+        before = real_path.read_bytes() if real_path.exists() else None
+
+        self._isolated(tmp_path, monkeypatch)
+        system = build_live_system(settings())
+        route_command("provider llm_provider add anthropic temp-acc temp-key", system)
+
+        after = real_path.read_bytes() if real_path.exists() else None
+        assert before == after
 
 
 # ---------------------------------------------------------------------------

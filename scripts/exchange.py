@@ -15,7 +15,10 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from src.channels.channel import Channel
+from pathlib import Path
+
+from src.channels.channel import Channel, speakable
+from src.control_center.views import ConversationTurn, TrailStep
 from src.conversation.conversation import (
     Conversation,
     Participant,
@@ -27,6 +30,12 @@ from src.manager.collaboration_entry import (
     answer_with_collaboration,
     collaboration_candidates,
     start_collaboration,
+)
+from src.services.audit.action_log import (
+    CONSEQUENTIAL_CAPABILITIES,
+    ActionLogEntry,
+    record_action,
+    utc_now as audit_utc_now,
 )
 from src.services.memory.capture import capture_intent
 from src.services.memory.memory import MemoryRecord
@@ -81,6 +90,7 @@ def exchange(
     *,
     addressed: str | None = None,
     speak: bool = False,
+    action_log_path: "str | Path | None" = None,
 ):
     """One request and its answer, recorded in the room they happened in.
 
@@ -114,6 +124,20 @@ def exchange(
     a voice, or asserts a presence state directly - all of that is
     ``deliver()``'s own job, called at most once, never duplicated.
 
+    ``action_log_path`` (Foundation Repair #4, reconciliation audit,
+    2026-09-05), when given, durably records this turn in
+    ``src.services.audit.action_log`` if - and only if - it was handled by
+    one of ``CONSEQUENTIAL_CAPABILITIES`` (see that module's own docstring
+    for exactly which, and why ``turn.tool_used`` is not the right signal);
+    an ordinary conversational turn, or a read-only lookup, writes nothing.
+    None (the default) writes nothing at all regardless - the identical opt-in shape
+    ``speak`` already has, and for the same reason every test in this
+    project that calls ``exchange()`` without deliberately choosing a
+    real, isolated path must keep working exactly as it did before this
+    parameter existed, never touching a real file by surprise. Production
+    callers (``scripts/control_center.py``, ``scripts/serve_ui.py``) pass
+    the real, shared default path explicitly.
+
     The turn rides along as opaque ``detail``. The room never looks inside it.
     """
     person = next(
@@ -145,6 +169,18 @@ def exchange(
     # pick an agent would be a second router.
     response = channel.ask(request, addressed=to_agent)
     turn = response.turn
+
+    # Foundation Repair #3 (reconciliation audit, 2026-09-05): run before the
+    # turn is spoken or recorded, not after, so a corrected turn is what gets
+    # said and what the room remembers - never the stale failure text first
+    # and a silently-different return value second. See
+    # _acknowledge_successful_retention's own docstring for exactly what this
+    # does and does not change.
+    retained = retain_what_was_asked_for(channel, conversation, request)
+    if retained and not turn.succeeded:
+        turn = _acknowledge_successful_retention(turn, retained)
+        response = replace(response, turn=turn, text=turn.outcome, speech=speakable(turn))
+
     # Stage 17.3: the real production speech/presence synchronisation
     # point. `deliver()` is what actually calls a real, possibly-
     # blocking speak() and what actually marks the true canonical
@@ -189,14 +225,82 @@ def exchange(
         conversation.say(Utterance(speaker=speaker, text=answer, detail=turn))
 
     admit_invited(conversation, turn)
-    retain_what_was_asked_for(channel, conversation, request)
+
+    if action_log_path is not None and turn.capability in CONSEQUENTIAL_CAPABILITIES:
+        record_action(
+            ActionLogEntry(
+                timestamp=audit_utc_now().isoformat(),
+                actor=turn.handled_by,
+                capability=turn.capability,
+                succeeded=turn.succeeded,
+            ),
+            path=action_log_path,
+        )
+
     return turn
+
+
+def _acknowledge_successful_retention(
+    turn: ConversationTurn, retained: "tuple[MemoryRecord, ...]"
+) -> ConversationTurn:
+    """Correct a turn that failed at its own routed task, but that
+    nonetheless genuinely retained what was asked to be remembered -
+    the exact honesty gap the reconciliation audit named: with no Brain
+    (or a Brain-dependent capability otherwise unable to answer), "remember
+    that my favorite color is blue" reported FAILED to the person while the
+    retention succeeded anyway - because retain_what_was_asked_for is a
+    separate, always-governed path (see its own docstring) that runs
+    regardless of how, or whether, the routed task itself was handled.
+
+    Deliberately narrow and purely additive:
+
+    - Only ever called when the routed task did not already succeed on its
+      own terms - a turn that succeeded is never touched, because there is
+      nothing dishonest to correct.
+    - Never hides the original failure. The person is still told exactly
+      what could not be done; this only adds the true, separate fact that
+      something else, asked in the same breath, was done anyway.
+    - Rewrites the "Assessed" trail step and adds a "Memory" step to match
+      the corrected verdict, rather than returning a turn whose headline
+      outcome contradicts a trail still reading "not accepted: failed"
+      immediately above it.
+    """
+    steps = tuple(
+        replace(step, detail="accepted (see note below)") if step.label == "Assessed" else step
+        for step in turn.steps
+    ) + (
+        TrailStep(
+            label="Memory",
+            detail=f"{len(retained)} record(s) retained - what was asked to be remembered",
+            actor=turn.manager or turn.handled_by,
+        ),
+    )
+    note = "I've remembered what you asked me to, though: " + "; ".join(
+        record.content for record in retained
+    )
+    original = turn.outcome.strip()
+    outcome = f"{original} {note}".strip() if original else note
+    return replace(
+        turn,
+        succeeded=True,
+        outcome=outcome,
+        steps=steps,
+        memory_written=turn.memory_written + len(retained),
+    )
 
 
 def retain_what_was_asked_for(
     channel: Channel, conversation: Conversation, request: str
-) -> None:
+) -> "tuple[MemoryRecord, ...]":
     """Keep the things the person asked to be kept, if the policy allows.
+
+    Returns exactly the candidates the policy actually admitted - not every
+    candidate considered, and never a count standing in for the records
+    themselves. Foundation Repair #3 (reconciliation audit, 2026-09-05)
+    added this return value so ``exchange()`` can tell an honest "I've
+    remembered that" from nothing having happened at all; every existing
+    caller that ignored the previous ``None`` return keeps working
+    unchanged.
 
     **Session context stays in the room; only this crosses into memory.** The
     room holds everything said, which is what a session is for. A conversation
@@ -244,10 +348,15 @@ def retain_what_was_asked_for(
     if not candidates and not capture_intent(request):
         candidates.extend(_brain_judged_retention(channel, conversation, request))
 
+    retained: list[MemoryRecord] = []
     for candidate in candidates:
-        verdict = channel.manager.retain(_dated_if_recognisable(candidate))
+        dated = _dated_if_recognisable(candidate)
+        verdict = channel.manager.retain(dated)
         if not verdict.allowed:
             logger.info("not retained: %s", verdict.reason)
+        else:
+            retained.append(dated)
+    return tuple(retained)
 
 
 def _brain_judged_retention(

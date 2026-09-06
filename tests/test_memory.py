@@ -185,6 +185,33 @@ class TestRememberAndRecall:
         found = store.recall("python javascript django")
         assert found[0].content == "python and javascript and django"
 
+    def test_recall_matches_a_plain_inflection_literal_overlap_missed(self):
+        """Foundation Repair #2 (reconciliation audit, 2026-09-05): the
+        gap the audit measured directly - "colors" and "color" share zero
+        raw tokens, so a preference stored as "the user's favorite
+        colors are blue and green" could never answer a query for
+        "color". Stemming closes exactly this gap, and only this gap -
+        see test_relevance_is_literal_not_inferred in
+        test_manager_memory_retrieval.py for the boundary it must not
+        cross."""
+        store = memory_with("the user's favorite colors are blue and green")
+        assert store.recall("color")
+
+    def test_recall_ranks_a_rarer_shared_word_over_a_common_one(self):
+        """Two records share the common word "role"; only one shares the
+        distinctive word "kubernetes". Literal overlap alone could not
+        tell these apart when the query names just one word of each kind
+        at different counts - this asks for both distinctive words and
+        expects the record that actually contains them to win outright."""
+        store = memory_with(
+            "a marketing role",
+            "a devops role built entirely around kubernetes and helm",
+            "a sales role",
+            "a support role",
+        )
+        found = store.recall("kubernetes helm role")
+        assert found[0].content == "a devops role built entirely around kubernetes and helm"
+
     def test_recall_with_no_query_returns_most_recent_first(self):
         store = memory_with("first", "second", "third")
         assert [r.content for r in store.recall()] == ["third", "second", "first"]

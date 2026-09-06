@@ -307,3 +307,73 @@ class TestRealProductionRetentionThroughUnseenWording:
         manager.retain = lambda record: PolicyVerdict(allowed=False, reason="policy refused")
         exchange(channel, conversation, "please don't let me lose this")
         assert manager.memory.recall(limit=10) == ()
+
+
+class TestHonestRetentionWhenTheRoutedTaskFails:
+    """Foundation Repair #3 (reconciliation audit, 2026-09-05): the exact
+    defect the audit measured live - "remember that my favorite color is
+    teal" reported FAILED (no reasoning capability configured) while the
+    fact was retained anyway, because retain_what_was_asked_for is a
+    separate, always-governed path that runs regardless of how the routed
+    task was handled. Real, unfunded NullBrain throughout - the actual
+    current state of this project, not a special-cased fixture."""
+
+    def test_the_task_no_longer_reports_failed(self):
+        runtime, manager, channel, conversation = real_system()
+        turn = exchange(channel, conversation, "remember that my favorite color is teal")
+        assert turn.succeeded is True
+
+    def test_the_retention_genuinely_happened_not_merely_claimed(self):
+        """The decisive check: succeeded=True would be worse than the
+        original bug if the fact itself were not actually stored."""
+        runtime, manager, channel, conversation = real_system()
+        exchange(channel, conversation, "remember that my favorite color is teal")
+        records = manager.memory.recall("teal")
+        assert any("teal" in r.content for r in records)
+
+    def test_the_original_failure_reason_is_not_hidden(self):
+        """Honest means both things are said - what could not be done, and
+        what was done anyway - never one replacing the other."""
+        runtime, manager, channel, conversation = real_system()
+        turn = exchange(channel, conversation, "remember that my favorite color is teal")
+        assert "reason about" in turn.outcome or "no reasoning capability" in turn.outcome
+        assert "remembered" in turn.outcome.lower()
+
+    def test_the_assessed_trail_step_no_longer_contradicts_the_outcome(self):
+        """The subtler half of the same defect: a naive fix that only
+        patched turn.outcome/succeeded would still show "Assessed: not
+        accepted: failed" in the trail sitting right above a now-successful
+        result."""
+        runtime, manager, channel, conversation = real_system()
+        turn = exchange(channel, conversation, "remember that my favorite color is teal")
+        assessed = next(step for step in turn.steps if step.label == "Assessed")
+        assert "not accepted" not in assessed.detail
+        assert any(step.label == "Memory" for step in turn.steps)
+
+    def test_a_genuinely_successful_task_is_left_completely_untouched(self):
+        """Regression protection: this must never fire when the routed
+        task already succeeded on its own terms."""
+        runtime, manager, channel, conversation = real_system()
+        turn = exchange(channel, conversation, "what day is it")
+        assert turn.succeeded is True
+        assert "remembered what you asked" not in turn.outcome
+
+    def test_a_failed_task_with_nothing_to_remember_still_honestly_fails(self):
+        """Regression protection the other direction: no candidate, no
+        acknowledgement invented - the original failure stands exactly as
+        it always has."""
+        runtime, manager, channel, conversation = real_system()
+        turn = exchange(channel, conversation, "please give me your honest opinion on this")
+        assert turn.succeeded is False
+        assert "remembered what you asked" not in turn.outcome
+
+    def test_the_room_transcript_carries_the_corrected_answer_not_the_stale_one(self):
+        """The reordering this fix depends on: retention must run, and the
+        turn must be corrected, before the answer is said into the room -
+        otherwise the transcript itself would still show the dishonest
+        text even though the returned turn was fixed."""
+        runtime, manager, channel, conversation = real_system()
+        exchange(channel, conversation, "remember that my favorite color is teal")
+        transcript = conversation.transcript()
+        assert not any("not accepted" in line for line in transcript)
+        assert any("remembered" in line.lower() for line in transcript)

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from scripts.repo_recovery import (
     ENTRY_POINTS,
+    REPO_ROOT,
     GitState,
     ReachabilityReport,
     _reachable_from,
@@ -71,18 +72,40 @@ class TestCommittedVsUncommittedWork:
         state = current_git_state()
         assert set(state.modified_tracked).isdisjoint(set(state.untracked))
 
-    def test_this_very_test_file_is_detected_as_untracked(self):
-        """Self-verifying: this file did not exist before this task, so
-        its untracked status is a direct, unambiguous consequence of the
-        mechanism under test actually working - not asserted from a
-        fixture, but from what creating this file really did to the
-        real repository."""
-        state = current_git_state()
-        assert "tests/test_repository_recovery.py" in state.untracked
+    def test_a_newly_created_file_is_detected_as_untracked(self):
+        """Self-verifying, without hardcoding a moment-in-time snapshot:
+        the original version of this test named two specific files
+        (tests/test_repository_recovery.py, scripts/repo_recovery.py)
+        that were untracked when this test was written. Both are now
+        committed as part of checkpoint dfd3616, which made the assertion
+        stale through no fault of the mechanism it tests - a file that
+        exists in HEAD is correctly no longer untracked.
 
-    def test_the_new_recovery_script_is_also_detected_as_untracked(self):
-        state = current_git_state()
-        assert "scripts/repo_recovery.py" in state.untracked
+        The fix creates a real, disposable untracked file inside the repo
+        itself and proves current_git_state() detects *it* - a check that
+        stays true regardless of what has since been committed, because it
+        makes its own fact rather than asserting someone else's history.
+        """
+        probe = REPO_ROOT / "tests" / "_repo_recovery_untracked_probe.tmp"
+        assert not probe.exists(), "a leftover probe from a previous run was not cleaned up"
+        probe.write_text("disposable - proves current_git_state() sees a real untracked file\n")
+        try:
+            state = current_git_state()
+            assert "tests/_repo_recovery_untracked_probe.tmp" in state.untracked
+        finally:
+            probe.unlink()
+
+    def test_an_untracked_file_stops_being_untracked_once_removed(self):
+        """The other half of the same behavior: current_git_state() reads
+        fresh every call, so removing the probe must make it vanish from
+        the next reading rather than being cached from the first."""
+        probe = REPO_ROOT / "tests" / "_repo_recovery_untracked_probe.tmp"
+        probe.write_text("disposable\n")
+        try:
+            assert "tests/_repo_recovery_untracked_probe.tmp" in current_git_state().untracked
+        finally:
+            probe.unlink()
+        assert "tests/_repo_recovery_untracked_probe.tmp" not in current_git_state().untracked
 
 
 # ---------------------------------------------------------------------------

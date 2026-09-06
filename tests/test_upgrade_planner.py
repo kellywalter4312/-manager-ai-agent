@@ -153,9 +153,11 @@ class TestFailsClosed:
 
     def test_no_migration_registered_at_all_is_unsupported(self):
         """The real, current state of every store in this codebase today -
-        schema 1 has never had a predecessor, so a target of anything else
-        must fail closed."""
-        plan = plan_upgrade(manifest(), UpgradeRequest(target_memory_schema_version=2))
+        memory's real MEMORY_MIGRATIONS now carries exactly one real step
+        (1 -> 2, see persistent.py's own _migrate_v1_to_v2), and nothing
+        beyond it; a target with no registered path at all must still fail
+        closed, exactly as it did before that one real migration existed."""
+        plan = plan_upgrade(manifest(), UpgradeRequest(target_memory_schema_version=99))
         assert plan.status is UpgradeStatus.UNSUPPORTED
 
     def test_a_downgrade_request_is_unsupported(self, monkeypatch):

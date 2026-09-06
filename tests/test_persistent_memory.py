@@ -388,11 +388,11 @@ class TestGovernedMigration:
     def test_a_recognized_older_version_is_migrated_not_quarantined(self, tmp_path, monkeypatch):
         self._register(
             monkeypatch,
-            Migration(from_version=0, to_version=SCHEMA_VERSION, apply=lambda raw: {**raw, "version": SCHEMA_VERSION}),
+            Migration(from_version=SCHEMA_VERSION - 1, to_version=SCHEMA_VERSION, apply=lambda raw: {**raw, "version": SCHEMA_VERSION}),
         )
         good = PersistentMemory._serialise(record("kept across the migration"))
         (tmp_path / "manager.json").write_text(
-            json.dumps({"version": 0, "records": [good]}), encoding="utf-8"
+            json.dumps({"version": SCHEMA_VERSION - 1, "records": [good]}), encoding="utf-8"
         )
 
         recovered = store(tmp_path)
@@ -403,24 +403,24 @@ class TestGovernedMigration:
     def test_the_pre_migration_file_is_preserved_as_a_checkpoint(self, tmp_path, monkeypatch):
         self._register(
             monkeypatch,
-            Migration(from_version=0, to_version=SCHEMA_VERSION, apply=lambda raw: {**raw, "version": SCHEMA_VERSION}),
+            Migration(from_version=SCHEMA_VERSION - 1, to_version=SCHEMA_VERSION, apply=lambda raw: {**raw, "version": SCHEMA_VERSION}),
         )
-        original = json.dumps({"version": 0, "records": []})
+        original = json.dumps({"version": SCHEMA_VERSION - 1, "records": []})
         (tmp_path / "manager.json").write_text(original, encoding="utf-8")
 
         store(tmp_path)
 
-        checkpoints = list(tmp_path.glob("manager.v0-checkpoint"))
+        checkpoints = list(tmp_path.glob(f"manager.v{SCHEMA_VERSION - 1}-checkpoint"))
         assert checkpoints, "no checkpoint of the pre-migration file was kept"
         assert checkpoints[0].read_text(encoding="utf-8") == original
 
     def test_the_migrated_file_is_written_at_the_current_schema(self, tmp_path, monkeypatch):
         self._register(
             monkeypatch,
-            Migration(from_version=0, to_version=SCHEMA_VERSION, apply=lambda raw: {**raw, "version": SCHEMA_VERSION}),
+            Migration(from_version=SCHEMA_VERSION - 1, to_version=SCHEMA_VERSION, apply=lambda raw: {**raw, "version": SCHEMA_VERSION}),
         )
         (tmp_path / "manager.json").write_text(
-            json.dumps({"version": 0, "records": []}), encoding="utf-8"
+            json.dumps({"version": SCHEMA_VERSION - 1, "records": []}), encoding="utf-8"
         )
 
         store(tmp_path)
@@ -435,18 +435,18 @@ class TestGovernedMigration:
         attempt, no second checkpoint."""
         self._register(
             monkeypatch,
-            Migration(from_version=0, to_version=SCHEMA_VERSION, apply=lambda raw: {**raw, "version": SCHEMA_VERSION}),
+            Migration(from_version=SCHEMA_VERSION - 1, to_version=SCHEMA_VERSION, apply=lambda raw: {**raw, "version": SCHEMA_VERSION}),
         )
         good = PersistentMemory._serialise(record("still here on the next boot"))
         (tmp_path / "manager.json").write_text(
-            json.dumps({"version": 0, "records": [good]}), encoding="utf-8"
+            json.dumps({"version": SCHEMA_VERSION - 1, "records": [good]}), encoding="utf-8"
         )
 
         store(tmp_path)  # first load: migrates
         second = store(tmp_path)  # a fresh object over the same path
 
         assert len(second) == 1
-        assert len(list(tmp_path.glob("manager.v0-checkpoint"))) == 1, "migrated a second time"
+        assert len(list(tmp_path.glob(f"manager.v{SCHEMA_VERSION - 1}-checkpoint"))) == 1, "migrated a second time"
 
     def test_a_version_with_no_registered_migration_is_still_quarantined(self, tmp_path, monkeypatch):
         """The guarantee this whole seam must never weaken: registering a
@@ -457,7 +457,7 @@ class TestGovernedMigration:
         alongside it."""
         self._register(
             monkeypatch,
-            Migration(from_version=0, to_version=SCHEMA_VERSION, apply=lambda raw: {**raw, "version": SCHEMA_VERSION}),
+            Migration(from_version=SCHEMA_VERSION - 1, to_version=SCHEMA_VERSION, apply=lambda raw: {**raw, "version": SCHEMA_VERSION}),
         )
         (tmp_path / "manager.json").write_text(
             json.dumps({"version": 999, "records": []}), encoding="utf-8"
@@ -471,9 +471,9 @@ class TestGovernedMigration:
         def broken(_raw):
             raise ValueError("simulated bug in a future migration")
 
-        self._register(monkeypatch, Migration(from_version=0, to_version=SCHEMA_VERSION, apply=broken))
+        self._register(monkeypatch, Migration(from_version=SCHEMA_VERSION - 1, to_version=SCHEMA_VERSION, apply=broken))
         (tmp_path / "manager.json").write_text(
-            json.dumps({"version": 0, "records": []}), encoding="utf-8"
+            json.dumps({"version": SCHEMA_VERSION - 1, "records": []}), encoding="utf-8"
         )
 
         recovered = store(tmp_path)
@@ -484,8 +484,24 @@ class TestGovernedMigration:
         self._register(
             monkeypatch,
             # drops "records" entirely - not a usable store, whatever else it is
-            Migration(from_version=0, to_version=SCHEMA_VERSION, apply=lambda raw: {"version": SCHEMA_VERSION}),
+            Migration(from_version=SCHEMA_VERSION - 1, to_version=SCHEMA_VERSION, apply=lambda raw: {"version": SCHEMA_VERSION}),
         )
+        (tmp_path / "manager.json").write_text(
+            json.dumps({"version": SCHEMA_VERSION - 1, "records": []}), encoding="utf-8"
+        )
+
+        recovered = store(tmp_path)
+        assert len(recovered) == 0
+        assert list(tmp_path.glob("manager.corrupt-*"))
+
+    def test_a_version_nothing_is_registered_for_still_quarantines(self, tmp_path):
+        """No monkeypatch here - MEMORY_MIGRATIONS is the real chain every
+        store in this codebase is actually wired with today, and it now
+        carries one real migration (1 -> 2, see TestRealSchemaMigrationV1ToV2
+        below). Version 0 is not what that migration starts from, so it must
+        still quarantine exactly as it always has - registering a real
+        migration for one version must never make an unrelated version
+        trustworthy."""
         (tmp_path / "manager.json").write_text(
             json.dumps({"version": 0, "records": []}), encoding="utf-8"
         )
@@ -494,18 +510,88 @@ class TestGovernedMigration:
         assert len(recovered) == 0
         assert list(tmp_path.glob("manager.corrupt-*"))
 
-    def test_no_migrations_registered_behaves_exactly_as_before_this_seam_existed(self, tmp_path):
-        """No monkeypatch here - MEMORY_MIGRATIONS is the real, empty chain
-        every store in this codebase is actually wired with today. An old
-        version with nothing registered for it must quarantine exactly as
-        it always has."""
-        (tmp_path / "manager.json").write_text(
-            json.dumps({"version": 0, "records": []}), encoding="utf-8"
-        )
+
+class TestRealSchemaMigrationV1ToV2:
+    """Foundation Repair #2 (reconciliation audit, 2026-09-05): the migration
+    mechanism itself was already fully tested above - every case in
+    TestGovernedMigration proves it - but only ever against a migration built
+    fresh inside the test with ``monkeypatch``. MEMORY_MIGRATIONS, the real
+    constant every store in this project actually loads, had shipped empty
+    since the seam was built. These tests exercise the real, permanent
+    migration this repair pass adds (``_migrate_v1_to_v2`` in persistent.py),
+    with no monkeypatch anywhere in this class - proof the mechanism now
+    carries real, shipped work, not just a tested capability nobody used.
+    """
+
+    def test_a_real_schema_1_file_is_migrated_to_2_on_load(self, tmp_path):
+        path = tmp_path / "manager.json"
+        old_record = PersistentMemory._serialise(record("kept from schema 1"))
+        del old_record["source"]  # a genuine schema-1 record never had this key
+        path.write_text(json.dumps({"version": 1, "records": [old_record]}), encoding="utf-8")
 
         recovered = store(tmp_path)
-        assert len(recovered) == 0
-        assert list(tmp_path.glob("manager.corrupt-*"))
+
+        assert len(recovered) == 1
+        migrated_record = recovered.recall("kept from schema 1")[0]
+        assert migrated_record.content == "kept from schema 1"
+        assert migrated_record.source == ""  # the honest default, never invented
+        assert not list(tmp_path.glob("manager.corrupt-*"))
+
+    def test_the_pre_migration_schema_1_file_is_checkpointed(self, tmp_path):
+        path = tmp_path / "manager.json"
+        original = json.dumps({"version": 1, "records": []})
+        path.write_text(original, encoding="utf-8")
+
+        store(tmp_path)
+
+        checkpoints = list(tmp_path.glob("manager.v1-checkpoint"))
+        assert checkpoints, "no checkpoint of the pre-migration schema-1 file was kept"
+        assert checkpoints[0].read_text(encoding="utf-8") == original
+
+    def test_the_migrated_file_is_written_at_schema_2_on_disk(self, tmp_path):
+        path = tmp_path / "manager.json"
+        path.write_text(json.dumps({"version": 1, "records": []}), encoding="utf-8")
+
+        store(tmp_path)
+
+        on_disk = json.loads(path.read_text(encoding="utf-8"))
+        assert on_disk["version"] == 2 == SCHEMA_VERSION
+
+    def test_a_migrated_store_survives_a_second_real_load(self, tmp_path):
+        path = tmp_path / "manager.json"
+        old_record = PersistentMemory._serialise(record("still here on the next boot"))
+        del old_record["source"]
+        path.write_text(json.dumps({"version": 1, "records": [old_record]}), encoding="utf-8")
+
+        store(tmp_path)  # first load: really migrates, via the real MEMORY_MIGRATIONS
+        second = store(tmp_path)  # a fresh object over the same path
+
+        assert len(second) == 1
+        assert len(list(tmp_path.glob("manager.v1-checkpoint"))) == 1, "migrated a second time"
+
+    def test_a_source_recorded_after_migration_round_trips(self, tmp_path):
+        """The field the migration introduces is not decorative - a real
+        caller can populate it, and it survives a restart like any other
+        field."""
+        first = store(tmp_path)
+        first.remember(record("reported by the email specialist", source="gmail"))
+        del first
+
+        second = store(tmp_path)
+        recalled = second.recall("reported by the email specialist")
+        assert recalled[0].source == "gmail"
+
+    def test_schema_2_written_fresh_needs_no_migration(self, tmp_path):
+        """A store created under today's code (no pre-existing file) writes
+        schema 2 directly - the migration exists for what is already on
+        disk, not for every write."""
+        fresh = store(tmp_path)
+        fresh.remember(record("written under the current schema"))
+
+        on_disk = json.loads((tmp_path / "manager.json").read_text(encoding="utf-8"))
+        assert on_disk["version"] == 2
+        assert on_disk["records"][0]["source"] == ""
+        assert not list(tmp_path.glob("manager.v1-checkpoint"))
 
 
 # ----------------------------------------------------------------------
@@ -541,7 +627,7 @@ class TestEphemeralIsPreserved:
 
 
 class TestFactory:
-    def test_the_default_is_persistent(self):
+    def test_the_default_is_persistent(self, tmp_path):
         """Continuity is the normal configuration, not an opt-in.
 
         This asserted the opposite, and the opposite was the defect: an
@@ -549,9 +635,18 @@ class TestFactory:
         nothing, and no memory file had ever been written. Durability now
         arrives by default; what may be kept is still decided by
         MemoryPolicy, and forget() and clear() are still in the contract.
+
+        ``memory_dir`` is pinned to ``tmp_path`` rather than left at its real
+        default: this test only wants "persistent is the default type", and
+        letting it fall through to the real, gitignored data/memory/manager.json
+        would mean *this unit test's* result depends on whatever that file
+        actually contains on this machine - schema version included, since
+        loading it can trigger a real, on-disk migration.
         """
         assert settings().memory == "persistent"
-        assert isinstance(build_memory(settings(), MANAGER), PersistentMemory)
+        assert isinstance(
+            build_memory(settings(memory_dir=str(tmp_path)), MANAGER), PersistentMemory
+        )
 
     def test_ephemeral_is_still_explicitly_selectable(self):
         """Not deleted, not deprecated. A test, a one-off inspection or

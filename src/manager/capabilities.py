@@ -2391,16 +2391,29 @@ CURRENT_YEAR_MARKERS: tuple[str, ...] = (
     "what year is it", "what year is this", "what's the year",
     "what is the year", "current year", "which year is it",
 )
+# Foundation Repair #1 (reconciliation audit, 2026-09-05): date/day/month/year
+# were already deterministic and Half-Brain-safe; clock time was not - "what
+# time is it" fell through to the Brain and honestly failed with no provider
+# configured. Named and matched exactly the way the four sibling marker sets
+# above are, for the identical reason: a clock reading is arithmetic, never
+# knowledge, and asking a model for it would be slower, sometimes wrong, and
+# entirely unnecessary.
+CURRENT_TIME_MARKERS: tuple[str, ...] = (
+    "what time is it", "what's the time", "what is the time",
+    "what time is it now", "current time", "what's the current time",
+    "what is the current time", "do you know what time it is",
+    "what time do you have", "got the time",
+)
 CURRENT_DATETIME_MARKERS: tuple[str, ...] = (
     CURRENT_DATE_MARKERS + CURRENT_DAY_MARKERS
-    + CURRENT_MONTH_MARKERS + CURRENT_YEAR_MARKERS
+    + CURRENT_MONTH_MARKERS + CURRENT_YEAR_MARKERS + CURRENT_TIME_MARKERS
 )
 
 
 def current_datetime_intent(task: Task, participants: Sequence[str] = ()) -> bool:
-    """Whether this request asks what the current day, date, month or
-    year is - recognised by phrase, never by word overlap, for the exact
-    reason stated above: "it" and "today" are ordinary words this
+    """Whether this request asks what the current day, date, month, year
+    or time is - recognised by phrase, never by word overlap, for the
+    exact reason stated above: "it" and "today" are ordinary words this
     capability must never claim merely for containing."""
     return _marker_present(task.description, CURRENT_DATETIME_MARKERS)
 
@@ -2453,14 +2466,31 @@ def _answer_current_year(request: CapabilityRequest, today) -> TaskResult:
     )
 
 
+def _answer_current_time(request: CapabilityRequest, now) -> TaskResult:
+    # Built by hand rather than with %-I/%#I (the no-leading-zero hour):
+    # both are platform-specific strftime extensions, absent on Windows -
+    # the exact reason _answer_current_date already avoids them.
+    hour12 = now.hour % 12 or 12
+    period = "AM" if now.hour < 12 else "PM"
+    spoken = f"{hour12}:{now.minute:02d} {period}"
+    return TaskResult.success(
+        request.task, request.own_name,
+        f"It's {spoken}.",
+        payload={
+            "handled_by": "current_datetime", "derived": "time",
+            "value": now.strftime("%H:%M"),
+        },
+    )
+
+
 def current_datetime(request: CapabilityRequest) -> TaskResult:
-    """Answer a current-day/date/month/year question from the real
+    """Answer a current-day/date/month/year/time question from the real
     calendar - never from a stored record, and never from the Brain.
 
     Checked in the order a request most often names more than one unit at
     once would want it resolved: a full date subsumes a bare day, so "date"
     is tried first. select_capability only reaches this handler when
-    claims already matched one of the four marker sets above, so the
+    claims already matched one of the five marker sets above, so the
     final fallback is unreachable in practice - kept as an honest answer
     rather than an assumption nothing else could route here.
     """
@@ -2476,6 +2506,8 @@ def current_datetime(request: CapabilityRequest) -> TaskResult:
         return _answer_current_month(request, today)
     if _marker_present(lowered, CURRENT_YEAR_MARKERS):
         return _answer_current_year(request, today)
+    if _marker_present(lowered, CURRENT_TIME_MARKERS):
+        return _answer_current_time(request, calendar.now())
 
     return TaskResult.failure(
         request.task, request.own_name,
@@ -2485,9 +2517,9 @@ def current_datetime(request: CapabilityRequest) -> TaskResult:
 
 CURRENT_DATETIME = ManagerCapability(
     name="current_datetime",
-    capabilities=frozenset({"date", "day", "month", "year", "calendar", "today"}),
+    capabilities=frozenset({"date", "day", "month", "year", "time", "hour", "minute", "clock", "calendar", "today"}),
     handle=current_datetime,
-    description="Answers what the current day/date/month/year is, from the real calendar - never the Brain.",
+    description="Answers what the current day/date/month/year/time is, from the real calendar - never the Brain.",
     claims=current_datetime_intent,
     # Natural Conversation fix: current_datetime_intent's marker phrases
     # already cover every genuine "what day/date/month/year is it"

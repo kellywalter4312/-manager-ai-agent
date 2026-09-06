@@ -48,6 +48,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from scripts.exchange import exchange, memory_for  # noqa: E402
+from src.services.audit.action_log import DEFAULT_ACTION_LOG_PATH, load_action_log  # noqa: E402
 from src.agents.tools.communication import (  # noqa: E402
     CommunicationCallTool,
     CommunicationReadTool,
@@ -136,8 +137,11 @@ HELP = """
   status                   the overview
   status <agent>           one agent: brain, memory, capabilities, tools
   status system            heartbeat, permissions, tools, health
-  history                  what happened
+  history                  what happened this session - rebuilt fresh every run
   history <category>       filter: memory, report
+  actions                  the last 20 consequential tool actions, durably
+                           recorded across restarts (see 'Memory' step
+                           in a talk trail for when one is recorded)
   unresolved               personal facts Alfred knows only as uncertainty
   avatar                   every agent's current presence and avatar
   avatar <agent>           one agent's avatar, and what else it could be
@@ -1201,6 +1205,17 @@ def run_command(
             )
         return render_history(view, columns)
 
+    if verb == "actions":
+        # Foundation Repair #4 (reconciliation audit, 2026-09-05): the
+        # durable counterpart to `history` above - which is real, but is
+        # rebuilt fresh every process and so cannot answer "what did
+        # Alfred do across restarts". Read-only, like every other view in
+        # this file: recording happens only inside exchange(), never here.
+        entries = load_action_log(DEFAULT_ACTION_LOG_PATH)
+        if not entries:
+            return "no consequential actions recorded yet"
+        return "\n".join(entry.describe() for entry in entries[-20:])
+
     if verb == "unresolved":
         # Stage 12 closure: genuine, currently-unresolved personal
         # uncertainty - "mom's birthday is either March 24 or May 24".
@@ -1497,7 +1512,9 @@ def run_command(
     if verb == "talk":
         if not rest:
             return "say what you would like Alfred to do, for example: talk scan my inbox"
-        return render_turn(exchange(channel, conversation, rest), columns)
+        return render_turn(
+            exchange(channel, conversation, rest, action_log_path=DEFAULT_ACTION_LOG_PATH), columns
+        )
 
     # Anything else is treated as something to say to Alfred. Talking is the
     # primary mode, so it should not need a keyword.
@@ -1508,7 +1525,9 @@ def run_command(
     # file used to call - so no orchestration moved - and the trail it produces
     # is the same one. What changed is that text and voice now share one path
     # instead of voice having a path nobody used.
-    return render_turn(exchange(channel, conversation, command), columns)
+    return render_turn(
+        exchange(channel, conversation, command, action_log_path=DEFAULT_ACTION_LOG_PATH), columns
+    )
 
 
 def _reload_session(centre: "ControlCenter", command: str):

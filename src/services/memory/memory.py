@@ -92,6 +92,13 @@ class MemoryRecord:
         kind     - a caller-defined category ("preference", "outcome", "fact")
         tags     - caller-defined labels, normalised for reliable matching
         context  - arbitrary structured detail, carried but never interpreted
+        source   - where this record came from ("user_stated", "gmail",
+                   "milestone", ...), for a caller that wants to say plainly
+                   why something is remembered rather than burying that fact
+                   as one more ad hoc key inside the opaque ``context`` bag.
+                   Optional, and empty by default: existing callers that have
+                   always used ``context["source"]`` keep working unchanged -
+                   this is a place to put it, never a requirement to.
 
     ``context`` is deliberately opaque. Memory stores it and hands it back; it
     never reads inside it. That is what keeps this contract free of any
@@ -104,6 +111,7 @@ class MemoryRecord:
     context: Mapping[str, Any] | None = None
     created_at: datetime = field(default_factory=utc_now)
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
+    source: str = ""
 
     def __post_init__(self) -> None:
         # A memory of nothing is not a memory. Storing blanks would quietly
@@ -114,6 +122,7 @@ class MemoryRecord:
 
         object.__setattr__(self, "kind", " ".join(str(self.kind).split()).lower())
         object.__setattr__(self, "tags", normalise_tags(self.tags))
+        object.__setattr__(self, "source", " ".join(str(self.source).split()))
 
         if not str(self.id).strip():
             raise MemoryStoreError("MemoryRecord.id must not be empty")

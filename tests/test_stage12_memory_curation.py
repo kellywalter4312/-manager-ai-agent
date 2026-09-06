@@ -32,7 +32,7 @@ from src.manager.memory_policy import ManagerMemoryPolicy, MemoryCategory
 from src.services.memory.day import Calendar, DayView
 from src.services.memory.ephemeral import EphemeralMemory
 from src.services.memory.memory import MemoryRecord, utc_now
-from src.services.memory.persistent import PersistentMemory
+from src.services.memory.persistent import SCHEMA_VERSION, PersistentMemory
 from src.services.memory.session import retention_requests
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -241,7 +241,7 @@ class TestPersistenceAcrossRestart:
         store.remember(MemoryRecord(content="a durable fact", kind=MemoryCategory.USER_CONTEXT.value))
 
         raw = json.loads(path.read_text(encoding="utf-8"))
-        assert raw["version"] == 1  # PersistentMemory.SCHEMA_VERSION, unchanged
+        assert raw["version"] == SCHEMA_VERSION  # PersistentMemory's own, current schema
         assert len(raw["records"]) == 1
 
 

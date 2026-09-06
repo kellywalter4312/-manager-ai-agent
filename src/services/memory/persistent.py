@@ -55,23 +55,55 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
-from src.core.versioning import MigrationChain, MigrationUnavailable
+from src.core.versioning import Migration, MigrationChain, MigrationUnavailable
 from src.services.memory.ephemeral import EphemeralMemory
 from src.services.memory.memory import Memory, MemoryRecord, MemoryStoreError
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+
+def _migrate_v1_to_v2(raw: dict[str, Any]) -> dict[str, Any]:
+    """Schema 1 -> 2: give every record an explicit ``source`` field.
+
+    Foundation Repair #2 (reconciliation audit, 2026-09-05): provenance had
+    always lived informally, by convention, inside whatever a caller chose to
+    put in ``context["source"]`` - readable if you knew to look, but nothing
+    the schema itself promised. ``MemoryRecord.source`` (see memory.py) makes
+    it a first-class field instead. A schema-1 record never had this field at
+    all, so the honest migration is the smallest one possible: default it to
+    the empty string, exactly what a freshly-constructed record with no
+    ``source`` argument already gets. Nothing is inferred from ``context`` -
+    a real caller can still read ``context["source"]`` there unchanged, and
+    guessing which of an old record's context keys "was" its source would be
+    exactly the kind of invention this repair pass was told not to do.
+
+    The first real Migration this project has ever shipped in
+    MEMORY_MIGRATIONS, rather than one constructed only inside a test - see
+    tests/test_persistent_memory.py::TestRealSchemaMigrationV1ToV2 for the
+    proof this actually runs end to end, against this exact function, not a
+    monkeypatched stand-in.
+    """
+    migrated = dict(raw)
+    migrated["records"] = [
+        {**entry, "source": entry.get("source", "")} if isinstance(entry, dict) else entry
+        for entry in raw.get("records", [])
+    ]
+    migrated["version"] = 2
+    return migrated
+
 
 # Every Migration this store currently knows how to run, keyed by the
-# version it starts from - see src/core/versioning.py. Empty today: schema 1
-# is still the only schema that has ever existed, so there is nothing to
-# migrate from yet. An older file therefore still hits exactly the same
-# quarantine path it hit before this seam existed (see _migrate_or_quarantine
-# below) - this constant is where a future schema bump registers its own
-# Migration, not a place that changes behavior by existing.
-MEMORY_MIGRATIONS: MigrationChain = MigrationChain()
+# version it starts from - see src/core/versioning.py. Schema 1 -> 2 is the
+# first real one (see _migrate_v1_to_v2 above); an older, unrecognised
+# version still hits exactly the same quarantine path it always has (see
+# _migrate_or_quarantine below) - this constant is where the next schema
+# bump registers its own Migration alongside this one.
+MEMORY_MIGRATIONS: MigrationChain = MigrationChain(
+    [Migration(from_version=1, to_version=2, apply=_migrate_v1_to_v2)]
+)
 
 # Where a store lives when nobody says otherwise. Under data/, which is
 # gitignored - these files hold whatever an agent was told, which is user
@@ -225,6 +257,7 @@ class PersistentMemory(Memory):
                 context=entry.get("context"),
                 created_at=datetime.fromisoformat(entry["created_at"]),
                 id=entry["id"],
+                source=entry.get("source", ""),
             )
         except (KeyError, TypeError, ValueError, MemoryStoreError):
             return None
@@ -287,6 +320,7 @@ class PersistentMemory(Memory):
             # Preserved exactly, in full precision with its timezone. The
             # temporal stage that comes later reads this; nothing here does.
             "created_at": record.created_at.isoformat(),
+            "source": record.source,
         }
 
     def _migrate_or_quarantine(self, raw: dict[str, Any], version: Any) -> dict[str, Any] | None:

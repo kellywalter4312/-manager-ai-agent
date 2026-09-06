@@ -73,11 +73,14 @@ def register_state_migration(monkeypatch, *migrations):
 
 
 def bump_memory_migration(monkeypatch):
-    """The one migration most tests need: schema 0, carried forward to
-    whatever this installation's real MEMORY_SCHEMA_VERSION is."""
+    """The one migration most tests need: the schema immediately before
+    today's, carried forward to whatever this installation's real
+    MEMORY_SCHEMA_VERSION is. Not literally "schema 0" - that stopped being
+    true the moment a second real schema (see persistent.py's own
+    _migrate_v1_to_v2) made "one predecessor back" no longer mean zero."""
     register_memory_migration(
         monkeypatch,
-        Migration(from_version=0, to_version=MEMORY_SCHEMA_VERSION,
+        Migration(from_version=MEMORY_SCHEMA_VERSION - 1, to_version=MEMORY_SCHEMA_VERSION,
                    apply=lambda raw: {**raw, "version": MEMORY_SCHEMA_VERSION}),
     )
 
@@ -122,7 +125,7 @@ class TestPlanningIntegration:
 
     def test_migration_required_requires_approval(self, tmp_path, monkeypatch):
         bump_memory_migration(monkeypatch)
-        current = replace(manifest(), memory_schema_version=0)
+        current = replace(manifest(), memory_schema_version=MEMORY_SCHEMA_VERSION - 1)
         request = UpgradeRequest(target_memory_schema_version=MEMORY_SCHEMA_VERSION)
         result = run_upgrade(
             request, approved=False, current_manifest=current,
@@ -163,7 +166,7 @@ class TestApproval:
 
     def test_explicit_false_cannot_execute(self, tmp_path, monkeypatch):
         bump_memory_migration(monkeypatch)
-        current = replace(manifest(), memory_schema_version=0)
+        current = replace(manifest(), memory_schema_version=MEMORY_SCHEMA_VERSION - 1)
         request = UpgradeRequest(target_memory_schema_version=MEMORY_SCHEMA_VERSION)
         memory_dir = tmp_path / "memory"
         result = run_upgrade(
@@ -179,9 +182,9 @@ class TestApproval:
         memory_dir = tmp_path / "memory"
         memory_dir.mkdir()
         (memory_dir / f"{MANAGER}.json").write_text(
-            json.dumps({"version": 0, "records": []}), encoding="utf-8"
+            json.dumps({"version": MEMORY_SCHEMA_VERSION - 1, "records": []}), encoding="utf-8"
         )
-        current = replace(manifest(), memory_schema_version=0)
+        current = replace(manifest(), memory_schema_version=MEMORY_SCHEMA_VERSION - 1)
         request = UpgradeRequest(target_memory_schema_version=MEMORY_SCHEMA_VERSION)
         result = run_upgrade(
             request, approved=True, current_manifest=current,
@@ -214,9 +217,9 @@ class TestExecutionIntegration:
         memory_dir = tmp_path / "memory"
         memory_dir.mkdir()
         (memory_dir / f"{MANAGER}.json").write_text(
-            json.dumps({"version": 0, "records": []}), encoding="utf-8"
+            json.dumps({"version": MEMORY_SCHEMA_VERSION - 1, "records": []}), encoding="utf-8"
         )
-        current = replace(manifest(), memory_schema_version=0)
+        current = replace(manifest(), memory_schema_version=MEMORY_SCHEMA_VERSION - 1)
         request = UpgradeRequest(target_memory_schema_version=MEMORY_SCHEMA_VERSION)
         result = run_upgrade(
             request, approved=True, current_manifest=current,
@@ -240,9 +243,9 @@ class TestExecutionIntegration:
         memory_dir = tmp_path / "memory"
         memory_dir.mkdir()
         (memory_dir / f"{MANAGER}.json").write_text(
-            json.dumps({"version": 0, "records": []}), encoding="utf-8"
+            json.dumps({"version": MEMORY_SCHEMA_VERSION - 1, "records": []}), encoding="utf-8"
         )
-        current = replace(manifest(), memory_schema_version=0)
+        current = replace(manifest(), memory_schema_version=MEMORY_SCHEMA_VERSION - 1)
         request = UpgradeRequest(target_memory_schema_version=MEMORY_SCHEMA_VERSION)
         first = run_upgrade(
             request, approved=True, current_manifest=current,
@@ -266,9 +269,9 @@ class TestExecutionIntegration:
         memory_dir = tmp_path / "memory"
         memory_dir.mkdir()
         (memory_dir / f"{MANAGER}.json").write_text(
-            json.dumps({"version": 0, "records": []}), encoding="utf-8"
+            json.dumps({"version": MEMORY_SCHEMA_VERSION - 1, "records": []}), encoding="utf-8"
         )
-        current = replace(manifest(), memory_schema_version=0)
+        current = replace(manifest(), memory_schema_version=MEMORY_SCHEMA_VERSION - 1)
         request = UpgradeRequest(target_memory_schema_version=MEMORY_SCHEMA_VERSION)
         run_upgrade(request, approved=True, current_manifest=current,
                     memory_dir=memory_dir, state_path=tmp_path / "state.json")
@@ -289,9 +292,9 @@ class TestVerification:
         memory_dir = tmp_path / "memory"
         memory_dir.mkdir()
         (memory_dir / f"{MANAGER}.json").write_text(
-            json.dumps({"version": 0, "records": []}), encoding="utf-8"
+            json.dumps({"version": MEMORY_SCHEMA_VERSION - 1, "records": []}), encoding="utf-8"
         )
-        current = replace(manifest(), memory_schema_version=0)
+        current = replace(manifest(), memory_schema_version=MEMORY_SCHEMA_VERSION - 1)
         request = UpgradeRequest(target_memory_schema_version=MEMORY_SCHEMA_VERSION)
         result = run_upgrade(
             request, approved=True, current_manifest=current,
@@ -331,9 +334,9 @@ class TestVerification:
         memory_dir = tmp_path / "memory"
         memory_dir.mkdir()
         (memory_dir / f"{MANAGER}.json").write_text(
-            json.dumps({"version": 0, "records": []}), encoding="utf-8"
+            json.dumps({"version": MEMORY_SCHEMA_VERSION - 1, "records": []}), encoding="utf-8"
         )
-        current = replace(manifest(), memory_schema_version=0)
+        current = replace(manifest(), memory_schema_version=MEMORY_SCHEMA_VERSION - 1)
         request = UpgradeRequest(target_memory_schema_version=MEMORY_SCHEMA_VERSION)
 
         import src.upgrade_lifecycle as lifecycle_module
@@ -349,7 +352,7 @@ class TestVerification:
         assert result.success is False
         assert result.verified is False
         on_disk = json.loads((memory_dir / f"{MANAGER}.json").read_text(encoding="utf-8"))
-        assert on_disk["version"] == 0, "the fake executor must not have touched the file"
+        assert on_disk["version"] == MEMORY_SCHEMA_VERSION - 1, "the fake executor must not have touched the file"
 
     def test_executor_success_cannot_bypass_verification(self, tmp_path, monkeypatch):
         """Same seam as above, phrased as the safety property directly:
@@ -361,7 +364,7 @@ class TestVerification:
             lambda *a, **k: UpgradeResult(success=True, status=UpgradeStatus.MIGRATION_REQUIRED),
         )
         bump_memory_migration(monkeypatch)
-        current = replace(manifest(), memory_schema_version=0)
+        current = replace(manifest(), memory_schema_version=MEMORY_SCHEMA_VERSION - 1)
         request = UpgradeRequest(target_memory_schema_version=MEMORY_SCHEMA_VERSION)
         result = run_upgrade(
             request, approved=True, current_manifest=current,
@@ -547,7 +550,7 @@ class TestRealIntegration:
         state_path = tmp_path / "state" / "processed.json"
 
         original = json.dumps({
-            "version": 0,
+            "version": MEMORY_SCHEMA_VERSION - 1,
             "records": [{
                 "id": "r1", "content": "kept across the governed upgrade",
                 "kind": "note", "tags": [], "context": None,
@@ -556,7 +559,7 @@ class TestRealIntegration:
         })
         (memory_dir / f"{MANAGER}.json").write_text(original, encoding="utf-8")
 
-        before = replace(manifest(), memory_schema_version=0)
+        before = replace(manifest(), memory_schema_version=MEMORY_SCHEMA_VERSION - 1)
         request = UpgradeRequest(target_memory_schema_version=MEMORY_SCHEMA_VERSION)
 
         result = run_upgrade(
@@ -572,7 +575,7 @@ class TestRealIntegration:
         on_disk = json.loads((memory_dir / f"{MANAGER}.json").read_text(encoding="utf-8"))
         assert on_disk["version"] == MEMORY_SCHEMA_VERSION
 
-        checkpoint = memory_dir / f"{MANAGER}.v0-checkpoint"
+        checkpoint = memory_dir / f"{MANAGER}.v{MEMORY_SCHEMA_VERSION - 1}-checkpoint"
         assert checkpoint.exists(), "the pre-upgrade file must be preserved"
         assert checkpoint.read_text(encoding="utf-8") == original
 
@@ -603,7 +606,7 @@ class TestRealIntegration:
         real_memory_dir = REPO_ROOT / "data" / "memory"
         existed_before = real_memory_dir.exists()
 
-        before = replace(manifest(), memory_schema_version=0)
+        before = replace(manifest(), memory_schema_version=MEMORY_SCHEMA_VERSION - 1)
         request = UpgradeRequest(target_memory_schema_version=MEMORY_SCHEMA_VERSION)
         run_upgrade(
             request, approved=True, current_manifest=before,

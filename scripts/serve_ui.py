@@ -96,11 +96,13 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from scripts.control_center import build as assemble_system  # noqa: E402
+from scripts.control_center import build as assemble_system, run_command  # noqa: E402
 from scripts.exchange import exchange, memory_for  # noqa: E402
+from src.services.audit.action_log import DEFAULT_ACTION_LOG_PATH, load_action_log  # noqa: E402
 from scripts.export_ui import render  # noqa: E402
 from src.config.settings import Settings  # noqa: E402
 from src.control_center.observer import ControlCenter  # noqa: E402
+from src.control_center.render import render_overview  # noqa: E402
 from src.control_center.snapshot import snapshot  # noqa: E402
 from src.services.identity.presence import (  # noqa: E402
     PresenceState,
@@ -205,6 +207,30 @@ def route(path: str, system: LiveSystem) -> tuple[int, bytes, str]:
     if path == "/snapshot.json":
         data = _current_snapshot(system)
         return 200, json.dumps(data).encode("utf-8"), "application/json; charset=utf-8"
+    if path == "/status":
+        # Foundation Repair #5 (reconciliation audit, 2026-09-05): the
+        # Control Center's own `status` view, reachable over the second
+        # door this project already has for everything else - `talk`/
+        # `message` share exchange(), and this shares render_overview()
+        # with the terminal's own `status` command. Not a second summary
+        # with its own JSON schema to keep in sync: the identical text a
+        # terminal session would see for the identical question.
+        return (
+            200,
+            render_overview(system.centre.overview()).encode("utf-8"),
+            "text/plain; charset=utf-8",
+        )
+    if path == "/actions":
+        # The durable counterpart to /status above - what `actions` shows
+        # in the terminal, read from the identical store
+        # exchange()'s own consequential-action recording writes to.
+        entries = load_action_log(DEFAULT_ACTION_LOG_PATH)
+        body = (
+            "\n".join(entry.describe() for entry in entries[-20:])
+            if entries
+            else "no consequential actions recorded yet"
+        )
+        return 200, body.encode("utf-8"), "text/plain; charset=utf-8"
     if path == "/":
         data = _current_snapshot(system)
         return 200, render(data).encode("utf-8"), "text/html; charset=utf-8"
@@ -286,7 +312,7 @@ def route_message(
         with system.lock:
             turn = exchange(
                 system.channel, system.conversation, text.strip(),
-                addressed=addressed, speak=True,
+                addressed=addressed, speak=True, action_log_path=DEFAULT_ACTION_LOG_PATH,
             )
     except Exception:  # noqa: BLE001 - an HTTP boundary must not crash the process
         logger.exception("live message handling failed")
@@ -495,6 +521,80 @@ def route_environment(agent: object, environment_id: object, system: LiveSystem)
     )
 
 
+
+# Foundation Repair #5, part 2 (reconciliation audit, 2026-09-05): the
+# management verbs run_command() already handles for a terminal, minus
+# "talk"/free text. That one stays exclusively /message's - a second way to
+# have a conversation would be a second implementation of the one thing
+# exchange() exists to be the only door to (see route_message's own
+# docstring). Everything below is administrative: provider/credential
+# selection, connections, capabilities, voice, ecosystem, avatar/environment/
+# profile by verb instead of by dedicated route, status, and durable history -
+# exactly the surface an operator already has at a terminal, offered through
+# this project's other door.
+MANAGEMENT_VERBS = frozenset(
+    {
+        "status", "history", "actions", "unresolved", "avatar", "environment",
+        "profile", "voice", "review", "capabilities", "provider", "connections",
+        "ecosystem",
+    }
+)
+
+# No real terminal is attached to an HTTP request, so there is no width to
+# ask for - a fixed, reasonable column count, the same role a default would
+# play if run_command's own columns parameter had one.
+COMMAND_COLUMNS = 100
+
+
+def route_command(command: object, system: LiveSystem) -> tuple[int, bytes, str]:
+    """Decide what to answer for `POST /command` - administrative Control
+    Center commands, reachable over this project's second door.
+
+    Reuses `run_command` verbatim - the identical function
+    `scripts/control_center.py`'s own terminal loop calls for every one of
+    these verbs, against the identical `ControlCenter`/`CredentialStore`/
+    `EcosystemRegistry` a terminal session reads and writes. Nothing here is
+    a second provider-management implementation, a second capability
+    registry reader, or a second credential store - see
+    `run_provider_command`'s own docstring for why an account added this
+    way is exactly as real, and exactly as unable to echo a secret back
+    (`ProviderAccount.describe()` never carries one), as one added from a
+    terminal.
+
+    Restricted to `MANAGEMENT_VERBS`: "talk" and free text are refused here
+    with a clear pointer to `/message`, so this never becomes a second way
+    to hold a conversation.
+    """
+    if not isinstance(command, str) or not command.strip():
+        return (
+            400,
+            json.dumps({"error": "'command' must be a non-empty string"}).encode("utf-8"),
+            "application/json; charset=utf-8",
+        )
+
+    verb = command.strip().split(None, 1)[0].lower()
+    if verb not in MANAGEMENT_VERBS:
+        return (
+            400,
+            json.dumps(
+                {
+                    "error": (
+                        f"'{verb}' is not a management command - use POST /message "
+                        "to hold a conversation instead"
+                    ),
+                    "management_commands": sorted(MANAGEMENT_VERBS),
+                }
+            ).encode("utf-8"),
+            "application/json; charset=utf-8",
+        )
+
+    with system.lock:
+        result = run_command(
+            system.centre, command.strip(), COMMAND_COLUMNS, system.channel, system.conversation
+        )
+    return 200, result.encode("utf-8"), "text/plain; charset=utf-8"
+
+
 class LiveServer(ThreadingHTTPServer):
     """A `ThreadingHTTPServer` carrying exactly one thing: the one system
     every request reads or acts on."""
@@ -512,7 +612,7 @@ class SnapshotHandler(BaseHTTPRequestHandler):
         self._respond(status, body, content_type)
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib's naming, not ours to change
-        if self.path not in ("/message", "/avatar", "/profile", "/environment"):
+        if self.path not in ("/message", "/avatar", "/profile", "/environment", "/command"):
             self._respond(404, b"not found", "text/plain; charset=utf-8")
             return
 
@@ -540,6 +640,9 @@ class SnapshotHandler(BaseHTTPRequestHandler):
             agent = payload.get("agent") if isinstance(payload, dict) else None
             environment_id = payload.get("environment_id") if isinstance(payload, dict) else None
             status, body, content_type = route_environment(agent, environment_id, self.server.system)
+        elif self.path == "/command":
+            command = payload.get("command") if isinstance(payload, dict) else None
+            status, body, content_type = route_command(command, self.server.system)
         else:
             agent = payload.get("agent") if isinstance(payload, dict) else None
             fields = payload.get("fields") if isinstance(payload, dict) else None

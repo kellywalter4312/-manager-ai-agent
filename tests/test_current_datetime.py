@@ -16,7 +16,7 @@ on the day this suite happens to run.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -189,7 +189,80 @@ class TestCurrentYearAndMonth:
 
 
 # ---------------------------------------------------------------------------
-# E. Natural variants routed by select_capability directly
+# E. Current time (Foundation Repair #1, reconciliation audit 2026-09-05)
+# ---------------------------------------------------------------------------
+
+
+class TestCurrentTime:
+    @pytest.mark.parametrize(
+        "phrasing",
+        [
+            "what time is it?",
+            "what's the time",
+            "what is the time",
+            "current time",
+            "what time is it now",
+            "do you know what time it is",
+        ],
+    )
+    def test_answers_the_real_time_half_brain(self, phrasing):
+        manager = alfred(calendar=fixed_calendar())
+        result = manager.handle_task(Task(description=phrasing))
+        assert result.succeeded, result.error
+        assert result.payload["handled_by"] == "current_datetime"
+        assert result.payload["derived"] == "time"
+        assert result.payload["value"] == "10:00"
+        assert result.output == "It's 10:00 AM."
+
+    def test_afternoon_and_midnight_hour_formatting(self):
+        afternoon = datetime(2026, 12, 25, 15, 5, 0, tzinfo=timezone.utc)
+        manager = alfred(calendar=fixed_calendar(afternoon))
+        result = manager.handle_task(Task(description="what time is it"))
+        assert result.output == "It's 3:05 PM."
+
+        midnight = datetime(2026, 12, 25, 0, 30, 0, tzinfo=timezone.utc)
+        manager = alfred(calendar=fixed_calendar(midnight))
+        result = manager.handle_task(Task(description="what time is it"))
+        assert result.output == "It's 12:30 AM."
+
+    def test_works_with_no_brain_configured(self):
+        manager = alfred(calendar=fixed_calendar())
+        assert assess_manager(manager).mode is CognitiveMode.HALF_BRAIN
+        result = manager.handle_task(Task(description="what time is it"))
+        assert result.succeeded
+        assert result.output == "It's 10:00 AM."
+
+    def test_full_brain_answers_deterministically_without_a_call(self):
+        brain, provider = full_brain_with_working_provider()
+        manager = alfred(brain=brain, calendar=fixed_calendar())
+        assert assess_manager(manager).mode is CognitiveMode.FULL_BRAIN
+
+        result = manager.handle_task(Task(description="what time is it"))
+
+        assert result.succeeded
+        assert result.output == "It's 10:00 AM."
+        assert provider.calls == []
+
+    def test_select_capability_reaches_current_datetime(self):
+        capability = select_capability(
+            Task(description="what time is it"), MANAGER_CAPABILITIES, participants=[]
+        )
+        assert capability.name == "current_datetime"
+
+    def test_calendar_now_converts_to_the_configured_zone(self):
+        """Calendar.now() itself, isolated from the capability: it must
+        apply the configured zone's offset the same way local_date already
+        does for a date, not just pass the clock's instant straight
+        through."""
+        instant = datetime(2026, 12, 25, 23, 30, 0, tzinfo=timezone.utc)
+        calendar = Calendar(zone=timezone(timedelta(hours=1)), clock=lambda: instant)
+        now = calendar.now()
+        assert now.hour == 0
+        assert now.day == 26
+
+
+# ---------------------------------------------------------------------------
+# F. Natural variants routed by select_capability directly
 # ---------------------------------------------------------------------------
 
 

@@ -14,12 +14,13 @@ read-only observation layer. This module constructs real stores and writes
 real files - the same kind of "actor" src/composition.py already is, which
 is why it lives beside composition.py instead of inside control_center/.
 
-Every real MEMORY_MIGRATIONS/STATE_MIGRATIONS chain in this codebase is
-still empty (schema 1 has never had a predecessor), so most tests here
-register a synthetic chain via monkeypatch - the same technique
-test_persistent_memory.py::TestGovernedMigration,
-test_heartbeat_state.py::TestGovernedMigration and
-test_upgrade_planner.py already use for exactly the same reason.
+MEMORY_MIGRATIONS now carries one real migration (schema 1 -> 2; STATE_MIGRATIONS
+is still empty - state has never had a predecessor). Most tests here still
+register their own synthetic chain via monkeypatch regardless, the same
+technique test_persistent_memory.py::TestGovernedMigration,
+test_heartbeat_state.py::TestGovernedMigration and test_upgrade_planner.py
+already use: this module tests the executor's own machinery generically,
+not any one store's specific migration content.
 """
 
 from __future__ import annotations
@@ -51,8 +52,16 @@ def _register_state_migration(monkeypatch, *migrations):
 
 
 def _memory_migration_0_to_current():
+    """A synthetic, monkeypatched migration - unlike the one real migration
+    MEMORY_MIGRATIONS now ships (schema 1 -> 2, see
+    src/services/memory/persistent.py's own _migrate_v1_to_v2), this one
+    exists only inside this test file and is thrown away with the
+    monkeypatch. Named from the version immediately before the current
+    schema, whatever that number now is, rather than a literal "0" - the
+    literal broke the moment a second, real schema bump made "one
+    predecessor back" no longer mean zero."""
     return Migration(
-        from_version=0,
+        from_version=MEMORY_SCHEMA_VERSION - 1,
         to_version=MEMORY_SCHEMA_VERSION,
         apply=lambda raw: {**raw, "version": MEMORY_SCHEMA_VERSION},
     )
@@ -76,7 +85,7 @@ class TestApprovalGate:
         plan = UpgradePlan(
             status=UpgradeStatus.MIGRATION_REQUIRED,
             reason="x",
-            required_migrations=(RequiredMigration("memory", 0, MEMORY_SCHEMA_VERSION),),
+            required_migrations=(RequiredMigration("memory", MEMORY_SCHEMA_VERSION - 1, MEMORY_SCHEMA_VERSION),),
         )
         result = execute_upgrade(
             plan, approved=False, memory_dir=tmp_path / "memory", state_path=tmp_path / "s.json"
@@ -90,7 +99,7 @@ class TestApprovalGate:
         plan = UpgradePlan(
             status=UpgradeStatus.MIGRATION_REQUIRED,
             reason="x",
-            required_migrations=(RequiredMigration("memory", 0, MEMORY_SCHEMA_VERSION),),
+            required_migrations=(RequiredMigration("memory", MEMORY_SCHEMA_VERSION - 1, MEMORY_SCHEMA_VERSION),),
         )
         execute_upgrade(plan, approved=False, memory_dir=memory_dir, state_path=tmp_path / "s.json")
         assert not memory_dir.exists()
@@ -179,7 +188,7 @@ class TestRealMemoryMigration:
         memory_dir.mkdir()
         original = json.dumps(
             {
-                "version": 0,
+                "version": MEMORY_SCHEMA_VERSION - 1,
                 "records": [
                     {
                         "id": "r1",
@@ -197,19 +206,19 @@ class TestRealMemoryMigration:
         plan = UpgradePlan(
             status=UpgradeStatus.MIGRATION_REQUIRED,
             reason="x",
-            required_migrations=(RequiredMigration("memory", 0, MEMORY_SCHEMA_VERSION),),
+            required_migrations=(RequiredMigration("memory", MEMORY_SCHEMA_VERSION - 1, MEMORY_SCHEMA_VERSION),),
         )
         result = execute_upgrade(plan, approved=True, memory_dir=memory_dir, state_path=tmp_path / "s.json")
 
         assert result.success is True
-        assert result.migrations_attempted == (RequiredMigration("memory", 0, MEMORY_SCHEMA_VERSION),)
-        assert result.migrations_completed == (RequiredMigration("memory", 0, MEMORY_SCHEMA_VERSION),)
+        assert result.migrations_attempted == (RequiredMigration("memory", MEMORY_SCHEMA_VERSION - 1, MEMORY_SCHEMA_VERSION),)
+        assert result.migrations_completed == (RequiredMigration("memory", MEMORY_SCHEMA_VERSION - 1, MEMORY_SCHEMA_VERSION),)
         assert result.stores_affected == ("memory",)
 
         on_disk = json.loads((memory_dir / f"{MANAGER}.json").read_text(encoding="utf-8"))
         assert on_disk["version"] == MEMORY_SCHEMA_VERSION
 
-        checkpoint = memory_dir / f"{MANAGER}.v0-checkpoint"
+        checkpoint = memory_dir / f"{MANAGER}.v{MEMORY_SCHEMA_VERSION - 1}-checkpoint"
         assert checkpoint.exists(), "the pre-migration file must be preserved, not discarded"
         assert checkpoint.read_text(encoding="utf-8") == original
 
@@ -254,7 +263,7 @@ class TestMultiStorePlan:
         memory_dir = tmp_path / "memory"
         memory_dir.mkdir()
         (memory_dir / f"{MANAGER}.json").write_text(
-            json.dumps({"version": 0, "records": []}), encoding="utf-8"
+            json.dumps({"version": MEMORY_SCHEMA_VERSION - 1, "records": []}), encoding="utf-8"
         )
         state_path = tmp_path / "state" / "processed.json"
         state_path.parent.mkdir(parents=True)
@@ -264,7 +273,7 @@ class TestMultiStorePlan:
             status=UpgradeStatus.MIGRATION_REQUIRED,
             reason="x",
             required_migrations=(
-                RequiredMigration("memory", 0, MEMORY_SCHEMA_VERSION),
+                RequiredMigration("memory", MEMORY_SCHEMA_VERSION - 1, MEMORY_SCHEMA_VERSION),
                 RequiredMigration("state", 0, STATE_SCHEMA_VERSION),
             ),
         )
@@ -292,25 +301,25 @@ class TestIdempotency:
         plan = UpgradePlan(
             status=UpgradeStatus.MIGRATION_REQUIRED,
             reason="x",
-            required_migrations=(RequiredMigration("memory", 0, MEMORY_SCHEMA_VERSION),),
+            required_migrations=(RequiredMigration("memory", MEMORY_SCHEMA_VERSION - 1, MEMORY_SCHEMA_VERSION),),
         )
         result = execute_upgrade(plan, approved=True, memory_dir=memory_dir, state_path=tmp_path / "s.json")
 
         assert result.success is True
         assert result.stores_affected == ()
-        assert result.migrations_completed == (RequiredMigration("memory", 0, MEMORY_SCHEMA_VERSION),)
+        assert result.migrations_completed == (RequiredMigration("memory", MEMORY_SCHEMA_VERSION - 1, MEMORY_SCHEMA_VERSION),)
 
     def test_a_second_run_does_not_rewrite_the_file(self, tmp_path, monkeypatch):
         _register_memory_migration(monkeypatch, _memory_migration_0_to_current())
         memory_dir = tmp_path / "memory"
         memory_dir.mkdir()
         path = memory_dir / f"{MANAGER}.json"
-        path.write_text(json.dumps({"version": 0, "records": []}), encoding="utf-8")
+        path.write_text(json.dumps({"version": MEMORY_SCHEMA_VERSION - 1, "records": []}), encoding="utf-8")
 
         plan = UpgradePlan(
             status=UpgradeStatus.MIGRATION_REQUIRED,
             reason="x",
-            required_migrations=(RequiredMigration("memory", 0, MEMORY_SCHEMA_VERSION),),
+            required_migrations=(RequiredMigration("memory", MEMORY_SCHEMA_VERSION - 1, MEMORY_SCHEMA_VERSION),),
         )
         first = execute_upgrade(plan, approved=True, memory_dir=memory_dir, state_path=tmp_path / "s.json")
         assert first.stores_affected == ("memory",)
@@ -341,7 +350,7 @@ class TestFailsClosedOnUnexpectedOnDiskState:
         plan = UpgradePlan(
             status=UpgradeStatus.MIGRATION_REQUIRED,
             reason="x",
-            required_migrations=(RequiredMigration("memory", 0, MEMORY_SCHEMA_VERSION),),
+            required_migrations=(RequiredMigration("memory", MEMORY_SCHEMA_VERSION - 1, MEMORY_SCHEMA_VERSION),),
         )
         result = execute_upgrade(plan, approved=True, memory_dir=memory_dir, state_path=tmp_path / "s.json")
 
@@ -394,18 +403,19 @@ class TestFailureWhenTheStoresOwnMigrationCannotComplete:
             raise ValueError("boom")
 
         _register_memory_migration(
-            monkeypatch, Migration(from_version=0, to_version=MEMORY_SCHEMA_VERSION, apply=broken)
+            monkeypatch,
+            Migration(from_version=MEMORY_SCHEMA_VERSION - 1, to_version=MEMORY_SCHEMA_VERSION, apply=broken),
         )
         memory_dir = tmp_path / "memory"
         memory_dir.mkdir()
         (memory_dir / f"{MANAGER}.json").write_text(
-            json.dumps({"version": 0, "records": []}), encoding="utf-8"
+            json.dumps({"version": MEMORY_SCHEMA_VERSION - 1, "records": []}), encoding="utf-8"
         )
 
         plan = UpgradePlan(
             status=UpgradeStatus.MIGRATION_REQUIRED,
             reason="x",
-            required_migrations=(RequiredMigration("memory", 0, MEMORY_SCHEMA_VERSION),),
+            required_migrations=(RequiredMigration("memory", MEMORY_SCHEMA_VERSION - 1, MEMORY_SCHEMA_VERSION),),
         )
         result = execute_upgrade(plan, approved=True, memory_dir=memory_dir, state_path=tmp_path / "s.json")
 
@@ -469,12 +479,12 @@ class TestManagerIdentityAndProviderIndependence:
         # Written under MANAGER ("manager"), the stable key - not any
         # display name this codebase might show a user.
         (memory_dir / f"{MANAGER}.json").write_text(
-            json.dumps({"version": 0, "records": []}), encoding="utf-8"
+            json.dumps({"version": MEMORY_SCHEMA_VERSION - 1, "records": []}), encoding="utf-8"
         )
         plan = UpgradePlan(
             status=UpgradeStatus.MIGRATION_REQUIRED,
             reason="x",
-            required_migrations=(RequiredMigration("memory", 0, MEMORY_SCHEMA_VERSION),),
+            required_migrations=(RequiredMigration("memory", MEMORY_SCHEMA_VERSION - 1, MEMORY_SCHEMA_VERSION),),
         )
         result = execute_upgrade(plan, approved=True, memory_dir=memory_dir, state_path=tmp_path / "s.json")
         assert result.success is True
