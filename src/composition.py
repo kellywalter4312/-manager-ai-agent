@@ -542,6 +542,15 @@ def build_manager(
     specialist_tools: Mapping[str, ToolSet] | None = None,
     fetch_limit: int | None = None,
     extra_agents: Sequence[BaseAgent] = (),
+    # Control Center repair item #1 (2026-09-07): which handlers this
+    # Manager's own ManagerSkills may ever select. None (every existing
+    # caller - main.py, the heartbeat, every test that does not pass this)
+    # keeps ManagerSkills' own unchanged default, MANAGER_CAPABILITIES in
+    # full. scripts/control_center.py's own build() is the one real caller
+    # that passes a filtered dict, computed once from GovernedConfig - see
+    # its own comment for why enforcement belongs at this one composition
+    # site and nowhere inside a capability's own code.
+    capabilities: "Mapping[str, object] | None" = None,
 ) -> ManagerAgent:
     """Assemble one Manager, with the email specialist registered.
 
@@ -599,6 +608,9 @@ def build_manager(
         runtime.identity,
         roster=registry.all_agents,
         user=profile,
+        # None here means "use ManagerSkills' own default" (MANAGER_CAPABILITIES,
+        # unfiltered) - identical to never passing this parameter at all.
+        capabilities=capabilities,
         # A second per-run document about the same person. Passed here and
         # never held in Runtime: a schedule read once at startup would
         # leave every later heartbeat tick reasoning about a week the user

@@ -97,7 +97,18 @@ from src.services.credentials.account_store_file import (  # noqa: E402
 from src.services.ecosystem.registry_factory import build_ecosystem_registry  # noqa: E402
 from src.evolution import RiskLevel  # noqa: E402
 from src.services.evolution import ecosystem_evolution  # noqa: E402
-from src.services.evolution.governed_config import DEFAULT_CONFIG_PATH, load_governed_config  # noqa: E402
+from src.services.evolution.governed_config import (  # noqa: E402
+    DEFAULT_CONFIG_PATH,
+    GovernedConfig,
+    load_governed_config,
+    save_governed_config,
+)
+from src.manager.capabilities import (  # noqa: E402
+    MANAGER_CAPABILITIES,
+    OPEN_CONVERSATION,
+    ROSTER_REPORT,
+    available_capabilities,
+)
 from src.services.evolution.inventory import (  # noqa: E402
     CAPABILITY_GENERAL_CONVERSATION,
     CONNECTION_GMAIL_ADAPTER,
@@ -400,6 +411,16 @@ def build(settings: Settings):
             # never a Tool, since a Tool must never hold an LLMProvider
             # directly. Nothing to grant here.
         ]),
+        # Control Center repair item #1: the one real enforcement point for
+        # capability enable/disable. MANAGER_CAPABILITIES with every
+        # genuinely-disabled entry removed, computed from the identical
+        # `config` already loaded above for connection_adapter_version -
+        # never a second read. A disabled capability is absent from this
+        # dict, so select_capability() - given this dict by ManagerSkills,
+        # see manager_skills.py's own docstring on why this parameter is
+        # injectable - can never claim, score, or run it, for the life of
+        # this process.
+        capabilities=filtered_manager_capabilities(config),
     )
     # The door onto that Manager, built by the composition root rather than
     # here. This file used to reach the Manager directly and construct its own
@@ -594,6 +615,131 @@ def _require_backend(adapter, category: str, backend: str):
         listing = ", ".join(sorted(known)) or "(none registered)"
         return f"no such backend '{backend}' in category '{category}'. Known backends: {listing}"
     return None
+
+
+# ---------------------------------------------------------------------------
+# Control Center repair item #1 (2026-09-07): capability enable/disable.
+#
+# Reuses GovernedConfig verbatim - the identical real, persisted,
+# non-secret key/value store CapabilityConfigHandler/ToolConfigHandler
+# already write through for exactly this kind of "make a hardcoded
+# behaviour governable" gap, applied here to a capability's own
+# reachability rather than one of its tunable values. Deliberately NOT
+# routed through the Evolution proposal/ledger machinery
+# (ecosystem_evolution.propose/run): that machinery exists for
+# *versioned* component changes with a rollback story; enable/disable is
+# a direct, immediate, idempotent boolean toggle - the same shape
+# `provider <category> select` already is; see run_provider_command's
+# own docstring for that precedent.
+#
+# Enforcement happens once, at composition time - see
+# _filtered_manager_capabilities() and its one real call site in
+# build() below - never inside a capability's own code. This matches
+# governed_config.py's own explicit rule: "nothing here is read by a
+# capability directly - only ... the specific build() call sites this
+# checkpoint threads it through". A capability disabled here is not
+# merely hidden from a menu: select_capability() never sees it in the
+# registry it is given, so it can never be claimed, never be scored,
+# and never run, for the life of the process that was built with it
+# filtered out. Taking effect requires 'reload' or a restart - the
+# identical, already-established rule every other persisted
+# provider/connection change in this file already lives under.
+def _capability_enabled_key(name: str) -> str:
+    return f"capability.enabled.{name}"
+
+
+# Structural fallbacks select_capability() reaches as literal, imported
+# objects - never as a registry lookup - when nothing else claims or
+# scores a request (see select_capability's own "best is None" branch).
+# Filtering the registry dict cannot stop either of them from still
+# being reachable that way, so disabling one would be a lie about what
+# the system actually does - refused below rather than silently
+# accepted and silently ineffective.
+_UNDISABLEABLE_CAPABILITIES = frozenset({ROSTER_REPORT.name, OPEN_CONVERSATION.name})
+
+
+def disabled_capability_names(config: "GovernedConfig") -> frozenset[str]:
+    """Every capability name this installation has genuinely persisted
+    as disabled. Absent means enabled - the same "unconfigured means
+    the pre-existing default behaviour" rule every other GovernedConfig
+    key in this project already follows."""
+    disabled = set()
+    for name in available_capabilities():
+        if config.get(_capability_enabled_key(name)) == "false":
+            disabled.add(name)
+    return frozenset(disabled)
+
+
+def filtered_manager_capabilities(
+    config: "GovernedConfig",
+) -> "dict[str, object]":
+    """MANAGER_CAPABILITIES with every genuinely-disabled entry removed -
+    the one real enforcement point. Returns the identical registry
+    object's entries, never a re-derived or re-invented one, so a
+    capability's own behaviour when it does run is completely
+    unchanged - only whether it is ever reached is."""
+    disabled = disabled_capability_names(config)
+    return {name: cap for name, cap in MANAGER_CAPABILITIES.items() if name not in disabled}
+
+
+def run_capability_registry_command(centre: "ControlCenter", rest: str) -> str:
+    """'capabilities list' / 'capabilities enable <name>' / 'capabilities
+    disable <name>' - the registry-management counterpart to the
+    existing, unchanged 'capabilities' (bare) feature-matrix view above.
+    A distinct concern: render_capabilities() reports real runtime
+    *readiness* of a handful of user-facing features; this reports and
+    governs which of the Manager's ~24 registered *handlers*
+    (current_datetime, connected_action, ...) may ever be selected.
+    """
+    args = rest.split()
+    config = load_governed_config(DEFAULT_CONFIG_PATH)
+    disabled = disabled_capability_names(config)
+
+    if args[0] == "list":
+        lines = ["CAPABILITY REGISTRY (governs what select_capability() may ever reach)", ""]
+        for name in available_capabilities():
+            state = "disabled" if name in disabled else "enabled"
+            locked = " (cannot be disabled - a structural fallback)" if name in _UNDISABLEABLE_CAPABILITIES else ""
+            lines.append(f"  [{state:^8}] {name}{locked}")
+        lines.append("")
+        lines.append("enable/disable with: capabilities enable|disable <name>")
+        return "\n".join(lines)
+
+    if args[0] in ("enable", "disable"):
+        if len(args) < 2:
+            return f"usage: capabilities {args[0]} <name>"
+        name = args[1]
+        if name not in MANAGER_CAPABILITIES:
+            known = ", ".join(available_capabilities())
+            return f"no such capability '{name}'. Known: {known}"
+
+        if args[0] == "disable":
+            if name in _UNDISABLEABLE_CAPABILITIES:
+                return (
+                    f"'{name}' cannot be disabled - it is a structural fallback "
+                    "select_capability() reaches directly, not through the registry, "
+                    "so disabling it here could never actually take effect."
+                )
+            updated = config.with_value(_capability_enabled_key(name), "false")
+        else:
+            updated = config.without_value(_capability_enabled_key(name))
+
+        save_governed_config(updated, DEFAULT_CONFIG_PATH)
+        reloaded = load_governed_config(DEFAULT_CONFIG_PATH)
+        now_disabled = name in disabled_capability_names(reloaded)
+        if args[0] == "disable" and not now_disabled:
+            return f"FAILED: wrote the disabled state for '{name}', but the independent re-read did not confirm it"
+        if args[0] == "enable" and now_disabled:
+            return f"FAILED: wrote the enabled state for '{name}', but the independent re-read still reports it disabled"
+
+        verb_past = "disabled" if args[0] == "disable" else "enabled"
+        return (
+            f"'{name}' is now {verb_past} (independently re-read from disk). "
+            "Persisted only - not yet active on this running process. "
+            "Type 'reload' now to make it live in this session, or restart."
+        )
+
+    return f"unknown capabilities action '{args[0]}'. Try: list, enable, disable"
 
 
 def run_provider_command(centre: "ControlCenter", rest: str) -> str:
@@ -1498,7 +1644,9 @@ def run_command(
         return "\n".join(lines)
 
     if verb == "capabilities":
-        return render_capabilities(centre)
+        if not rest:
+            return render_capabilities(centre)
+        return run_capability_registry_command(centre, rest)
 
     if verb == "provider":
         return run_provider_command(centre, rest)

@@ -265,6 +265,9 @@
     border:1px solid var(--edge);border-radius:6px;padding:10px;background:rgba(255,255,255,.02)}
   .mgmt-note{margin-top:6px;font-size:9.5px;color:var(--ink-4);max-width:480px;
     margin-left:auto;margin-right:auto}
+  .mgmt-sub{margin-top:16px;padding-top:14px;border-top:1px solid var(--edge)}
+  .mgmt-row select{background:transparent;color:var(--ink);border:1px solid var(--edge);
+    border-radius:4px;padding:5px 6px;font:11px var(--mono)}
 
   .satellites{position:absolute;inset:0;pointer-events:none}
   /* A satellite is a <button>, and this rule never reset the user agent's
@@ -1211,7 +1214,49 @@
           <div class="mgmt-note">Reuses the same run_command() a terminal session already
             calls. A credential typed here is never echoed back
             (ProviderAccount.describe() never carries one). Not a conversation - use the
-            message box in Agents/Conversation Room for that.</div>
+            message box in Agents/Conversation Room for that. An administrative write
+            (adding/selecting/revoking an account, connecting a service, enabling/disabling
+            a capability, or approving/rolling back an evolution proposal) always asks you
+            to confirm what it is about to do before it happens.</div>
+
+          <div class="mgmt-sub">
+            <div class="lab">Capability registry</div>
+            <div class="mgmt-buttons">
+              <button type="button" class="mgmt-btn" data-cc-verb="capabilities list">view registry</button>
+            </div>
+            <div class="mgmt-row">
+              <input type="text" id="cc-cap-name" placeholder="capability name, e.g. small_talk"/>
+              <button type="button" id="cc-cap-enable">Enable</button>
+              <button type="button" id="cc-cap-disable">Disable</button>
+            </div>
+          </div>
+
+          <div class="mgmt-sub">
+            <div class="lab">Ecosystem &amp; evolution</div>
+            <div class="mgmt-buttons">
+              <button type="button" class="mgmt-btn" data-cc-verb="ecosystem">inventory</button>
+              <button type="button" class="mgmt-btn" data-cc-verb="ecosystem history">history</button>
+            </div>
+            <div class="mgmt-row">
+              <input type="text" id="cc-eco-component" placeholder="component id, e.g. provider.llm_provider"/>
+              <select id="cc-eco-action">
+                <option value="detail">detail</option>
+                <option value="propose">propose</option>
+                <option value="run">run (approve)</option>
+                <option value="reject">run (reject)</option>
+                <option value="rollback">rollback (approve)</option>
+              </select>
+            </div>
+            <div class="mgmt-row">
+              <input type="text" id="cc-eco-args"
+                placeholder="propose: version risk reason|benefit  -  run/rollback: proposal-id"/>
+              <button type="button" id="cc-eco-go">Go</button>
+            </div>
+            <div class="mgmt-note">Every operation here is the identical, already-governed
+              ecosystem_evolution module a terminal's own 'ecosystem' command already uses -
+              nothing new is possible from this panel that was not already possible from a
+              terminal.</div>
+          </div>
         </div>
       </div>
     </div>`;
@@ -4140,22 +4185,47 @@
     const runBtn = stage.querySelector("#cc-run");
     if(!out) return;
 
-    function runCommand(command){
+    // Control Center repair item #3 (2026-09-07): a write-classified
+    // command comes back as JSON asking for confirmation before it
+    // executes - see scripts/serve_ui.py's own route_command docstring.
+    // window.confirm() is the actual confirm/cancel step a person sees;
+    // the real governance boundary is server-side (a raw call with no
+    // token, or the wrong token, is refused there regardless of what
+    // this function does) - this only has to ask honestly and, on yes,
+    // send the exact token back.
+    function runCommand(command, confirmToken){
       out.textContent = "...";
+      const body = confirmToken ? {command, confirm_token: confirmToken} : {command};
       fetch("command", {
         method: "POST",
         headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({command}),
-      }).then(res => res.text().then(text => ({ok: res.ok, text})))
-        .then(result => {
-          if(result.ok){ out.textContent = result.text; return; }
+        body: JSON.stringify(body),
+      }).then(res => {
+        const contentType = res.headers.get("content-type") || "";
+        return res.text().then(text => ({
+          ok: res.ok, text, isJson: contentType.indexOf("application/json") !== -1,
+        }));
+      }).then(result => {
+        if(!result.ok){
           // A refused verb (e.g. "talk") comes back as JSON naming why -
           // shown plainly rather than as a raw, unexplained failure.
           try{
             out.textContent = "Refused: " + (JSON.parse(result.text).error || result.text);
           }catch(e){ out.textContent = "Refused: " + result.text; }
-        })
-        .catch(err => { out.textContent = "Request failed: " + err; });
+          return;
+        }
+        if(!result.isJson){ out.textContent = result.text; return; }
+        let payload;
+        try{ payload = JSON.parse(result.text); }
+        catch(e){ out.textContent = result.text; return; }
+        if(payload.requires_confirmation){
+          const proceed = confirm(payload.description + "\n\nProceed?");
+          if(proceed) runCommand(command, payload.confirm_token);
+          else out.textContent = "Cancelled - nothing changed.";
+          return;
+        }
+        out.textContent = payload.result;
+      }).catch(err => { out.textContent = "Request failed: " + err; });
     }
 
     stage.querySelectorAll("[data-cc-verb]").forEach(btn=>{
@@ -4165,6 +4235,50 @@
       runBtn.addEventListener("click", () => {
         const value = cmdInput.value.trim();
         if(value) runCommand(value);
+      });
+    }
+
+    // Control Center repair item #1: a real toggle, not a fake frontend
+    // switch - each click sends the identical "capabilities enable/
+    // disable <name>" command the generic box already supports, through
+    // the identical confirmation flow above.
+    const capName = stage.querySelector("#cc-cap-name");
+    const capEnable = stage.querySelector("#cc-cap-enable");
+    const capDisable = stage.querySelector("#cc-cap-disable");
+    if(capEnable && capName){
+      capEnable.addEventListener("click", () => {
+        const name = capName.value.trim();
+        if(name) runCommand("capabilities enable " + name);
+      });
+    }
+    if(capDisable && capName){
+      capDisable.addEventListener("click", () => {
+        const name = capName.value.trim();
+        if(name) runCommand("capabilities disable " + name);
+      });
+    }
+
+    // Control Center repair item #2: a guided form over the same real
+    // ecosystem_evolution operations - never a new one. Composes the
+    // identical command string a terminal's own "ecosystem" verb already
+    // accepts.
+    const ecoComponent = stage.querySelector("#cc-eco-component");
+    const ecoAction = stage.querySelector("#cc-eco-action");
+    const ecoArgs = stage.querySelector("#cc-eco-args");
+    const ecoGo = stage.querySelector("#cc-eco-go");
+    if(ecoGo && ecoComponent && ecoAction && ecoArgs){
+      ecoGo.addEventListener("click", () => {
+        const component = ecoComponent.value.trim();
+        const action = ecoAction.value;
+        const args = ecoArgs.value.trim();
+        if(!component){ out.textContent = "Enter a component id first (see 'inventory' above)."; return; }
+        let command = null;
+        if(action === "detail") command = "ecosystem " + component;
+        else if(action === "propose") command = "ecosystem " + component + " propose " + args;
+        else if(action === "run") command = "ecosystem " + component + " run " + args + " yes";
+        else if(action === "reject") command = "ecosystem " + component + " run " + args + " no";
+        else if(action === "rollback") command = "ecosystem " + component + " rollback " + args + " yes";
+        if(command) runCommand(command);
       });
     }
   }

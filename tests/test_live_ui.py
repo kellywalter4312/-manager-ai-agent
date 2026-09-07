@@ -211,6 +211,27 @@ class TestStatusAndActionsRoutes:
         assert "Alfred" in body.decode("utf-8")
 
 
+def confirm_and_run(command, system):
+    """Drive the full two-step confirmation flow (Control Center repair
+    item #3) for a write-classified command and return the final
+    (status, result_text) - the same shape every read-only /command call
+    already returns directly. Asserts the pending step actually happened
+    along the way, so a write silently reverting to "execute immediately"
+    would fail every caller of this helper, not just a dedicated test."""
+    status, body, content_type = route_command(command, None, system)
+    assert status == 200, body
+    assert content_type.startswith("application/json"), "a write must describe itself first, not execute"
+    payload = json.loads(body)
+    assert payload["requires_confirmation"] is True
+    token = payload["confirm_token"]
+
+    status2, body2, content_type2 = route_command(command, token, system)
+    assert content_type2.startswith("application/json")
+    payload2 = json.loads(body2)
+    assert payload2["requires_confirmation"] is False
+    return status2, payload2["result"]
+
+
 class TestCommandRoute:
     """Foundation Repair #5, part 2 (reconciliation audit, 2026-09-05):
     the administrative surface a terminal session already has -
@@ -223,7 +244,7 @@ class TestCommandRoute:
 
     def test_talk_is_refused_here_and_pointed_at_message(self):
         system = build_live_system(settings())
-        status, body, content_type = route_command("talk hello", system)
+        status, body, content_type = route_command("talk hello", None, system)
         assert status == 400
         assert content_type.startswith("application/json")
         payload = json.loads(body)
@@ -231,17 +252,17 @@ class TestCommandRoute:
 
     def test_free_text_is_refused_the_same_way(self):
         system = build_live_system(settings())
-        status, body, _ = route_command("what is the weather", system)
+        status, body, _ = route_command("what is the weather", None, system)
         assert status == 400
 
     def test_an_empty_command_is_rejected(self):
         system = build_live_system(settings())
-        status, _, _ = route_command("", system)
+        status, _, _ = route_command("", None, system)
         assert status == 400
 
     def test_a_non_string_command_is_rejected(self):
         system = build_live_system(settings())
-        status, _, _ = route_command(None, system)
+        status, _, _ = route_command(None, None, system)
         assert status == 400
 
     def test_every_advertised_management_verb_is_actually_dispatchable(self, tmp_path, monkeypatch):
@@ -251,72 +272,81 @@ class TestCommandRoute:
         TestCommandRouteProviderAccountManagement below: a bare `ecosystem`
         genuinely writes version-tracking state even to just list
         components (see run_ecosystem_command's own real behaviour), so
-        this must not run against the real installation's files either."""
+        this must not run against the real installation's files either.
+        None of these bare verbs is administrative-write-classified, so
+        every one still executes on the first call."""
         import scripts.control_center as control_center_module
 
         monkeypatch.setattr(control_center_module, "DEFAULT_ACCOUNTS_PATH", tmp_path / "accounts.json")
         monkeypatch.setattr(control_center_module, "DEFAULT_LEDGER_PATH", tmp_path / "ledger.json")
         system = build_live_system(settings())
         for verb in MANAGEMENT_VERBS:
-            status, body, _ = route_command(verb, system)
+            status, body, _ = route_command(verb, None, system)
             assert status == 200, (verb, body)
 
     def test_status_matches_the_terminal_rendering(self):
         system = build_live_system(settings())
-        status, body, content_type = route_command("status", system)
+        status, body, content_type = route_command("status", None, system)
         assert status == 200
         assert content_type.startswith("text/plain")
         assert "AGENT CONTROL CENTER" in body.decode("utf-8")
 
     def test_capabilities_reflects_the_real_registry(self):
         system = build_live_system(settings())
-        _, body, _ = route_command("capabilities", system)
+        _, body, _ = route_command("capabilities", None, system)
         text = body.decode("utf-8")
         assert "current_datetime" in text or "capabilit" in text.lower()
 
     def test_provider_with_no_args_lists_the_real_ecosystem(self):
         system = build_live_system(settings())
-        _, body, _ = route_command("provider", system)
+        _, body, _ = route_command("provider", None, system)
         assert "llm_provider" in body.decode("utf-8")
 
     def test_connections_reflects_the_real_gmail_boundary(self):
         system = build_live_system(settings())
-        status, body, _ = route_command("connections", system)
+        status, body, _ = route_command("connections", None, system)
         assert status == 200
         assert "gmail" in body.decode("utf-8").lower()
 
     def test_connections_management_actually_connects_a_real_service(self, tmp_path, monkeypatch):
         """The write half of connection management: additive, and
         persisted through the same CredentialStore provider accounts
-        already use - proven by reading it back."""
+        already use - proven by reading it back. Now gated by
+        confirmation (repair item #3): the connect itself only takes
+        effect after the second, token-bearing call."""
         import scripts.control_center as control_center_module
 
         monkeypatch.setattr(control_center_module, "DEFAULT_ACCOUNTS_PATH", tmp_path / "accounts.json")
         system = build_live_system(settings())
 
-        status, body, _ = route_command("connections whatsapp connect acc-1 token-value", system)
+        status, result = confirm_and_run("connections whatsapp connect acc-1 token-value", system)
         assert status == 200
-        assert "token-value" not in body.decode("utf-8")
+        assert "token-value" not in result
 
-        _, listing, _ = route_command("connections", system)
+        _, listing, _ = route_command("connections", None, system)
         assert "whatsapp: connected" in listing.decode("utf-8")
 
     def test_voice_reports_the_real_speech_configuration(self):
         system = build_live_system(settings())
-        status, body, _ = route_command("voice", system)
+        status, body, _ = route_command("voice", None, system)
         assert status == 200
 
     def test_voice_management_actually_sets_a_real_preference(self):
         """The write half of voice management, not just visibility: the
         same governed preference `avatar <agent> <id>` already uses,
         applied to voice - proven by reading it back through a second,
-        independent /command call."""
+        independent /command call. Voice preference-setting is
+        deliberately NOT confirmation-gated (see classify_administrative_write's
+        own docstring: cosmetic preferences, not the credential/provider/
+        capability/evolution surface repair item #3 is about) - proven
+        here by still executing immediately, unchanged."""
         system = build_live_system(settings())
-        set_status, set_body, _ = route_command("voice Arthur a-real-voice-name", system)
+        set_status, set_body, set_content_type = route_command("voice Arthur a-real-voice-name", None, system)
         assert set_status == 200
+        assert set_content_type.startswith("text/plain")
         assert "FAILED" not in set_body.decode("utf-8")
 
-        _, read_body, _ = route_command("voice Arthur", system)
+        _, read_body, _ = route_command("voice Arthur", None, system)
         assert "a-real-voice-name" in read_body.decode("utf-8")
 
 
@@ -325,7 +355,8 @@ class TestCommandRouteProviderAccountManagement:
     account through /command - the exact CredentialStore file a terminal
     session's own `provider` command reads and writes, isolated to
     tmp_path exactly the way test_independent_manageability.py's own
-    provider-management tests already isolate it."""
+    provider-management tests already isolate it. Every write below now
+    goes through the full two-step confirmation flow (repair item #3)."""
 
     def _isolated(self, tmp_path, monkeypatch):
         import scripts.control_center as control_center_module
@@ -336,55 +367,59 @@ class TestCommandRouteProviderAccountManagement:
         self._isolated(tmp_path, monkeypatch)
         system = build_live_system(settings())
 
-        status, body, _ = route_command(
+        status, result = confirm_and_run(
             "provider llm_provider add anthropic my-account super-secret-key-value", system
         )
         assert status == 200
 
-        _, listing, _ = route_command("provider llm_provider accounts", system)
+        _, listing, _ = route_command("provider llm_provider accounts", None, system)
         assert "anthropic/my-account" in listing.decode("utf-8")
 
     def test_the_secret_never_appears_in_the_http_response(self, tmp_path, monkeypatch):
         """The decisive check: a real, sensitive-looking credential value
-        must never come back in any response body this route produces."""
+        must never come back in any response body this route produces -
+        across every step of the confirm flow, not just the final one."""
         self._isolated(tmp_path, monkeypatch)
         system = build_live_system(settings())
         secret = "sk-live-do-not-leak-this-9f8e7d6c"
+        command = f"provider llm_provider add anthropic my-account {secret}"
 
-        status, add_body, _ = route_command(
-            f"provider llm_provider add anthropic my-account {secret}", system
-        )
-        assert secret not in add_body.decode("utf-8")
+        pending_status, pending_body, _ = route_command(command, None, system)
+        assert secret not in pending_body.decode("utf-8")
+        token = json.loads(pending_body)["confirm_token"]
 
-        _, listing, _ = route_command("provider llm_provider accounts", system)
+        _, executed_body, _ = route_command(command, token, system)
+        assert secret not in executed_body.decode("utf-8")
+
+        _, listing, _ = route_command("provider llm_provider accounts", None, system)
         assert secret not in listing.decode("utf-8")
 
-        _, detail, _ = route_command("provider llm_provider", system)
+        _, detail, _ = route_command("provider llm_provider", None, system)
         assert secret not in detail.decode("utf-8")
 
     def test_selecting_a_different_account_actually_changes_the_active_one(self, tmp_path, monkeypatch):
         self._isolated(tmp_path, monkeypatch)
         system = build_live_system(settings())
-        route_command("provider llm_provider add anthropic acc-a key-a", system)
-        route_command("provider llm_provider add anthropic acc-b key-b", system)
+        confirm_and_run("provider llm_provider add anthropic acc-a key-a", system)
+        confirm_and_run("provider llm_provider add anthropic acc-b key-b", system)
 
-        route_command("provider llm_provider select anthropic acc-a", system)
-        _, listing, _ = route_command("provider llm_provider accounts", system)
+        confirm_and_run("provider llm_provider select anthropic acc-a", system)
+        _, listing, _ = route_command("provider llm_provider accounts", None, system)
         assert "[*] anthropic/acc-a" in listing.decode("utf-8")
 
-        route_command("provider llm_provider select anthropic acc-b", system)
-        _, listing2, _ = route_command("provider llm_provider accounts", system)
+        confirm_and_run("provider llm_provider select anthropic acc-b", system)
+        _, listing2, _ = route_command("provider llm_provider accounts", None, system)
         assert "[*] anthropic/acc-b" in listing2.decode("utf-8")
 
     def test_revoking_an_account_actually_removes_it(self, tmp_path, monkeypatch):
         self._isolated(tmp_path, monkeypatch)
         system = build_live_system(settings())
-        route_command("provider llm_provider add anthropic temp-acc temp-key", system)
-        _, before, _ = route_command("provider llm_provider accounts", system)
+        confirm_and_run("provider llm_provider add anthropic temp-acc temp-key", system)
+        _, before, _ = route_command("provider llm_provider accounts", None, system)
         assert "temp-acc" in before.decode("utf-8")
 
-        route_command("provider llm_provider revoke anthropic temp-acc", system)
-        _, after, _ = route_command("provider llm_provider accounts", system)
+        confirm_and_run("provider llm_provider revoke anthropic temp-acc", system)
+        _, after, _ = route_command("provider llm_provider accounts", None, system)
         assert "temp-acc" not in after.decode("utf-8")
 
     def test_this_route_never_touches_the_real_production_accounts_file(self, tmp_path, monkeypatch):
@@ -396,10 +431,135 @@ class TestCommandRouteProviderAccountManagement:
 
         self._isolated(tmp_path, monkeypatch)
         system = build_live_system(settings())
-        route_command("provider llm_provider add anthropic temp-acc temp-key", system)
+        confirm_and_run("provider llm_provider add anthropic temp-acc temp-key", system)
 
         after = real_path.read_bytes() if real_path.exists() else None
         assert before == after
+
+
+class TestAdministrativeConfirmation:
+    """Control Center repair item #3 (2026-09-07): a write-classified
+    command must never execute on its first call, must require the exact
+    token issued for that exact command, must genuinely change nothing
+    when never confirmed, and must be enforced here - server-side - not
+    only by a UI that could be skipped with a raw request."""
+
+    def _isolated(self, tmp_path, monkeypatch):
+        import scripts.control_center as control_center_module
+
+        monkeypatch.setattr(control_center_module, "DEFAULT_ACCOUNTS_PATH", tmp_path / "accounts.json")
+
+    def test_the_first_call_never_executes(self, tmp_path, monkeypatch):
+        self._isolated(tmp_path, monkeypatch)
+        system = build_live_system(settings())
+
+        route_command("provider llm_provider add anthropic never-should-exist secret", None, system)
+
+        _, listing, _ = route_command("provider llm_provider accounts", None, system)
+        assert "never-should-exist" not in listing.decode("utf-8")
+
+    def test_the_description_names_what_would_happen(self, tmp_path, monkeypatch):
+        self._isolated(tmp_path, monkeypatch)
+        system = build_live_system(settings())
+
+        _, body, _ = route_command("provider llm_provider select anthropic acc-a", None, system)
+        payload = json.loads(body)
+        assert "anthropic/acc-a" in payload["description"]
+        assert "llm_provider" in payload["description"]
+
+    def test_an_invalid_token_is_refused_not_executed(self, tmp_path, monkeypatch):
+        """The exact scenario item #3 names explicitly: the governance
+        boundary must hold even against a direct call that never went
+        through any confirm dialog at all."""
+        self._isolated(tmp_path, monkeypatch)
+        system = build_live_system(settings())
+
+        status, body, content_type = route_command(
+            "provider llm_provider add anthropic never-should-exist secret",
+            "not-a-real-token",
+            system,
+        )
+        assert status == 200
+        payload = json.loads(body)
+        assert payload["requires_confirmation"] is True  # refused execution, asked again
+
+        _, listing, _ = route_command("provider llm_provider accounts", None, system)
+        assert "never-should-exist" not in listing.decode("utf-8")
+
+    def test_a_token_issued_for_a_different_command_does_not_work(self, tmp_path, monkeypatch):
+        self._isolated(tmp_path, monkeypatch)
+        system = build_live_system(settings())
+
+        _, body_a, _ = route_command("provider llm_provider add anthropic acc-a key-a", None, system)
+        token_for_a = json.loads(body_a)["confirm_token"]
+
+        # The token from adding acc-a must not authorise adding acc-b.
+        status, body_b, _ = route_command(
+            "provider llm_provider add anthropic acc-b key-b", token_for_a, system
+        )
+        payload_b = json.loads(body_b)
+        assert payload_b["requires_confirmation"] is True
+
+        _, listing, _ = route_command("provider llm_provider accounts", None, system)
+        assert "acc-b" not in listing.decode("utf-8")
+
+    def test_a_token_can_only_be_used_once(self, tmp_path, monkeypatch):
+        self._isolated(tmp_path, monkeypatch)
+        system = build_live_system(settings())
+        command = "provider llm_provider add anthropic once-only key"
+
+        _, body, _ = route_command(command, None, system)
+        token = json.loads(body)["confirm_token"]
+
+        first = route_command(command, token, system)
+        assert json.loads(first[1])["requires_confirmation"] is False
+
+        # Reusing the same token for the identical command must be
+        # refused, not silently re-executed (which would double-add).
+        second_status, second_body, _ = route_command(command, token, system)
+        second_payload = json.loads(second_body)
+        assert second_payload["requires_confirmation"] is True
+
+    def test_never_confirming_leaves_the_system_provably_unchanged(self, tmp_path, monkeypatch):
+        """Cancellation, in this stateless protocol, is simply never
+        sending the second call - proven here by taking every other
+        action available and confirming the declined write still never
+        happened."""
+        self._isolated(tmp_path, monkeypatch)
+        system = build_live_system(settings())
+
+        route_command("provider llm_provider add anthropic abandoned secret", None, system)
+        route_command("status", None, system)
+        route_command("capabilities", None, system)
+
+        _, listing, _ = route_command("provider llm_provider accounts", None, system)
+        assert "abandoned" not in listing.decode("utf-8")
+
+    def test_capability_disable_is_also_confirmation_gated(self, tmp_path, monkeypatch):
+        """Proves repair items #1 and #3 compose: capability enable/
+        disable is one of the administrative writes item #3 names."""
+        import scripts.control_center as control_center_module
+
+        monkeypatch.setattr(control_center_module, "DEFAULT_CONFIG_PATH", tmp_path / "config.json")
+        system = build_live_system(settings())
+
+        route_command("capabilities disable current_datetime", None, system)
+        _, listing, _ = route_command("capabilities list", None, system)
+        assert "[disabled" not in listing.decode("utf-8")  # never executed - no token supplied
+
+        status, result = confirm_and_run("capabilities disable current_datetime", system)
+        assert "now disabled" in result
+        _, listing2, _ = route_command("capabilities list", None, system)
+        assert "[disabled" in listing2.decode("utf-8")
+
+    def test_read_only_verbs_are_never_confirmation_gated(self):
+        """The scope boundary stated once, proven here: nothing about
+        this repair item slows down or blocks an ordinary read."""
+        system = build_live_system(settings())
+        for command in ("status", "capabilities", "provider", "connections", "voice", "actions"):
+            status, body, content_type = route_command(command, None, system)
+            assert status == 200
+            assert content_type.startswith("text/plain")
 
 
 # ---------------------------------------------------------------------------

@@ -87,8 +87,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import secrets
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -546,7 +548,105 @@ MANAGEMENT_VERBS = frozenset(
 COMMAND_COLUMNS = 100
 
 
-def route_command(command: object, system: LiveSystem) -> tuple[int, bytes, str]:
+# ---------------------------------------------------------------------------
+# Control Center repair item #3 (2026-09-07): confirmation for
+# administrative writes.
+#
+# Not the conversational PendingConfirmation/ActivitySessions machinery
+# (src/manager/guided_interaction.py) - that mechanism is tied to a
+# multi-turn Conversation and a Brain's own yes/no judgment, built for a
+# fundamentally different shape of interaction (a person talking, across
+# turns) than a stateless administrative POST. This is the same
+# *principle* - nothing consequential happens without an explicit second,
+# confirming step - applied to the shape /command actually has: describe,
+# then require an exact, single-use, short-lived token back before
+# executing. Enforced here, server-side, so a direct API call (curl,
+# a script) cannot skip it by simply omitting a UI dialog - the dialog is
+# not the governance boundary, this is.
+#
+# Scope, stated once: only the administrative-write examples the repair
+# report actually named - provider add/select/revoke, connections
+# connect/disconnect, capabilities enable/disable, and ecosystem's own
+# approving run/rollback. Read-only verbs, and the pre-existing
+# avatar/environment/profile/voice preference-setting verbs, are
+# unaffected - those are cosmetic preferences, not the credential/
+# provider/capability/evolution surface this item is about.
+_PENDING_CONFIRMATIONS: "dict[str, tuple[str, float]]" = {}
+_CONFIRMATION_TTL_SECONDS = 120
+
+
+def _sweep_expired_confirmations(now: float) -> None:
+    expired = [token for token, (_, expires_at) in _PENDING_CONFIRMATIONS.items() if now > expires_at]
+    for token in expired:
+        _PENDING_CONFIRMATIONS.pop(token, None)
+
+
+def _issue_confirmation_token(command: str) -> str:
+    now = time.monotonic()
+    _sweep_expired_confirmations(now)
+    token = secrets.token_urlsafe(16)
+    _PENDING_CONFIRMATIONS[token] = (command, now + _CONFIRMATION_TTL_SECONDS)
+    return token
+
+
+def _consume_confirmation_token(token: object, command: str) -> bool:
+    """True only if `token` is real, unexpired, single-use, and was
+    issued for this *exact* command string - never a token from a
+    different write, and never usable twice."""
+    if not isinstance(token, str) or not token:
+        return False
+    entry = _PENDING_CONFIRMATIONS.pop(token, None)
+    if entry is None:
+        return False
+    pending_command, expires_at = entry
+    return time.monotonic() <= expires_at and pending_command == command
+
+
+def classify_administrative_write(command: str) -> "tuple[bool, str]":
+    """Whether `command` is one of the administrative writes this repair
+    item gates, and - when it is - a plain-language description of what
+    it would do, shown to the person before they confirm. Returns
+    ``(False, "")`` for everything else, including every read-only verb.
+    """
+    parts = command.split()
+    if not parts:
+        return False, ""
+    verb = parts[0].lower()
+
+    if verb == "capabilities" and len(parts) >= 3 and parts[1].lower() in ("enable", "disable"):
+        return True, f"{parts[1].lower()} the '{parts[2]}' capability"
+
+    if verb == "provider" and len(parts) >= 3 and parts[2].lower() in ("add", "select", "revoke"):
+        category, action = parts[1], parts[2].lower()
+        if action == "add" and len(parts) >= 5:
+            return True, (
+                f"add a new '{parts[3]}' account '{parts[4]}' to '{category}' "
+                "(the credential itself is never shown here)"
+            )
+        if action == "select" and len(parts) >= 5:
+            return True, f"make '{parts[3]}/{parts[4]}' the active account for '{category}'"
+        if action == "revoke" and len(parts) >= 5:
+            return True, f"revoke the account '{parts[3]}/{parts[4]}' from '{category}'"
+        return True, f"{action} an account for '{category}'"
+
+    if verb == "connections" and len(parts) >= 3 and parts[2].lower() in ("connect", "disconnect"):
+        return True, f"{parts[2].lower()} the '{parts[1]}' connection"
+
+    if (
+        verb == "ecosystem" and len(parts) >= 5
+        and parts[2].lower() in ("run", "rollback")
+        and parts[4].lower() in ("yes", "y", "true")
+    ):
+        component_id, sub_action, proposal_id = parts[1], parts[2].lower(), parts[3]
+        verb_word = "apply" if sub_action == "run" else "roll back"
+        return True, f"{verb_word} proposal '{proposal_id}' for component '{component_id}'"
+
+    return False, ""
+
+
+def route_command(
+    command: object, confirm_token: object, system: LiveSystem
+) -> tuple[int, bytes, str]:
     """Decide what to answer for `POST /command` - administrative Control
     Center commands, reachable over this project's second door.
 
@@ -564,6 +664,13 @@ def route_command(command: object, system: LiveSystem) -> tuple[int, bytes, str]
     Restricted to `MANAGEMENT_VERBS`: "talk" and free text are refused here
     with a clear pointer to `/message`, so this never becomes a second way
     to hold a conversation.
+
+    Administrative writes (see `classify_administrative_write`) never
+    execute on this call - the first call always returns a description and
+    a fresh token; only a second call carrying that exact token, for that
+    exact command, executes. Everything else (every read-only view, and
+    every pre-existing preference-setting verb) executes immediately,
+    exactly as before this item existed.
     """
     if not isinstance(command, str) or not command.strip():
         return (
@@ -572,7 +679,8 @@ def route_command(command: object, system: LiveSystem) -> tuple[int, bytes, str]
             "application/json; charset=utf-8",
         )
 
-    verb = command.strip().split(None, 1)[0].lower()
+    normalised = command.strip()
+    verb = normalised.split(None, 1)[0].lower()
     if verb not in MANAGEMENT_VERBS:
         return (
             400,
@@ -589,8 +697,28 @@ def route_command(command: object, system: LiveSystem) -> tuple[int, bytes, str]
         )
 
     with system.lock:
-        result = run_command(
-            system.centre, command.strip(), COMMAND_COLUMNS, system.channel, system.conversation
+        requires_confirmation, description = classify_administrative_write(normalised)
+        if requires_confirmation and not _consume_confirmation_token(confirm_token, normalised):
+            token = _issue_confirmation_token(normalised)
+            return (
+                200,
+                json.dumps(
+                    {
+                        "requires_confirmation": True,
+                        "description": description,
+                        "confirm_token": token,
+                    }
+                ).encode("utf-8"),
+                "application/json; charset=utf-8",
+            )
+
+        result = run_command(system.centre, normalised, COMMAND_COLUMNS, system.channel, system.conversation)
+
+    if requires_confirmation:
+        return (
+            200,
+            json.dumps({"requires_confirmation": False, "result": result}).encode("utf-8"),
+            "application/json; charset=utf-8",
         )
     return 200, result.encode("utf-8"), "text/plain; charset=utf-8"
 
@@ -642,7 +770,8 @@ class SnapshotHandler(BaseHTTPRequestHandler):
             status, body, content_type = route_environment(agent, environment_id, self.server.system)
         elif self.path == "/command":
             command = payload.get("command") if isinstance(payload, dict) else None
-            status, body, content_type = route_command(command, self.server.system)
+            confirm_token = payload.get("confirm_token") if isinstance(payload, dict) else None
+            status, body, content_type = route_command(command, confirm_token, self.server.system)
         else:
             agent = payload.get("agent") if isinstance(payload, dict) else None
             fields = payload.get("fields") if isinstance(payload, dict) else None
