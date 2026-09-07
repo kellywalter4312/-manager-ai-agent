@@ -85,6 +85,20 @@ class MemoryCategory(str, Enum):
     # admitting one here would be the dump-under-a-plausible-category
     # case MAX_CONTENT_CHARS already refuses.
     LEARNING = "learning"
+    # Phase 5.1: an outstanding, actionable item with real state (pending
+    # -> complete), distinct from every category above it. Passes the
+    # same admission test the others do - a pending task plainly changes
+    # what the Manager should do next time (surface it, not re-suggest
+    # it, know what is still outstanding). Not "task" (EXCLUDED_KINDS
+    # already reserves that literal string for the internal Task/
+    # TaskResult execution-bookkeeping concept below - "every routine
+    # execution is history, not knowledge" - a different thing entirely
+    # from a user-requested to-do item), and not USER_CONTEXT: a task is
+    # something to *do*, not a stable fact about who the person *is* -
+    # collapsing them would make "forget that task" indistinguishable
+    # from "forget who I am", the identical reasoning RECORDING/MILESTONE
+    # were kept out of USER_CONTEXT for above.
+    TASK = "user_task"
 
     @property
     def label(self) -> str:
@@ -96,6 +110,7 @@ class MemoryCategory(str, Enum):
             "recording": "RECORDED FOR LATER",
             "milestone": "MILESTONE",
             "learning": "LEARNING CONTEXT",
+            "user_task": "TASK",
         }[self.value]
 
     @property
@@ -132,6 +147,11 @@ class MemoryCategory(str, Enum):
                 "What the person is currently studying, reading or preparing "
                 "for, so an explanation can be pitched at the work they are "
                 "actually doing - never the study material itself."
+            ),
+            "user_task": (
+                "An outstanding, actionable item the person asked to be "
+                "tracked - pending or complete - never a stable fact about "
+                "who they are."
             ),
         }[self.value]
 

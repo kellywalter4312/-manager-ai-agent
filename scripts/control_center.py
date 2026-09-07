@@ -115,6 +115,8 @@ from src.manager.capabilities import (  # noqa: E402
     ROSTER_REPORT,
     available_capabilities,
 )
+from src.manager.memory_policy import MemoryCategory  # noqa: E402
+from src.services.memory.tasks import describe_task  # noqa: E402
 from src.services.evolution.inventory import (  # noqa: E402
     CAPABILITY_GENERAL_CONVERSATION,
     CONNECTION_GMAIL_ADAPTER,
@@ -1514,6 +1516,43 @@ def run_command(
         # saying the correct date to Alfred (the "talk" command above),
         # never from this screen.
         return render_unresolved_facts(centre.unresolved_facts(), columns)
+
+    if verb == "tasks":
+        # Phase 5.1: read-only state visibility, the same "genuine
+        # management surface, never a fake parallel one" standard every
+        # other Control Center view already holds to - and deliberately
+        # read-only. The real create/complete/update surface is
+        # conversational (src/manager/capabilities.py's own
+        # create_task/list_tasks/complete_task/update_task, reached
+        # through 'talk'), because a task is ordinary personal data a
+        # person names in passing, not administrative configuration -
+        # building a second, form-based way to type the same sentence
+        # would be exactly the parallel task app this phase's own brief
+        # forbids. See src/services/memory/tasks.py's own describe_task
+        # for the identical rendering a conversational answer already
+        # uses, so the two surfaces never show a task two different ways.
+        agent_name, _, qualifier = rest.partition(" ")
+        agent_name = agent_name.strip() or centre.manager.own_skills.name
+        include_complete = qualifier.strip().lower() == "all"
+
+        view = centre.overview().agent(agent_name)
+        if view is None:
+            known = ", ".join(a.name for a in centre.overview().agents)
+            return f"no agent called '{agent_name}'. Registered: {known}"
+
+        memory = memory_for(centre.manager, view.name)
+        if memory is None:
+            return f"'{view.name}' has no memory to hold tasks in"
+
+        tags = set() if include_complete else {"task:pending"}
+        records = memory.recall(kind=MemoryCategory.TASK.value, tags=tags, limit=100)
+        if not records:
+            return f"{view.name} has no {'tasks' if include_complete else 'pending tasks'}."
+        lines = [f"TASKS - {view.name}"]
+        lines.extend(f"  {describe_task(record)}" for record in records)
+        if not include_complete:
+            lines.append(f"  (type 'tasks {view.name} all' to include completed tasks)")
+        return "\n".join(lines)
 
     if verb == "avatar":
         # Stage 17: a governed preference, read and changed here through

@@ -199,12 +199,17 @@ class TestHandlersAreSelectedThroughTheRegistry:
             # loosened: an exact list is the whole point of the test.
             "about_self",
             "communication",
+            # Phase 5.1 (Tasks): an outstanding, actionable item with real
+            # state - four handlers, one per operation, each recognised by
+            # its own marker shape rather than the ordinary word "task".
+            "complete_task",
             "connected_action",
             # Phase 2 (Memory & Personal Context): replaces or invalidates
             # an existing memory when the user explicitly corrects it -
             # "that's wrong, ...", "correction: ...", "update what you
             # remembered about X to Y" - never inferred from similarity.
             "correct_memory",
+            "create_task",
             "current_datetime",
             "forget",
             "general_assistance",
@@ -225,6 +230,7 @@ class TestHandlersAreSelectedThroughTheRegistry:
             # exist to keep.
             "knowledge",
             "learning_context",
+            "list_tasks",
             "live_information",
             "media_production",
             "milestone_recognition",
@@ -236,6 +242,7 @@ class TestHandlersAreSelectedThroughTheRegistry:
             "roster_report",
             "small_talk",
             "temporal_derivation",
+            "update_task",
         ]
 
     def test_selection_scores_words_against_handlers(self):

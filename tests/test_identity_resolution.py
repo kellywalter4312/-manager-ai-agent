@@ -277,19 +277,24 @@ class TestThisIsNotASecondRouter:
         ("create a report from these findings") by its own marker shape
         rather than the ordinary word "report" ("she reported the
         issue"), and a genuine ask to look at a real image by its own
-        marker shape, Phase 3 - and every other request is still
-        settled by word overlap."""
+        marker shape, Phase 3; and recognising an explicit task
+        create/list/complete/update request ("remind me to X", "what
+        are my tasks", "mark the task X as done", "change the task X to
+        Y") by its own marker shape rather than the ordinary word "task"
+        ("that was quite a task"), Phase 5.1 - and every other request
+        is still settled by word overlap."""
         from src.manager.capabilities import MANAGER_CAPABILITIES
 
         claiming = sorted(c.name for c in MANAGER_CAPABILITIES.values() if c.claims)
         assert claiming == [
             "about_self",
-            "communication", "connected_action", "correct_memory", "current_datetime", "forget",
+            "communication", "complete_task", "connected_action", "correct_memory",
+            "create_task", "current_datetime", "forget",
             "general_assistance", "generate_document", "image_analysis",
-            "knowledge", "learning_context", "live_information",
+            "knowledge", "learning_context", "list_tasks", "live_information",
             "media_production",
             "milestone_recognition", "participant_invitation", "personal_recurring_events",
-            "recall_memory", "record_this", "small_talk", "temporal_derivation",
+            "recall_memory", "record_this", "small_talk", "temporal_derivation", "update_task",
         ]
 
 

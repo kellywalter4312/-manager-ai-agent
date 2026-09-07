@@ -50,7 +50,7 @@ question; it does not get to orchestrate.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as dataclass_replace
 from datetime import date
 from typing import Any, Callable, Mapping, Sequence
 
@@ -108,6 +108,18 @@ from src.services.memory.milestones import (
 )
 from src.services.memory.day import Calendar
 from src.services.memory.policy import PolicyVerdict
+from src.services.memory.tasks import (
+    build_task_record,
+    complete_task_intent,
+    create_task_intent,
+    describe_task,
+    extract_completion_topic,
+    extract_task_query,
+    extract_task_update,
+    list_tasks_intent,
+    match_tasks_by_topic,
+    update_task_intent,
+)
 from src.services.memory.temporal_facts import (
     compute_age,
     days_between,
@@ -2189,6 +2201,267 @@ RECORD_THIS = ManagerCapability(
 
 
 # ---------------------------------------------------------------------------
+# Phase 5.1: Tasks - an outstanding, actionable item with real state,
+# reached exactly the way forget/recall_memory/record_this already are:
+# a claims= marker predicate, scoreable=False, the governed
+# request.retain/recall/forget triple. See src/services/memory/tasks.py's
+# own docstring for why a task is neither a recording nor a durable fact,
+# and for the deliberately minimal (title + status only) shape.
+#
+# Four operations, four handlers - never one handler branching on a
+# guessed verb, the same "one capability per kind of work" discipline
+# every other handler in this file already follows.
+# ---------------------------------------------------------------------------
+
+
+def create_task(request: CapabilityRequest) -> TaskResult:
+    """Add a new pending task through the governed write path - the
+    identical gate every other durable Manager write already crosses.
+    """
+    if request.retain is None:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "I don't have a way to track tasks right now.",
+        )
+
+    record = build_task_record(request.task.description, agent_name=request.own_name)
+    if record is None:
+        return TaskResult.failure(
+            request.task, request.own_name, "Add a task to do what, exactly?"
+        )
+
+    verdict = request.retain(record)
+    if not verdict.allowed:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            f"I couldn't add that task: {verdict.reason}",
+        )
+
+    return TaskResult.success(
+        request.task, request.own_name,
+        f"Added: {record.content}",
+        payload={"handled_by": "create_task", "task_id": record.id},
+    )
+
+
+CREATE_TASK = ManagerCapability(
+    name="create_task",
+    # claims decides this, not word overlap - "task" alone would collide
+    # with ordinary speech ("that was quite a task") the same way
+    # "record" already does for RECORD_THIS above.
+    capabilities=frozenset({"task", "tasks"}),
+    handle=create_task,
+    description="Adds a new pending task ('add a task ...', 'remind me to ...').",
+    claims=lambda task, participants=(): create_task_intent(task.description),
+    scoreable=False,
+)
+
+
+def list_tasks(request: CapabilityRequest) -> TaskResult:
+    """List pending tasks, or answer whether a specific one exists - the
+    identical "bare view vs. named argument" shape
+    scripts/control_center.py's own connections/provider commands
+    already use, one level down at the capability layer.
+    """
+    if request.recall is None:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "I don't have a way to check tasks right now.",
+        )
+
+    topic = extract_task_query(request.task.description)
+    if topic:
+        pool = request.recall(kind=MemoryCategory.TASK.value, limit=200)
+        matches = match_tasks_by_topic(pool, topic)
+        if not matches:
+            return TaskResult.success(
+                request.task, request.own_name,
+                f"I don't have a task matching '{topic}'.",
+                payload={"handled_by": "list_tasks", "count": 0},
+            )
+        return TaskResult.success(
+            request.task, request.own_name,
+            "\n".join(describe_task(record) for record in matches),
+            payload={"handled_by": "list_tasks", "count": len(matches)},
+        )
+
+    pending = request.recall(kind=MemoryCategory.TASK.value, tags={"task:pending"}, limit=50)
+    if not pending:
+        return TaskResult.success(
+            request.task, request.own_name, "You have no pending tasks.",
+            payload={"handled_by": "list_tasks", "count": 0},
+        )
+    return TaskResult.success(
+        request.task, request.own_name,
+        "\n".join(describe_task(record) for record in pending),
+        payload={"handled_by": "list_tasks", "count": len(pending)},
+    )
+
+
+LIST_TASKS = ManagerCapability(
+    name="list_tasks",
+    capabilities=frozenset({"task", "tasks"}),
+    handle=list_tasks,
+    description="Lists pending tasks, or answers whether a specific one exists.",
+    claims=lambda task, participants=(): list_tasks_intent(task.description),
+    scoreable=False,
+)
+
+
+def _restore_or_report(
+    request: CapabilityRequest, original: MemoryRecord, failure_message: str
+) -> TaskResult:
+    """Put the untouched original task back after a rejected replacement,
+    so a refused update never silently deletes the task it could not
+    apply - re-retaining content that was already admitted once is not
+    guaranteed to succeed (the policy is re-evaluated every time, on
+    purpose), so this reports whichever outcome actually happened rather
+    than assuming the restore worked.
+    """
+    restored = request.retain(original)
+    if not restored.allowed:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            f"{failure_message} The original task could not be restored either: "
+            f"{restored.reason}",
+        )
+    return TaskResult.failure(request.task, request.own_name, failure_message)
+
+
+def complete_task(request: CapabilityRequest) -> TaskResult:
+    """Mark one pending task complete - a governed replace-in-place
+    (same MemoryRecord.id, new status), never a silent delete: the new
+    version is validated and only then does the old one leave the store,
+    with an explicit restore path if the new version is refused.
+    """
+    if request.recall is None or request.retain is None or request.forget is None:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "I don't have a way to complete tasks right now.",
+        )
+
+    topic = extract_completion_topic(request.task.description)
+    if not topic:
+        return TaskResult.failure(
+            request.task, request.own_name, "Complete which task, exactly?"
+        )
+
+    pool = request.recall(kind=MemoryCategory.TASK.value, tags={"task:pending"}, limit=200)
+    matches = match_tasks_by_topic(pool, topic)
+    if not matches:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            f"I don't have a pending task matching '{topic}'.",
+        )
+    if len(matches) > 1:
+        listing = "; ".join(record.content for record in matches)
+        return TaskResult.failure(
+            request.task, request.own_name,
+            f"I found {len(matches)} pending tasks matching '{topic}' - "
+            f"be more specific: {listing}",
+        )
+
+    target = matches[0]
+    updated = dataclass_replace(
+        target,
+        tags={"task", "task:complete"},
+        context={**(target.context or {}), "status": "complete"},
+    )
+
+    if not request.forget(target.id):
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "I couldn't complete that task: it was already gone.",
+        )
+    verdict = request.retain(updated)
+    if not verdict.allowed:
+        return _restore_or_report(
+            request, target, f"I couldn't complete that task: {verdict.reason}"
+        )
+
+    return TaskResult.success(
+        request.task, request.own_name,
+        f"Completed: {target.content}",
+        payload={"handled_by": "complete_task", "task_id": target.id},
+    )
+
+
+COMPLETE_TASK = ManagerCapability(
+    name="complete_task",
+    capabilities=frozenset({"task", "tasks", "done", "finished", "completed"}),
+    handle=complete_task,
+    description="Marks a pending task complete ('complete the task ...', 'I finished ...').",
+    claims=lambda task, participants=(): complete_task_intent(task.description),
+    scoreable=False,
+)
+
+
+def update_task(request: CapabilityRequest) -> TaskResult:
+    """Rename a task - the identical governed replace-in-place
+    complete_task uses, restoring the untouched original if the renamed
+    version is refused.
+    """
+    if request.recall is None or request.retain is None or request.forget is None:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "I don't have a way to update tasks right now.",
+        )
+
+    parsed = extract_task_update(request.task.description)
+    if parsed is None:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "Update which task to what, exactly? Try 'change the task X to Y'.",
+        )
+    old_topic, new_title = parsed
+
+    pool = request.recall(kind=MemoryCategory.TASK.value, tags={"task:pending"}, limit=200)
+    matches = match_tasks_by_topic(pool, old_topic)
+    if not matches:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            f"I don't have a pending task matching '{old_topic}'.",
+        )
+    if len(matches) > 1:
+        listing = "; ".join(record.content for record in matches)
+        return TaskResult.failure(
+            request.task, request.own_name,
+            f"I found {len(matches)} pending tasks matching '{old_topic}' - "
+            f"be more specific: {listing}",
+        )
+
+    target = matches[0]
+    updated = dataclass_replace(target, content=new_title)
+
+    if not request.forget(target.id):
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "I couldn't update that task: it was already gone.",
+        )
+    verdict = request.retain(updated)
+    if not verdict.allowed:
+        return _restore_or_report(
+            request, target, f"I couldn't update that task: {verdict.reason}"
+        )
+
+    return TaskResult.success(
+        request.task, request.own_name,
+        f"Updated: {target.content} -> {new_title}",
+        payload={"handled_by": "update_task", "task_id": target.id},
+    )
+
+
+UPDATE_TASK = ManagerCapability(
+    name="update_task",
+    capabilities=frozenset({"task", "tasks"}),
+    handle=update_task,
+    description="Renames a pending task ('change the task X to Y').",
+    claims=lambda task, participants=(): update_task_intent(task.description),
+    scoreable=False,
+)
+
+
+# ---------------------------------------------------------------------------
 # Stage 12 additions: temporal derivation - age, next birthday, countdown
 # ---------------------------------------------------------------------------
 #
@@ -3830,6 +4103,10 @@ MANAGER_CAPABILITIES: dict[str, ManagerCapability] = {
     GENERATE_DOCUMENT.name: GENERATE_DOCUMENT,
     MEDIA_PRODUCTION.name: MEDIA_PRODUCTION,
     RECORD_THIS.name: RECORD_THIS,
+    CREATE_TASK.name: CREATE_TASK,
+    LIST_TASKS.name: LIST_TASKS,
+    COMPLETE_TASK.name: COMPLETE_TASK,
+    UPDATE_TASK.name: UPDATE_TASK,
     TEMPORAL_DERIVATION.name: TEMPORAL_DERIVATION,
     # Foundation Repair #1: current day/date/month/year, from the real
     # calendar - never a stored fact, never the Brain.

@@ -99,12 +99,27 @@ class TestConfirmedRoutingDefectsAreFixed:
         word "call" used to be answered "I'm not sure what communication
         request that is." - a wrong, robotic reply to a task+content
         utterance, exactly the failure mode this check was commissioned
-        to find."""
+        to find. At the time this test was written, Tasks did not exist,
+        so the honest fix available then was falling through to
+        open_conversation - proven by asserting the *absence* of the old
+        broken reply, never a claim that a Brain-composed "I can't set a
+        real reminder yet" was the right answer.
+
+        Phase 5.1 (Tasks) gave this exact utterance a genuinely better
+        destination: create_task's own claims= predicate ("remind me
+        to") now recognises it precisely, the identical
+        scoreable=False/claims discipline this whole file is about,
+        applied to a capability that did not exist yet when CHECK ran.
+        The original defect - "call" winning word-overlap scoring for
+        communication - is still the fact being pinned; what changed is
+        only that a genuinely better handler now claims the request
+        first, so there is no fallback for the old defect to reach.
+        """
         cap = select_capability(
             Task(description="Remind me to call the dentist tomorrow morning."),
             MANAGER_CAPABILITIES, participants=list(_ROSTER),
         )
-        assert cap.name == "open_conversation"
+        assert cap.name == "create_task"
 
         _, manager, channel, conversation, provider = _wired(
             answer="Got it - I'll treat that as something to keep in mind, though I can't set a real reminder yet."
@@ -112,6 +127,9 @@ class TestConfirmedRoutingDefectsAreFixed:
         turn = exchange(channel, conversation, "Remind me to call the dentist tomorrow morning.")
         assert turn.succeeded
         assert "not sure what communication request" not in turn.outcome
+        # The genuinely better outcome: a real task was created, not a
+        # Brain-composed placeholder standing in for one.
+        assert "call the dentist" in turn.outcome
 
     def test_ordinary_sentences_containing_capability_keywords_reach_conversation(self):
         """Ten confirmed collisions, each an ordinary remark that shares
