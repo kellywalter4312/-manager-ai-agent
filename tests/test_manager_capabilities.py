@@ -198,6 +198,11 @@ class TestHandlersAreSelectedThroughTheRegistry:
             # assertion had been failing since. Restored rather than
             # loosened: an exact list is the whole point of the test.
             "about_self",
+            # Video-clipping checkpoint: cutting real clips from an
+            # existing video - deterministic given explicit timestamps,
+            # Brain-assisted (over given text only, never raw video/
+            # audio) when asked to find moments instead.
+            "clip_video",
             "communication",
             # Phase 5.1 (Tasks): an outstanding, actionable item with real
             # state - four handlers, one per operation, each recognised by

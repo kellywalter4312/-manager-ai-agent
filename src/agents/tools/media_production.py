@@ -43,6 +43,7 @@ from src.agents.tools.tool import Tool, ToolSpec
 from src.providers.media.image import ImageProvider
 from src.providers.media.narration import NarrationProvider
 from src.providers.media.video import FFmpegVideoComposer, VideoComposer, VideoScene
+from src.providers.media.video_clipping import ClipSpec, NullVideoClipper, VideoClipper
 from src.providers.media.video_generation import NullVideoGenerationProvider, VideoGenerationProvider
 
 # Where real, produced assets are written so a later step (in the same or
@@ -53,6 +54,54 @@ from src.providers.media.video_generation import NullVideoGenerationProvider, Vi
 DEFAULT_ASSET_DIR = Path("data") / "media" / "assets"
 
 _ASSET_PATH_PATTERN = re.compile(r"\S+\.(?:png|wav)", re.IGNORECASE)
+# Video clipping checkpoint: a source video referenced by path - the
+# identical "a path in the text is the evidence" convention
+# _ASSET_PATH_PATTERN already established, extended to the container
+# formats a real source video plausibly arrives in.
+_VIDEO_PATH_PATTERN = re.compile(r"\S+\.(?:mp4|mov|mkv|webm|avi)", re.IGNORECASE)
+# One or more "<start>-<end>" ranges, each side either a bare number of
+# seconds ("130.5") or an H:MM:SS/M:SS timecode ("1:02:10", "2:40") - the
+# canonical, single format this tool's own content string is expected to
+# already be in. Turning "from 2:10 to 2:40" or "the funny bit" into this
+# shape is the capability layer's own job (natural-language extraction,
+# and where needed, Brain reasoning over given text) - never this tool's,
+# which only ever does the mechanical cut.
+_TIME_RANGE_PATTERN = re.compile(
+    r"((?:\d+:)?(?:\d+:)?\d+(?:\.\d+)?)\s*-\s*((?:\d+:)?(?:\d+:)?\d+(?:\.\d+)?)"
+)
+
+
+def _parse_timecode(text: str) -> float:
+    """``"1:02:10"``/``"2:40"``/``"130.5"`` -> seconds. Raises
+    ``ValueError`` on anything else, the same honest-refusal-over-guess
+    rule every real parser in this project already holds itself to."""
+    parts = text.strip().split(":")
+    seconds = 0.0
+    for part in parts:
+        seconds = seconds * 60 + float(part)
+    return seconds
+
+
+def find_video_path(content: str) -> str | None:
+    """The first referenced source-video path in ``content``, or None -
+    shared, public evidence-check used by
+    ``src.manager.capabilities.clip_video_intent`` to recognise its own
+    request shape without duplicating this pattern in a second module."""
+    match = _VIDEO_PATH_PATTERN.search(content)
+    return match.group(0) if match else None
+
+
+def parse_clip_specs(content: str) -> "list[ClipSpec]":
+    """Every ``ClipSpec`` named in ``content``'s own ``start-end`` ranges,
+    in the order they appear - shared by ``MediaProductionTool._clip``
+    and, directly, by ``src.manager.capabilities.clip_video``, which
+    needs the same parse to decide *whether* a request already names
+    explicit boundaries before ever reaching this tool (see that
+    capability's own docstring for why that distinction matters)."""
+    return [
+        ClipSpec(start_seconds=_parse_timecode(start), end_seconds=_parse_timecode(end))
+        for start, end in _TIME_RANGE_PATTERN.findall(content)
+    ]
 
 
 class MediaProductionTool(Tool):
@@ -66,6 +115,7 @@ class MediaProductionTool(Tool):
         illustrator: ImageProvider,
         composer: VideoComposer,
         video_generator: VideoGenerationProvider | None = None,
+        clipper: VideoClipper | None = None,
         *,
         voice_id: str = "am_eric",
         asset_dir: Path | None = None,
@@ -78,6 +128,9 @@ class MediaProductionTool(Tool):
         # this parameter) gets the identical honest NullVideoGenerationProvider
         # default every other Null* collaborator in this project already is.
         self._video_generator = video_generator or NullVideoGenerationProvider()
+        # Video clipping checkpoint: the identical optional/additive
+        # default, for the identical reason.
+        self._clipper = clipper or NullVideoClipper()
         self._voice_id = voice_id
         self._asset_dir = asset_dir or DEFAULT_ASSET_DIR
 
@@ -88,8 +141,9 @@ class MediaProductionTool(Tool):
             description=(
                 "Produces one real media asset per call - narrate text into "
                 "audio, illustrate a description into an image, compose "
-                "already-produced assets into a video, or generate a real AI "
-                "video directly - never a fabricated or placeholder file."
+                "already-produced assets into a video, generate a real AI "
+                "video directly, or cut real clips from an existing video - "
+                "never a fabricated or placeholder file."
             ),
             schema={"operation": str, "content": str},
         )
@@ -114,9 +168,11 @@ class MediaProductionTool(Tool):
             return self._compose(content)
         if operation == "generate_video":
             return self._generate_video(content)
+        if operation == "clip":
+            return self._clip(content)
         raise ValueError(
             f"unknown media_production operation {operation!r}; "
-            "expected one of: narrate, illustrate, compose, generate_video"
+            "expected one of: narrate, illustrate, compose, generate_video, clip"
         )
 
     def _write(self, suffix: str, data: bytes) -> Path:
@@ -175,6 +231,47 @@ class MediaProductionTool(Tool):
             f"Video produced: {path.as_posix()} "
             f"({asset.duration_seconds:.2f}s, provider={asset.provider}, model={asset.model}{seeded})"
         )
+
+    def _clip(self, content: str) -> str:
+        """Cut one or more real clips from an existing, already-referenced
+        source video - the mechanical half of the video-clipping
+        checkpoint. ``content`` must already name a real source video
+        path and one or more explicit ``start-end`` ranges
+        (``parse_clip_specs``'s own canonical format) - resolving a
+        natural-language request ("the funny bits") into those explicit
+        ranges is the capability layer's own job
+        (``src.manager.capabilities.clip_video``), never this tool's:
+        a Tool only ever does the mechanical work it is precisely told to
+        do (see this module's own docstring).
+        """
+        video_paths = _VIDEO_PATH_PATTERN.findall(content)
+        if not video_paths:
+            raise ValueError(
+                "clipping needs a real source video path in the request; none was found"
+            )
+        source_path = Path(video_paths[0])
+        if not source_path.exists():
+            raise ValueError(f"the referenced source video does not exist: {source_path}")
+
+        specs = parse_clip_specs(content)
+        if not specs:
+            raise ValueError(
+                "clipping needs at least one explicit 'start-end' time range "
+                "(e.g. '1:20-1:45'); none was found in the request"
+            )
+
+        source_bytes = source_path.read_bytes()
+        clipped = self._clipper.clip_many(source_bytes, specs)
+
+        lines = [f"{len(clipped)} clip(s) produced from {source_path.as_posix()}:"]
+        for item in clipped:
+            output_path = self._write(".mp4", item.video.data)
+            lines.append(
+                f"  {output_path.as_posix()} "
+                f"({item.spec.start_seconds:.2f}s-{item.spec.end_seconds:.2f}s, "
+                f"{item.video.duration_seconds:.2f}s)"
+            )
+        return "\n".join(lines)
 
     def _compose(self, content: str) -> str:
         asset_paths = [Path(m) for m in dict.fromkeys(_ASSET_PATH_PATTERN.findall(content))]

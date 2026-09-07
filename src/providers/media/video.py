@@ -32,6 +32,42 @@ class VideoError(RuntimeError):
     """Raised when a video could not be composed."""
 
 
+def resolve_ffmpeg(ffmpeg_path: str | None = None) -> str:
+    """The real FFmpeg binary's path - ``ffmpeg_path`` if given, else
+    resolved lazily through ``imageio-ffmpeg`` (see this module's own
+    docstring for why: a real, statically-linked binary, no network at
+    runtime, no system-wide install assumed).
+
+    Shared by every real caller in this project that shells out to
+    FFmpeg (``FFmpegVideoComposer``, ``probe_duration_seconds``, and
+    ``video_clipping.py``'s own ``FFmpegVideoClipper``) rather than each
+    resolving it its own, differently-written way.
+    """
+    if ffmpeg_path:
+        return ffmpeg_path
+    try:
+        import imageio_ffmpeg  # imported lazily, matching every other provider
+    except ImportError as exc:  # pragma: no cover - depends on environment
+        raise VideoError(
+            "the 'imageio-ffmpeg' package is required for video "
+            "processing. Install it with: pip install imageio-ffmpeg"
+        ) from exc
+    return imageio_ffmpeg.get_ffmpeg_exe()
+
+
+def run_ffmpeg(ffmpeg: str, args: list[str], *, timeout: int = 120) -> None:
+    """Run one real FFmpeg invocation, raising ``VideoError`` with the
+    vendor's own stderr on failure - never a silent non-zero exit."""
+    result = subprocess.run(
+        [ffmpeg, "-y", *args],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    if result.returncode != 0:
+        raise VideoError(f"ffmpeg failed: {result.stderr[-800:]}")
+
+
 class VideoScene(NamedTuple):
     """One real image, shown for the duration of one real audio clip -
     the smallest unit a composed video is built from. Neither asset is
@@ -112,26 +148,10 @@ class FFmpegVideoComposer(VideoComposer):
         return "ffmpeg"
 
     def _binary_or_raise(self) -> str:
-        if self._ffmpeg_path:
-            return self._ffmpeg_path
-        try:
-            import imageio_ffmpeg  # imported lazily, matching every other provider
-        except ImportError as exc:  # pragma: no cover - depends on environment
-            raise VideoError(
-                "the 'imageio-ffmpeg' package is required for video "
-                "composition. Install it with: pip install imageio-ffmpeg"
-            ) from exc
-        return imageio_ffmpeg.get_ffmpeg_exe()
+        return resolve_ffmpeg(self._ffmpeg_path)
 
     def _run(self, ffmpeg: str, args: list[str]) -> None:
-        result = subprocess.run(
-            [ffmpeg, "-y", *args],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        if result.returncode != 0:
-            raise VideoError(f"ffmpeg failed: {result.stderr[-800:]}")
+        run_ffmpeg(ffmpeg, args)
 
     def compose(self, scenes: "list[VideoScene]") -> VideoAsset:
         if not scenes:
@@ -211,16 +231,7 @@ def probe_duration_seconds(video_bytes: bytes, *, ffmpeg_path: str | None = None
     """
     import re
 
-    ffmpeg = ffmpeg_path
-    if ffmpeg is None:
-        try:
-            import imageio_ffmpeg
-        except ImportError as exc:  # pragma: no cover - depends on environment
-            raise VideoError(
-                "the 'imageio-ffmpeg' package is required to inspect a video. "
-                "Install it with: pip install imageio-ffmpeg"
-            ) from exc
-        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    ffmpeg = resolve_ffmpeg(ffmpeg_path)
 
     with tempfile.TemporaryDirectory(prefix="alfred_probe_") as workdir:
         path = Path(workdir) / "probe.mp4"

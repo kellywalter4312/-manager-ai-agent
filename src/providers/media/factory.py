@@ -13,7 +13,7 @@ a deployment may want one without the other.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Mapping
 
 from src.config.settings import Settings
@@ -26,6 +26,7 @@ from src.providers.media.image import (
 )
 from src.providers.media.narration import KokoroNarrationProvider, NarrationProvider, NullNarrationProvider
 from src.providers.media.video import FFmpegVideoComposer, NullVideoComposer, VideoComposer
+from src.providers.media.video_clipping import FFmpegVideoClipper, NullVideoClipper, VideoClipper
 from src.providers.media.video_generation import (
     GoogleVeoVideoProvider,
     NullVideoGenerationProvider,
@@ -72,12 +73,22 @@ class MediaTools:
     illustrator: ImageProvider
     composer: VideoComposer
     video_generator: VideoGenerationProvider
+    # Video *clipping* checkpoint: local, deterministic extraction of a
+    # real clip from an already-existing video - never vendor-backed
+    # like video_generator, so it has no credential axis of its own and
+    # is wired the identical way `composer` already is (see
+    # video_clipping.py's own docstring for why no provider-selection
+    # axis is warranted here). Defaulted so every construction that
+    # predates this field - none currently exist outside this factory -
+    # would still get the honest NullVideoClipper() every other Null*
+    # collaborator here already is.
+    clipper: VideoClipper = field(default_factory=NullVideoClipper)
 
     @property
     def name(self) -> str:
         return (
             f"{self.narrator.name}+{self.illustrator.name}+"
-            f"{self.composer.name}+{self.video_generator.name}"
+            f"{self.composer.name}+{self.video_generator.name}+{self.clipper.name}"
         )
 
 
@@ -162,6 +173,7 @@ def _build_null(settings: Settings, video_generator: VideoGenerationProvider) ->
         illustrator=NullImageProvider(),
         composer=NullVideoComposer(),
         video_generator=video_generator,
+        clipper=NullVideoClipper(),
     )
 
 
@@ -171,6 +183,7 @@ def _build_local(settings: Settings, video_generator: VideoGenerationProvider) -
         illustrator=LocalTitleCardImageProvider(),
         composer=FFmpegVideoComposer(),
         video_generator=video_generator,
+        clipper=FFmpegVideoClipper(),
     )
 
 
@@ -190,6 +203,7 @@ def _build_ai_image(settings: Settings, video_generator: VideoGenerationProvider
         illustrator=PollinationsImageProvider(),
         composer=FFmpegVideoComposer(),
         video_generator=video_generator,
+        clipper=FFmpegVideoClipper(),
     )
 
 

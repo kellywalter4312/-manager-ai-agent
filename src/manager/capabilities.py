@@ -75,6 +75,7 @@ from src.manager.knowledge import (
 from src.manager.memory_policy import MemoryCategory
 from src.manager.recognition import Recognition
 from src.agents.tools.connection import tool_name_for
+from src.agents.tools.media_production import find_video_path, parse_clip_specs
 from src.providers.celebration import CelebrationReaction
 from src.providers.connection import Connection
 from src.services.identity.identity import AgentIdentity
@@ -2128,6 +2129,151 @@ MEDIA_PRODUCTION = ManagerCapability(
 
 
 # ---------------------------------------------------------------------------
+# Video-clipping checkpoint: cutting real clips from an existing video -
+# genuinely different work from media_production's own "generate"/
+# "compose" (both produce a *new* video from scratch). A distinct
+# capability, not a widening of MEDIA_PRODUCTION's own marker set, for
+# the identical reason RECORD_THIS is not a widening of FORGET: the two
+# requests share a tool but are different asks, and collapsing them
+# would make one claims= predicate responsible for telling both apart
+# instead of two capabilities each owning their own shape.
+# ---------------------------------------------------------------------------
+
+# How much real text, beyond the video path itself, counts as "a
+# transcript/description worth reasoning over" rather than a bare
+# instruction with nothing in it. Deliberately conservative: asking the
+# Brain to propose timestamps from three words would only invite it to
+# invent them.
+_CLIP_TRANSCRIPT_MIN_CHARS = 120
+
+_CLIP_VIDEO_MARKERS: tuple[str, ...] = (
+    "clip this video", "clip the video", "clip this footage", "clip the footage",
+    "cut this video", "cut the video", "trim this video", "trim the video",
+    "extract a clip", "extract clips", "make a clip from", "make clips from",
+    "make several clips", "highlight reel", "make a highlight",
+    "find the best moments", "find the funniest moments", "clip the funniest",
+    "clip the best", "find the moments where", "social clips from", "short clips from",
+)
+
+
+def clip_video_intent(task: Task, participants: Sequence[str] = ()) -> bool:
+    """Whether this request's own shape is an ask to cut real clips from
+    an existing video - an anchored clip-verb phrase together with real
+    evidence this is actually about a video (a referenced file path, or
+    an explicit time range) - the identical "phrase plus evidence"
+    discipline that keeps "that was quite a task" from claiming
+    create_task applied here so a metaphorical "clip" never claims this
+    one on the word alone.
+    """
+    text = task.description
+    if not _marker_present(text, _CLIP_VIDEO_MARKERS):
+        return False
+    return find_video_path(text) is not None or bool(parse_clip_specs(text))
+
+
+def clip_video(request: CapabilityRequest) -> TaskResult:
+    """Cut one or more real clips from an existing video - deterministic
+    when explicit timestamps are given (Half-Brain safe, no LLM
+    involved at all), Brain-assisted when the request instead names
+    *what* to find (e.g. "the funniest moments") and supplies enough
+    real text (a transcript or description) for the Brain to genuinely
+    reason over.
+
+    Never watches or listens to the source video - no such capability
+    exists in this project. Selecting boundaries from actual video/audio
+    *content* would need a real vision-over-video or transcription
+    provider this codebase does not have; faking that would be exactly
+    the invented AI detection this capability must never do. What the
+    Brain genuinely can do - reason over text it is given - is used
+    instead, and only when there is real text to reason over.
+    """
+    text = request.task.description
+    video_path = find_video_path(text)
+    if video_path is None:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "Which video? I don't see a video file referenced in this request.",
+        )
+
+    if not request.tools.permits("media_production"):
+        equipped = ", ".join(request.tools.names()) or "none"
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "I can take on clipping a video, but the underlying "
+            f"'media_production' capability is not installed, so I cannot do "
+            f"it yet rather than guess. Currently equipped: {equipped}.",
+        )
+
+    content = text
+    if not parse_clip_specs(text):
+        # No explicit timestamps - this is an ask to find moments, never
+        # to cut a named range. Only the Brain, given real text to
+        # reason over, can propose ones - never this function guessing
+        # on the video's own behalf.
+        if request.converse is None:
+            return TaskResult.failure(
+                request.task, request.own_name,
+                "I don't have a way to analyze this video's actual content - "
+                "no video-understanding/transcription provider is configured, "
+                "and no reasoning capability is available to work from a "
+                "transcript either. Give me specific timestamps (e.g. "
+                "'1:20-1:45'), or paste a transcript/description and tell me "
+                "what to look for.",
+            )
+        remainder = text.replace(video_path, "").strip()
+        if len(remainder) < _CLIP_TRANSCRIPT_MIN_CHARS:
+            return TaskResult.failure(
+                request.task, request.own_name,
+                "I don't have a way to analyze this video's actual content - "
+                "no video-understanding/transcription provider is configured. "
+                "Give me specific timestamps (e.g. '1:20-1:45'), or paste a "
+                "transcript/description of the video alongside your request "
+                "and I can find moments within that.",
+            )
+        decision = request.converse(
+            request.task,
+            (
+                "The person supplied a transcript/description and asked for "
+                "clips from it. Propose the most fitting time range(s), each "
+                "written as exactly 'MM:SS-MM:SS' (or 'H:MM:SS-H:MM:SS'), one "
+                "per line, and nothing else.",
+            ),
+        )
+        if not decision.is_decided or not parse_clip_specs(decision.reason):
+            return TaskResult.failure(
+                request.task, request.own_name,
+                "I read the transcript but couldn't settle on real clip "
+                f"boundaries from it ({decision.reason or 'no usable answer'}).",
+            )
+        content = f"{video_path} {decision.reason}"
+
+    outcome = request.tools.invoke("media_production", {"operation": "clip", "content": content})
+    if not outcome.ok:
+        return TaskResult.failure(
+            request.task, request.own_name, f"clipping failed: {outcome.error}",
+        )
+
+    return TaskResult.success(
+        request.task, request.own_name, outcome.output,
+        payload={"handled_by": "clip_video"},
+    )
+
+
+CLIP_VIDEO = ManagerCapability(
+    name="clip_video",
+    capabilities=frozenset({"clip", "trim", "highlight"}),
+    handle=clip_video,
+    description=(
+        "Cuts one or more real clips from an existing video - explicit "
+        "timestamps need no Brain; finding moments from a supplied "
+        "transcript/description does, and it is refused honestly without one."
+    ),
+    claims=clip_video_intent,
+    scoreable=False,
+)
+
+
+# ---------------------------------------------------------------------------
 # Stage 12 additions: record this / record this for research
 # ---------------------------------------------------------------------------
 #
@@ -4102,6 +4248,7 @@ MANAGER_CAPABILITIES: dict[str, ManagerCapability] = {
     IMAGE_ANALYSIS.name: IMAGE_ANALYSIS,
     GENERATE_DOCUMENT.name: GENERATE_DOCUMENT,
     MEDIA_PRODUCTION.name: MEDIA_PRODUCTION,
+    CLIP_VIDEO.name: CLIP_VIDEO,
     RECORD_THIS.name: RECORD_THIS,
     CREATE_TASK.name: CREATE_TASK,
     LIST_TASKS.name: LIST_TASKS,

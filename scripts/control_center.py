@@ -390,18 +390,23 @@ def build(settings: Settings):
             # honours this file's own read-only invariant: a knowledge
             # source can be quoted and can do nothing else.
             KnowledgeLookupTool(runtime.knowledge),
-            # Creative-media / AI video-generation checkpoints: real
-            # narration/image/video production and, separately, real AI
-            # video generation, backed by runtime.media - honestly absent
-            # (every Null* collaborator) unless MANAGER_MEDIA and/or
-            # MANAGER_VIDEO_GENERATION were deliberately configured, the
-            # identical opt-in default every other real capability here
-            # already follows.
+            # Creative-media / AI video-generation / video-clipping
+            # checkpoints: real narration/image/video production, real AI
+            # video generation, and real local video clipping, backed by
+            # runtime.media - honestly absent (every Null* collaborator)
+            # unless MANAGER_MEDIA and/or MANAGER_VIDEO_GENERATION were
+            # deliberately configured, the identical opt-in default every
+            # other real capability here already follows. Clipping needs
+            # no vendor configuration of its own (see MediaTools.clipper's
+            # own docstring) - it is real (FFmpegVideoClipper) whenever
+            # MANAGER_MEDIA selects "local"/"ai_image", null only for the
+            # "null" media backend, exactly mirroring composer.
             MediaProductionTool(
                 runtime.media.narrator,
                 runtime.media.illustrator,
                 runtime.media.composer,
                 runtime.media.video_generator,
+                runtime.media.clipper,
                 asset_dir=Path(settings.media_asset_dir),
             ),
             # Phase 3: real, saved text documents ("create a report from

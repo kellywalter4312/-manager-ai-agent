@@ -281,13 +281,19 @@ class TestThisIsNotASecondRouter:
         create/list/complete/update request ("remind me to X", "what
         are my tasks", "mark the task X as done", "change the task X to
         Y") by its own marker shape rather than the ordinary word "task"
-        ("that was quite a task"), Phase 5.1 - and every other request
-        is still settled by word overlap."""
+        ("that was quite a task"), Phase 5.1; and recognising an explicit
+        ask to cut real clips from an existing video ("clip this video
+        X.mp4 from 1:20-1:45", "find the best moments and clip them") by
+        its own marker-plus-evidence shape rather than the ordinary word
+        "clip" ("that was quite a clip show"), the video-clipping
+        checkpoint - and every other request is still settled by word
+        overlap."""
         from src.manager.capabilities import MANAGER_CAPABILITIES
 
         claiming = sorted(c.name for c in MANAGER_CAPABILITIES.values() if c.claims)
         assert claiming == [
             "about_self",
+            "clip_video",
             "communication", "complete_task", "connected_action", "correct_memory",
             "create_task", "current_datetime", "forget",
             "general_assistance", "generate_document", "image_analysis",

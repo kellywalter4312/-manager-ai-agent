@@ -383,7 +383,10 @@ class TestGeneralAssistanceReachesGenuineReasoningForCreativeWriting:
 class TestProductionWiring:
     def test_the_null_default_is_honest_and_unchanged_by_default(self):
         runtime, manager, channel, conversation = real_system()
-        assert runtime.media.name == "null+null+null+null"
+        # Video-clipping checkpoint: a fifth, independently-replaceable
+        # collaborator (clipper) joined narrator/illustrator/composer/
+        # video_generator in this name - updated in step, not weakened.
+        assert runtime.media.name == "null+null+null+null+null"
         assert "media_production" in manager.own_skills.tools.names()
         turn = exchange(channel, conversation, "narrate this: a short test line")
         assert not turn.succeeded
@@ -391,7 +394,10 @@ class TestProductionWiring:
 
     def test_the_local_backend_is_genuinely_wired_and_works_through_exchange(self, tmp_path):
         runtime, manager, channel, conversation = real_system(media="local", media_asset_dir=str(tmp_path))
-        assert runtime.media.name == "kokoro+local-title-card+ffmpeg+null"
+        # Video-clipping checkpoint: "local" now also wires a real
+        # FFmpegVideoClipper (see MediaTools.clipper's own docstring for
+        # why clipping needs no vendor/credential axis of its own).
+        assert runtime.media.name == "kokoro+local-title-card+ffmpeg+null+ffmpeg"
         turn = exchange(channel, conversation, "narrate this: a short test line for production wiring")
         assert turn.succeeded
         assert "Narration produced" in turn.outcome
