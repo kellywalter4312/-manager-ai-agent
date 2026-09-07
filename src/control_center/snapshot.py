@@ -217,6 +217,12 @@ def _agent(view: Any, agent: Any) -> dict[str, Any]:
         # invented here).
         "activity": view.presence.state.value if view.presence is not None else None,
         "avatar": view.presence.to_dict() if view.presence is not None else None,
+        # Final acceptance sweep (2026-09-08): this agent's own chosen or
+        # deterministic-default EnvironmentProfile - previously resolvable
+        # only through the CLI/HTTP "environment" command and completely
+        # absent from every snapshot, so no UI surface could show or
+        # change it. Exposed here the identical way "avatar" already is.
+        "environment": view.environment.to_dict() if view.environment is not None else None,
     }
 
 
@@ -294,6 +300,11 @@ def snapshot(
         # already resolved through - never per agent, because this
         # catalog is the provider's own, not any one agent's fact.
         "avatar_catalog": [p.to_dict() for p in centre.runtime.avatar_provider.catalog()],
+        # Final acceptance sweep (2026-09-08): the identical choices
+        # catalog for the environment picker, mirroring avatar_catalog
+        # above for the same reason - the provider's own choices, not
+        # any one agent's fact.
+        "environment_catalog": [p.to_dict() for p in centre.runtime.environment_provider.catalog()],
         "conversation": _conversation(conversation),
         "speech": _speech(channel),
         "system": {

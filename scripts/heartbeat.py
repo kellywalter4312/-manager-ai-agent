@@ -56,6 +56,11 @@ from src.services.profile.loader import load_profile  # noqa: E402
 from src.services.profile.profile import UserProfile  # noqa: E402
 from src.services.schedule.loader import load_schedule  # noqa: E402
 from src.services.schedule.schedule import UserSchedule  # noqa: E402
+from src.services.evolution.governed_config import (  # noqa: E402
+    DEFAULT_CONFIG_PATH,
+    load_governed_config,
+)
+from scripts.control_center import filtered_manager_capabilities  # noqa: E402
 from src.utils.logging import configure_logging  # noqa: E402
 
 
@@ -96,6 +101,20 @@ def build_manager_factory(
         communication_account=accounts.active(settings.communication_provider),
     )
 
+    # Governance-integrity repair (2026-09-08): a disabled capability was
+    # silently still reachable on every heartbeat tick, because this
+    # factory built a Manager without ever consulting the same
+    # GovernedConfig scripts/control_center.py::build reads - the exact
+    # "currently-selected account should not silently apply to one entry
+    # point and not another" principle this file's own accounts= wiring
+    # above already states, now honoured for capability enable/disable
+    # too. Loaded once here, not per tick, matching how `accounts` itself
+    # is loaded once above - a capability disabled or re-enabled while
+    # this is already running takes effect on the next invocation of this
+    # script, the identical restart-to-activate rule every other
+    # persisted administrative change already lives under.
+    capabilities = filtered_manager_capabilities(load_governed_config(DEFAULT_CONFIG_PATH))
+
     # --dry-run substitutes the built-in sample inbox, which is why the mailbox
     # is chosen here rather than inside the composition root. Built once and
     # shared: it holds the lazily created API client.
@@ -122,6 +141,7 @@ def build_manager_factory(
             # decide whether this wake happens.
             schedule=schedule,
             fetch_limit=settings.heartbeat_limit,
+            capabilities=capabilities,
         )
 
     return build

@@ -1309,6 +1309,18 @@ def forget_this(request: CapabilityRequest) -> TaskResult:
         )
 
     removed = sum(1 for record in matches if request.forget(record.id))
+    if removed < len(matches):
+        # Final acceptance sweep (2026-09-08): forget() returning False for
+        # any match must not be reported as an unqualified "Forgotten" -
+        # that would tell a person something was deleted when it was not.
+        # request.forget's own contract (see Memory.forget) already
+        # distinguishes "did not exist" from "existed and was removed";
+        # this is the one place that distinction must survive into what
+        # the person is actually told.
+        return TaskResult.failure(
+            request.task, request.own_name,
+            f"Only {removed} of {len(matches)} record(s) could be forgotten.",
+        )
     return TaskResult.success(
         request.task, request.own_name,
         f"Forgotten ({removed} record(s)).",

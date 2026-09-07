@@ -40,6 +40,7 @@ from src.manager.manager import ManagerAgent
 from src.manager.manager_skills import ManagerSkills
 from src.providers.base import Completion, LLMProvider
 from src.providers.default_avatar_provider import DefaultAvatarProvider
+from src.providers.default_environment_provider import DefaultEnvironmentProvider
 from src.services.identity.identity import AgentIdentity, load_identity
 from src.services.profile.loader import load_profile
 from src.services.profile.profile import UserProfile
@@ -179,14 +180,19 @@ class TestRoleAndResponsibilities:
 
 
 class _FakeRuntime:
-    """The one attribute ControlCenter.manager_view() actually reads from
-    a runtime - identity - supplied directly rather than assembling a
+    """The narrow set of attributes ControlCenter.manager_view() actually
+    reads from a runtime, supplied directly rather than assembling a
     full Runtime, the same narrowing every test double in this suite
-    already practises."""
+    already practises. environment_provider added alongside
+    avatar_provider (final acceptance sweep, 2026-09-08) when
+    manager_view() started resolving an agent's current environment the
+    identical way it already resolved presence - updated in step, not
+    weakened."""
 
     def __init__(self, manager: ManagerAgent) -> None:
         self.identity = IDENTITY
         self.avatar_provider = DefaultAvatarProvider()
+        self.environment_provider = DefaultEnvironmentProvider()
         self.presence_registry = None
 
 

@@ -198,3 +198,113 @@ class TestDisablingGenuinelyPreventsRouting:
 
         result = run_command(new_centre, "what time is it", 80, new_channel, new_conversation)
         assert "current_datetime" in result
+
+
+class TestGovernanceHoldsAcrossEveryEntryPointNotJustControlCenter:
+    """Completeness-review finding (2026-09-08): disabling a capability
+    only actually stopped it if the request was routed through
+    scripts/control_center.py::build(). scripts/heartbeat.py built its
+    own Manager without ever consulting the same GovernedConfig - a real
+    governance-bypass-through-another-route bug, not a hypothetical one:
+    the identical class of gap this project's own accounts= wiring in
+    that file already had a name for and had already fixed once, for
+    provider accounts specifically."""
+
+    def test_the_heartbeats_own_composition_root_also_filters(self, _isolated_config_file, monkeypatch, tmp_path):
+        import scripts.heartbeat as heartbeat_module
+        from src.services.profile.profile import UserProfile
+
+        monkeypatch.setattr(heartbeat_module, "DEFAULT_CONFIG_PATH", _isolated_config_file)
+        run_capability_registry_command(
+            ControlCenter(*real_system()[:2]), "disable current_datetime"
+        )
+
+        build = heartbeat_module.build_manager_factory(
+            Settings.from_env(env={}, memory="ephemeral"), dry_run=True
+        )
+        manager = build(UserProfile())
+
+        result = manager.handle_task(Task(description="what time is it"))
+        assert result.payload is None or result.payload.get("handled_by") != "current_datetime"
+
+    def test_a_capability_left_enabled_still_reaches_the_heartbeats_own_manager(
+        self, _isolated_config_file, monkeypatch
+    ):
+        import scripts.heartbeat as heartbeat_module
+        from src.services.profile.profile import UserProfile
+
+        monkeypatch.setattr(heartbeat_module, "DEFAULT_CONFIG_PATH", _isolated_config_file)
+        run_capability_registry_command(
+            ControlCenter(*real_system()[:2]), "disable small_talk"
+        )
+
+        build = heartbeat_module.build_manager_factory(
+            Settings.from_env(env={}, memory="ephemeral"), dry_run=True
+        )
+        manager = build(UserProfile())
+
+        result = manager.handle_task(Task(description="what time is it"))
+        assert result.payload is not None and result.payload.get("handled_by") == "current_datetime"
+
+    def test_the_static_exports_own_composition_root_also_filters(self, _isolated_config_file, monkeypatch):
+        """Completeness-review finding (2026-09-08): scripts/export_ui.py's
+        take_snapshot() - the real function serve_ui.py's own docstring
+        names alongside control_center.py/heartbeat.py as one of this
+        project's four real entry points, and the one 'python
+        scripts/export_ui.py' itself runs for a static page - built its own
+        Manager without ever consulting GovernedConfig either. Proven the
+        same way the heartbeat repair above was: a real task, routed
+        through the real Manager take_snapshot() actually builds, must
+        genuinely stop reaching a disabled capability - not merely absent
+        from some rendered list (agent.spec.capabilities, the snapshot's
+        own per-agent view, turned out to be identity-declared words, a
+        different concept entirely from the routing registry this repair
+        governs - the reason this is checked by behaviour, not by shape)."""
+        import scripts.export_ui as export_ui_module
+        from src.core.contracts import Task
+
+        monkeypatch.setattr(export_ui_module, "DEFAULT_CONFIG_PATH", _isolated_config_file)
+        run_capability_registry_command(
+            ControlCenter(*real_system()[:2]), "disable current_datetime"
+        )
+
+        captured: dict = {}
+        real_build_manager = export_ui_module.build_manager
+
+        def spying_build_manager(*args, **kwargs):
+            manager = real_build_manager(*args, **kwargs)
+            captured["manager"] = manager
+            return manager
+
+        monkeypatch.setattr(export_ui_module, "build_manager", spying_build_manager)
+
+        export_ui_module.take_snapshot(Settings.from_env(env={}, memory="ephemeral"))
+
+        result = captured["manager"].handle_task(Task(description="what time is it"))
+        assert result.payload is None or result.payload.get("handled_by") != "current_datetime"
+
+    def test_an_enabled_capability_still_reaches_the_static_exports_own_manager(
+        self, _isolated_config_file, monkeypatch
+    ):
+        import scripts.export_ui as export_ui_module
+        from src.core.contracts import Task
+
+        monkeypatch.setattr(export_ui_module, "DEFAULT_CONFIG_PATH", _isolated_config_file)
+        run_capability_registry_command(
+            ControlCenter(*real_system()[:2]), "disable small_talk"
+        )
+
+        captured: dict = {}
+        real_build_manager = export_ui_module.build_manager
+
+        def spying_build_manager(*args, **kwargs):
+            manager = real_build_manager(*args, **kwargs)
+            captured["manager"] = manager
+            return manager
+
+        monkeypatch.setattr(export_ui_module, "build_manager", spying_build_manager)
+
+        export_ui_module.take_snapshot(Settings.from_env(env={}, memory="ephemeral"))
+
+        result = captured["manager"].handle_task(Task(description="what time is it"))
+        assert result.payload is not None and result.payload.get("handled_by") == "current_datetime"

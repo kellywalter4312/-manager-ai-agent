@@ -245,6 +245,14 @@ class AgentView:
     # field (an older test construction) - every real view built by
     # observer.py supplies one.
     presence: Any | None = None
+    # Final acceptance sweep (2026-09-08): this agent's own chosen or
+    # deterministic-default EnvironmentProfile - the identical governed
+    # preference `environment_for()` already resolves for the CLI's own
+    # `environment` command, exposed here so the Control Center UI can
+    # finally show and change it rather than it being reachable only by
+    # typing the raw command. None only for a caller that predates this
+    # field; every real view built by observer.py supplies one.
+    environment: Any | None = None
 
     @property
     def is_manager(self) -> bool:

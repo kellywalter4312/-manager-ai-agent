@@ -33,9 +33,12 @@ from src.composition import (  # noqa: E402
     build_manager,
     build_runtime,
 )
+from src.config.coherence import ConfigurationError, check_configuration  # noqa: E402
 from src.config.settings import Settings  # noqa: E402
 from src.control_center.observer import ControlCenter  # noqa: E402
 from src.control_center.snapshot import snapshot  # noqa: E402
+from src.providers.factory import ProviderConfigurationError  # noqa: E402
+from src.services.memory.day import TimezoneError  # noqa: E402
 from src.services.credentials.account_store_file import (  # noqa: E402
     DEFAULT_ACCOUNTS_PATH,
     load_credential_store,
@@ -43,8 +46,14 @@ from src.services.credentials.account_store_file import (  # noqa: E402
 from src.services.email.mailbox_factory import build_mailbox  # noqa: E402
 from src.services.profile.loader import load_profile  # noqa: E402
 from src.services.profile.profile import ProfileError  # noqa: E402
+from src.services.evolution.governed_config import (  # noqa: E402
+    DEFAULT_CONFIG_PATH,
+    load_governed_config,
+)
 from src.services.schedule.loader import load_schedule  # noqa: E402
 from src.utils.logging import configure_logging  # noqa: E402
+
+from scripts.control_center import filtered_manager_capabilities  # noqa: E402
 
 SHELL = Path(__file__).resolve().parent.parent / "ui" / "index.html"
 PLACEHOLDER = "__SNAPSHOT__"
@@ -81,6 +90,15 @@ def take_snapshot(settings: Settings) -> dict:
     ``build_runtime`` the identical way - this snapshot must not report
     a system built from a different credential configuration than the
     real terminal Control Center would.
+
+    Capability-registry repair: filters the manager's own capability
+    registry through the identical persisted ``GovernedConfig``
+    ``scripts/control_center.py::build`` already consults, so a
+    capability disabled through Control Center is reported as disabled
+    here too - a static export built from a Manager that still carried
+    every disabled capability as live would be exactly the stale,
+    dishonest reading this module's own docstring says it must not
+    produce.
     """
     accounts = load_credential_store(DEFAULT_ACCOUNTS_PATH)
     runtime = build_runtime(
@@ -95,11 +113,13 @@ def take_snapshot(settings: Settings) -> dict:
     except ProfileError:
         profile = None
 
+    capabilities = filtered_manager_capabilities(load_governed_config(DEFAULT_CONFIG_PATH))
     manager = build_manager(
         runtime,
         mailbox=build_mailbox(settings),
         profile=profile,
         schedule=load_schedule(settings.schedule_path),
+        capabilities=capabilities,
     )
     centre = ControlCenter(runtime, manager)
 
@@ -123,7 +143,20 @@ def main(argv: list[str] | None = None) -> int:
     settings = Settings.from_env()
     configure_logging("WARNING")
 
-    data = take_snapshot(settings)
+    try:
+        check_configuration(settings)
+        data = take_snapshot(settings)
+    except (ConfigurationError, ProviderConfigurationError, TimezoneError) as exc:
+        # Final comprehensive audit (2026-09-08): the identical guard
+        # every other real entry point already runs before building
+        # anything - found missing here. Exporting a static page from an
+        # incoherent configuration (or one whose provider cannot actually
+        # be constructed, e.g. a missing API key - take_snapshot() is
+        # where that surfaces, exactly as it does in every other entry
+        # point's own build call) would produce a page describing a
+        # system that could never actually run.
+        print(f"configuration error: {exc}")
+        return 2
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)

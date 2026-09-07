@@ -57,7 +57,7 @@ from src.control_center.views import (
 from src.manager.capabilities import GENERAL_CAPABILITIES, PERSON_BIRTHDAY_FACT_TYPE
 from src.manager.cognition import assess_cognition, assess_manager
 from src.manager.manager import ManagerAgent
-from src.services.identity.presence import presence_for
+from src.services.identity.presence import environment_for, presence_for
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -248,6 +248,11 @@ class ControlCenter:
                 # wins over the IDLE default the moment it is true.
                 live=self._runtime.presence_registry,
             ),
+            environment=environment_for(
+                identity.name,
+                provider=self._runtime.environment_provider,
+                recall=self._manager.memory.recall if self._manager.memory is not None else None,
+            ),
         )
 
     def specialist_views(self) -> tuple[AgentView, ...]:
@@ -300,6 +305,11 @@ class ControlCenter:
                 provider=self._runtime.avatar_provider,
                 recall=memory.recall if memory is not None else None,
                 live=self._runtime.presence_registry,
+            ),
+            environment=environment_for(
+                agent.name,
+                provider=self._runtime.environment_provider,
+                recall=memory.recall if memory is not None else None,
             ),
         )
 

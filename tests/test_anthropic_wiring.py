@@ -288,6 +288,43 @@ class TestTheCompositionRootsReportIt:
         assert heartbeat.main(["--dry-run"]) == 2
         assert "configuration error" in capsys.readouterr().out
 
+    def test_serve_ui_reports_it_and_never_starts_a_server(self, monkeypatch, capsys):
+        """Final comprehensive audit (2026-09-08): scripts/serve_ui.py -
+        the longest-lived of every real entry point - built its live
+        system with no check_configuration guard at all, unlike main.py/
+        control_center.py/heartbeat.py. Proven here the same way as the
+        other three above: a broken configuration must be refused before
+        anything (here, a listening socket) is built."""
+        import scripts.serve_ui as serve_ui_module
+
+        broken = settings(provider="anthropic", brain="llm")
+        monkeypatch.setattr(
+            serve_ui_module.Settings, "from_env", staticmethod(lambda *a, **k: broken)
+        )
+        monkeypatch.setattr(serve_ui_module, "configure_logging", lambda *a, **k: None)
+        monkeypatch.delenv(ANTHROPIC_KEY_ENV, raising=False)
+
+        assert serve_ui_module.main([]) == 2
+        assert "configuration error" in capsys.readouterr().out
+
+    def test_export_ui_reports_it_and_writes_no_file(self, monkeypatch, capsys, tmp_path):
+        """The identical gap, found in the same audit, in the fourth real
+        entry point (scripts/export_ui.py). A broken configuration must
+        be refused before any page or JSON snapshot is written."""
+        import scripts.export_ui as export_ui_module
+
+        broken = settings(provider="anthropic", brain="llm")
+        monkeypatch.setattr(
+            export_ui_module.Settings, "from_env", staticmethod(lambda *a, **k: broken)
+        )
+        monkeypatch.setattr(export_ui_module, "configure_logging", lambda *a, **k: None)
+        monkeypatch.delenv(ANTHROPIC_KEY_ENV, raising=False)
+
+        out_path = tmp_path / "export.html"
+        assert export_ui_module.main(["--out", str(out_path)]) == 2
+        assert "configuration error" in capsys.readouterr().out
+        assert not out_path.exists()
+
 
 # ----------------------------------------------------------------------
 # The dependency direction is unchanged

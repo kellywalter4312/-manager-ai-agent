@@ -199,6 +199,57 @@ class TestExplicitUserDirectedMemoryActions:
         )
         assert chosen is FORGET
 
+    def test_a_partial_forget_is_reported_as_failure_not_success(self):
+        """Final acceptance sweep (2026-09-08): forget_this() used to
+        report an unqualified 'Forgotten (N record(s))' success even
+        when request.forget() returned False for some or all matches -
+        Memory.forget()'s own contract ('True if it existed, False if it
+        did not') being silently discarded on the way to the person. A
+        spying forget() that only removes half its matches, called
+        directly through CapabilityRequest so the failure mode is
+        provoked deterministically rather than hoped for."""
+        from src.manager.capabilities import CapabilityRequest, FORGET
+        from src.services.identity.identity import AgentIdentity
+
+        matches = (
+            MemoryRecord(content="we prefer blue", kind=MemoryCategory.USER_CONTEXT.value, id="r1"),
+            MemoryRecord(content="we prefer blue too", kind=MemoryCategory.USER_CONTEXT.value, id="r2"),
+        )
+
+        def flaky_forget(record_id: str) -> bool:
+            return record_id == "r1"  # r2 silently fails to remove
+
+        request = CapabilityRequest(
+            task=Task(description="forget that blue"),
+            identity=AgentIdentity(name="Alfred", capabilities=frozenset({"roster"})),
+            roster=lambda: (),
+            own_name="Alfred",
+            own_capabilities=(),
+            recall=lambda *a, **k: matches,
+            forget=flaky_forget,
+        )
+        result = FORGET.handle(request)
+        assert not result.succeeded
+        assert "1 of 2" in result.error
+
+    def test_a_complete_forget_still_reports_success(self):
+        from src.manager.capabilities import CapabilityRequest, FORGET
+        from src.services.identity.identity import AgentIdentity
+
+        matches = (MemoryRecord(content="we prefer blue", kind=MemoryCategory.USER_CONTEXT.value, id="r1"),)
+        request = CapabilityRequest(
+            task=Task(description="forget that blue"),
+            identity=AgentIdentity(name="Alfred", capabilities=frozenset({"roster"})),
+            roster=lambda: (),
+            own_name="Alfred",
+            own_capabilities=(),
+            recall=lambda *a, **k: matches,
+            forget=lambda record_id: True,
+        )
+        result = FORGET.handle(request)
+        assert result.succeeded
+        assert result.payload == {"forgotten": 1}
+
 
 # ---------------------------------------------------------------------------
 # Persistence across restart / reconstruction

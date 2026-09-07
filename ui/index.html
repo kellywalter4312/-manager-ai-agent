@@ -396,6 +396,12 @@
      who is being addressed, and this picker never touches selectedAgent. */
   .avatar-picker{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
 
+  /* Final acceptance sweep (2026-09-08) - the environment picker, the
+     identical shape/behaviour as .avatar-picker above, for the sibling
+     preference (EnvironmentProvider) that previously had a real,
+     governed backend and HTTP route but no UI control at all. */
+  .env-picker{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+
   /* Stage 17.6A - the beginning of a real (never fabricated-catalog)
      Digital Human editor: free-text fields, one per open style
      dimension, writing through the existing governed POST /profile
@@ -1220,6 +1226,36 @@
             to confirm what it is about to do before it happens.</div>
 
           <div class="mgmt-sub">
+            <div class="lab">Provider accounts</div>
+            <div class="mgmt-row">
+              <input type="text" id="cc-prov-category" placeholder="category, e.g. llm_provider"/>
+              <button type="button" id="cc-prov-view">View</button>
+              <button type="button" id="cc-prov-accounts">List accounts</button>
+            </div>
+            <div class="mgmt-row">
+              <input type="text" id="cc-prov-backend" placeholder="backend, e.g. anthropic"/>
+              <input type="text" id="cc-prov-account" placeholder="account id"/>
+              <select id="cc-prov-action">
+                <option value="add">add</option>
+                <option value="select">select</option>
+                <option value="revoke">revoke</option>
+                <option value="validate">validate</option>
+              </select>
+            </div>
+            <div class="mgmt-row">
+              <input type="password" id="cc-prov-credential" placeholder="credential (add: required, validate: optional)"/>
+              <input type="text" id="cc-prov-model" placeholder="model (optional, add only)"/>
+              <button type="button" id="cc-prov-go">Go</button>
+            </div>
+            <div class="mgmt-note">Every operation here is the identical, already-governed
+              provider module a terminal's own 'provider' command already uses - the same
+              confirmation step and administrative audit record apply to add/select/revoke,
+              and no credential is ever echoed back or logged. A category has exactly one
+              active backend at a time - selecting a new one replaces it, unlike Connections
+              below, where connecting one service never disconnects another.</div>
+          </div>
+
+          <div class="mgmt-sub">
             <div class="lab">Capability registry</div>
             <div class="mgmt-buttons">
               <button type="button" class="mgmt-btn" data-cc-verb="capabilities list">view registry</button>
@@ -1256,6 +1292,34 @@
               ecosystem_evolution module a terminal's own 'ecosystem' command already uses -
               nothing new is possible from this panel that was not already possible from a
               terminal.</div>
+          </div>
+
+          <div class="mgmt-sub">
+            <div class="lab">Connections</div>
+            <div class="mgmt-buttons">
+              <button type="button" class="mgmt-btn" data-cc-verb="connections">view all</button>
+              <button type="button" class="mgmt-btn" data-cc-verb="connections gmail status">gmail status</button>
+            </div>
+            <div class="mgmt-row">
+              <input type="text" id="cc-conn-service" placeholder="service, e.g. whatsapp"/>
+              <input type="text" id="cc-conn-account" placeholder="account id"/>
+              <select id="cc-conn-action">
+                <option value="connect">connect</option>
+                <option value="disconnect">disconnect</option>
+                <option value="status">status</option>
+                <option value="validate">validate</option>
+              </select>
+            </div>
+            <div class="mgmt-row">
+              <input type="password" id="cc-conn-credential" placeholder="credential (connect: required, validate: optional)"/>
+              <input type="text" id="cc-conn-model" placeholder="model (optional, connect only)"/>
+              <button type="button" id="cc-conn-go">Go</button>
+            </div>
+            <div class="mgmt-note">Every operation here is the identical, already-governed
+              connections module a terminal's own 'connections' command already uses - the
+              same confirmation step and administrative audit record apply, and no credential
+              is ever echoed back or logged. Gmail authenticates via OAuth, not a typed
+              credential - use 'python scripts/authorize_gmail.py' to connect it.</div>
           </div>
         </div>
       </div>
@@ -1440,6 +1504,15 @@
             <div class="dh-roadmap"><span class="dh-k">architecturally reserved · not yet available</span>
               ${AVATAR_STUDIO_ROADMAP.map(g=>`<span class="chip off">${esc(g)}</span>`).join("")}
             </div>
+          </div>
+          <div class="pair environment-picker" style="grid-column:1/-1"><div class="k">Environment — ${esc(a.name)}</div>
+            <div class="v">${a.environment?esc(a.environment.label):"—"}</div>
+            <div class="env-picker">${(S.environment_catalog||[]).map(p=>{
+              const on = a.environment && a.environment.environment_id===p.environment_id;
+              return `<button class="pick${on?" on":""}" data-env-agent="${esc(a.name)}"
+                data-env-id="${esc(p.environment_id)}"
+                ${LIVE?"":" disabled"}>${esc(p.label)}</button>`;
+            }).join("")}</div>
           </div>
         </div>
       </div>`).join("")}
@@ -4086,6 +4159,7 @@
     wireComposer();
     wireControlCenterCommands();
     wireAvatarPicker();
+    wireEnvironmentPicker();
     wireDigitalHumanOptions();
     wireDigitalHumanForm();
     wireAgent3D();
@@ -4238,6 +4312,64 @@
       });
     }
 
+    // Final acceptance pass (2026-09-08): Provider accounts had governed,
+    // audited add/select/revoke/validate backend but no guided form - the
+    // same "requires typing the raw command" gap Connections had. A
+    // guided form over the same real run_provider_command a terminal's
+    // own "provider" verb already accepts, never a new backend operation.
+    const provCategory = stage.querySelector("#cc-prov-category");
+    const provView = stage.querySelector("#cc-prov-view");
+    const provAccounts = stage.querySelector("#cc-prov-accounts");
+    const provBackend = stage.querySelector("#cc-prov-backend");
+    const provAccount = stage.querySelector("#cc-prov-account");
+    const provAction = stage.querySelector("#cc-prov-action");
+    const provCredential = stage.querySelector("#cc-prov-credential");
+    const provModel = stage.querySelector("#cc-prov-model");
+    const provGo = stage.querySelector("#cc-prov-go");
+    if(provView && provCategory){
+      provView.addEventListener("click", () => {
+        const category = provCategory.value.trim();
+        if(!category){ out.textContent = "Enter a category first, e.g. llm_provider."; return; }
+        runCommand("provider " + category);
+      });
+    }
+    if(provAccounts && provCategory){
+      provAccounts.addEventListener("click", () => {
+        const category = provCategory.value.trim();
+        if(!category){ out.textContent = "Enter a category first, e.g. llm_provider."; return; }
+        runCommand("provider " + category + " accounts");
+      });
+    }
+    if(provGo && provCategory && provBackend && provAccount && provAction && provCredential && provModel){
+      provGo.addEventListener("click", () => {
+        const category = provCategory.value.trim();
+        const backend = provBackend.value.trim();
+        const account = provAccount.value.trim();
+        const action = provAction.value;
+        const credential = provCredential.value;
+        const model = provModel.value.trim();
+        if(!category){ out.textContent = "Enter a category first, e.g. llm_provider."; return; }
+        if(!backend){ out.textContent = "Enter a backend first, e.g. anthropic."; return; }
+        let command = null;
+        if(action === "add"){
+          if(!account || !credential){ out.textContent = "add needs both an account id and a credential."; return; }
+          command = "provider " + category + " add " + backend + " " + account + " " + credential + (model ? " " + model : "");
+        }else if(action === "select"){
+          if(!account){ out.textContent = "select needs an account id."; return; }
+          command = "provider " + category + " select " + backend + " " + account;
+        }else if(action === "revoke"){
+          if(!account){ out.textContent = "revoke needs an account id."; return; }
+          command = "provider " + category + " revoke " + backend + " " + account;
+        }else if(action === "validate"){
+          command = "provider " + category + " validate " + backend + (credential ? " " + credential : "");
+        }
+        if(command){
+          runCommand(command);
+          provCredential.value = "";
+        }
+      });
+    }
+
     // Control Center repair item #1: a real toggle, not a fake frontend
     // switch - each click sends the identical "capabilities enable/
     // disable <name>" command the generic box already supports, through
@@ -4281,6 +4413,45 @@
         if(command) runCommand(command);
       });
     }
+
+    // Connections Management: a guided form over the same real
+    // run_connections_command a terminal's own "connections" verb already
+    // accepts - connect/disconnect/status/validate, never a new backend
+    // operation. The credential field is password-masked and cleared
+    // immediately after the command is sent; it is never read back from
+    // the server (ProviderAccount.describe() never carries one).
+    const connService = stage.querySelector("#cc-conn-service");
+    const connAccount = stage.querySelector("#cc-conn-account");
+    const connAction = stage.querySelector("#cc-conn-action");
+    const connCredential = stage.querySelector("#cc-conn-credential");
+    const connModel = stage.querySelector("#cc-conn-model");
+    const connGo = stage.querySelector("#cc-conn-go");
+    if(connGo && connService && connAccount && connAction && connCredential && connModel){
+      connGo.addEventListener("click", () => {
+        const service = connService.value.trim();
+        const account = connAccount.value.trim();
+        const action = connAction.value;
+        const credential = connCredential.value;
+        const model = connModel.value.trim();
+        if(!service){ out.textContent = "Enter a service name first (see 'view all' above)."; return; }
+        let command = null;
+        if(action === "connect"){
+          if(!account || !credential){ out.textContent = "connect needs both an account id and a credential."; return; }
+          command = "connections " + service + " connect " + account + " " + credential + (model ? " " + model : "");
+        }else if(action === "disconnect"){
+          if(!account){ out.textContent = "disconnect needs an account id."; return; }
+          command = "connections " + service + " disconnect " + account;
+        }else if(action === "status"){
+          command = "connections " + service + " status";
+        }else if(action === "validate"){
+          command = "connections " + service + " validate" + (credential ? " " + credential : "");
+        }
+        if(command){
+          runCommand(command);
+          connCredential.value = "";
+        }
+      });
+    }
   }
 
   function wireAvatarPicker(){
@@ -4308,6 +4479,38 @@
         // The chosen appearance, and nothing about who this agent is,
         // changed - a fresh read shows the real, governed result rather
         // than this button guessing what the write actually did.
+        await refreshFromLive();
+      });
+    });
+  }
+
+  // Final acceptance sweep (2026-09-08): the identical picker/POST/
+  // refresh shape as wireAvatarPicker() above, for the sibling
+  // EnvironmentProvider preference - a real, governed backend and a
+  // real POST /environment route already existed with no UI control
+  // reaching either.
+  function wireEnvironmentPicker(){
+    if(!LIVE) return;
+    stage.querySelectorAll(".env-picker .pick").forEach(btn=>{
+      btn.addEventListener("click", async () => {
+        if(btn.disabled || btn.classList.contains("on")) return;
+        const agent = btn.dataset.envAgent, environmentId = btn.dataset.envId;
+        const group = btn.closest(".env-picker");
+        group.querySelectorAll(".pick").forEach(b=>b.disabled = true);
+        try{
+          const res = await fetch("environment", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({agent, environment_id: environmentId}),
+          });
+          if(!res.ok){
+            group.querySelectorAll(".pick").forEach(b=>b.disabled = false);
+            return;
+          }
+        }catch(e){
+          group.querySelectorAll(".pick").forEach(b=>b.disabled = false);
+          return;
+        }
         await refreshFromLive();
       });
     });

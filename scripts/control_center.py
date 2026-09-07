@@ -48,7 +48,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from scripts.exchange import exchange, memory_for  # noqa: E402
-from src.services.audit.action_log import DEFAULT_ACTION_LOG_PATH, load_action_log  # noqa: E402
+from src.services.audit.action_log import (  # noqa: E402
+    DEFAULT_ACTION_LOG_PATH,
+    ActionLogEntry,
+    load_action_log,
+    record_action,
+    utc_now as audit_utc_now,
+)
 from src.agents.tools.communication import (  # noqa: E402
     CommunicationCallTool,
     CommunicationReadTool,
@@ -1302,12 +1308,142 @@ def _run_system_upgrade_command(centre: "ControlCenter", args: list[str]) -> str
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Administrative-write audit trail (2026-09-08).
+#
+# The gap CHECK found after the Control Center repair: provider/
+# connections/capabilities/ecosystem writes reachable through /command
+# were not recorded anywhere durable - only a conversational
+# consequential action (see scripts/exchange.py's own
+# retain/CONSEQUENTIAL_CAPABILITIES wiring) ever reached
+# src.services.audit.action_log. Closed here, once, at the one real
+# place both doors (a terminal's own run_command, and serve_ui.py's
+# route_command, which calls this identical function for the same
+# reason it already reuses run_provider_command etc.) already share -
+# never a second recording call at either door, and never a second
+# audit store. `classify_administrative_write` is also the confirmation
+# gate's own classifier (see route_command's docstring) - one
+# definition of "which commands are administrative writes", read by
+# both concerns.
+# ---------------------------------------------------------------------------
+
+
+def classify_administrative_write(command: str) -> "tuple[bool, str]":
+    """Whether `command` is one of the administrative writes this project
+    gates behind confirmation and records to the durable audit trail, and
+    - when it is - a plain-language description of what it would do,
+    shown to a person before they confirm it. Returns ``(False, "")`` for
+    everything else, including every read-only verb and every
+    pre-existing preference-setting verb (avatar/environment/profile/
+    voice) - cosmetic preferences, not the credential/provider/
+    capability/evolution surface this covers.
+    """
+    parts = command.split()
+    if not parts:
+        return False, ""
+    verb = parts[0].lower()
+
+    if verb == "capabilities" and len(parts) >= 3 and parts[1].lower() in ("enable", "disable"):
+        return True, f"{parts[1].lower()} the '{parts[2]}' capability"
+
+    if verb == "provider" and len(parts) >= 3 and parts[2].lower() in ("add", "select", "revoke"):
+        category, action = parts[1], parts[2].lower()
+        if action == "add" and len(parts) >= 5:
+            return True, (
+                f"add a new '{parts[3]}' account '{parts[4]}' to '{category}' "
+                "(the credential itself is never shown here)"
+            )
+        if action == "select" and len(parts) >= 5:
+            return True, f"make '{parts[3]}/{parts[4]}' the active account for '{category}'"
+        if action == "revoke" and len(parts) >= 5:
+            return True, f"revoke the account '{parts[3]}/{parts[4]}' from '{category}'"
+        return True, f"{action} an account for '{category}'"
+
+    if verb == "connections" and len(parts) >= 3 and parts[2].lower() in ("connect", "disconnect"):
+        return True, f"{parts[2].lower()} the '{parts[1]}' connection"
+
+    if (
+        verb == "ecosystem" and len(parts) >= 5
+        and parts[2].lower() in ("run", "rollback")
+        and parts[4].lower() in ("yes", "y", "true")
+    ):
+        component_id, sub_action, proposal_id = parts[1], parts[2].lower(), parts[3]
+        verb_word = "apply" if sub_action == "run" else "roll back"
+        return True, f"{verb_word} proposal '{proposal_id}' for component '{component_id}'"
+
+    return False, ""
+
+
+def _administrative_write_succeeded(verb: str, result: str) -> bool:
+    """Whether an administrative write's own result string reports
+    genuine success - a precise, per-verb whitelist of this project's
+    own actual success wording, verified by reading every real success
+    and failure return in run_provider_command/run_connections_command/
+    run_capability_registry_command/run_ecosystem_command directly, not
+    a generic "does this look like an error" guess.
+
+    A blacklist of failure markers ("FAILED:", "no such", ...) was tried
+    first and rejected: real review found at least three failure paths
+    reachable through these exact write actions that never say any of
+    those words - a misdirected 'connections <provider-backend> connect'
+    ("... is a provider backend ..."), gmail's own connect/disconnect
+    refusal ("gmail authenticates via OAuth ..."), and capabilities'
+    own structural-fallback refusal ("... cannot be disabled ..."). A
+    whitelist of the few, consistent success sentences these functions
+    actually return is the more accurate signal - anything not
+    recognisably one of them is honestly recorded as failed, which is
+    the safer direction for an audit trail to be wrong in.
+    """
+    text = result.strip()
+    if verb == "provider":
+        return text.startswith("added ") or " is now active." in text or text.startswith("revoked ")
+    if verb == "connections":
+        return text.startswith("connected ") or text.startswith("disconnected ")
+    if verb == "capabilities":
+        return " is now enabled " in text or " is now disabled " in text
+    if verb == "ecosystem":
+        return text.startswith("OK:")
+    return False
+
+
+def _record_if_administrative_write(command: str, result: str, action_log_path) -> None:
+    """Append one durable audit entry when, and only when, `command` was
+    a genuine administrative write - never for a read, never for a
+    preference-setting verb, and never twice for the same execution
+    (called exactly once, from run_command's own single dispatch for
+    that verb). `action_log_path` of None (every existing caller that
+    does not deliberately choose one - including every test that has
+    not opted in) records nothing, the identical opt-in shape
+    scripts/exchange.py's own action_log_path parameter already has.
+    """
+    if action_log_path is None:
+        return
+    requires_confirmation, _ = classify_administrative_write(command)
+    if not requires_confirmation:
+        return
+    verb = command.strip().split(None, 1)[0].lower()
+    record_action(
+        ActionLogEntry(
+            timestamp=audit_utc_now().isoformat(),
+            # A person operating the Control Center directly, not an
+            # agent's own action - the existing field must not
+            # misrepresent one as the other.
+            actor="operator",
+            capability=f"admin.{verb}",
+            succeeded=_administrative_write_succeeded(verb, result),
+        ),
+        path=action_log_path,
+    )
+
+
 def run_command(
     centre: ControlCenter,
     command: str,
     columns: int,
     channel: Channel,
     conversation: Conversation,
+    *,
+    action_log_path: "str | Path | None" = None,
 ) -> str:
     """One command, one screen. Overview first, detail on demand.
 
@@ -1318,6 +1454,15 @@ def run_command(
     phases is that requests travel through the composed door and are recorded
     in the composed room; a parameter that can be skipped is a door that can be
     walked around.
+
+    ``action_log_path``, when given, durably records the administrative
+    writes among ``capabilities``/``provider``/``connections``/``ecosystem``
+    (see ``classify_administrative_write``) after they actually execute -
+    the one real place both a terminal session and ``serve_ui.py``'s own
+    ``route_command`` end up, so the identical command typed at either
+    door is recorded by identical code, once. None (the default, and
+    every existing caller that does not pass this) records nothing -
+    unchanged behaviour for every caller that has not opted in.
     """
     command = command.strip()
     if not command:
@@ -1646,16 +1791,24 @@ def run_command(
     if verb == "capabilities":
         if not rest:
             return render_capabilities(centre)
-        return run_capability_registry_command(centre, rest)
+        result = run_capability_registry_command(centre, rest)
+        _record_if_administrative_write(command, result, action_log_path)
+        return result
 
     if verb == "provider":
-        return run_provider_command(centre, rest)
+        result = run_provider_command(centre, rest)
+        _record_if_administrative_write(command, result, action_log_path)
+        return result
 
     if verb == "connections":
-        return run_connections_command(centre, rest)
+        result = run_connections_command(centre, rest)
+        _record_if_administrative_write(command, result, action_log_path)
+        return result
 
     if verb == "ecosystem":
-        return run_ecosystem_command(centre, rest)
+        result = run_ecosystem_command(centre, rest)
+        _record_if_administrative_write(command, result, action_log_path)
+        return result
 
     if verb == "talk":
         if not rest:
@@ -1797,7 +1950,9 @@ def interactive(
                 centre, channel, conversation = reloaded
             continue
         print()
-        print(run_command(centre, command, columns, channel, conversation))
+        print(run_command(
+            centre, command, columns, channel, conversation, action_log_path=DEFAULT_ACTION_LOG_PATH
+        ))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1836,7 +1991,9 @@ def main(argv: list[str] | None = None) -> int:
     command = " ".join(args.command)
     if args.category and command.strip().lower().startswith("history"):
         command = f"history {args.category}"
-    print(run_command(centre, command, columns, channel, conversation))
+    print(run_command(
+        centre, command, columns, channel, conversation, action_log_path=DEFAULT_ACTION_LOG_PATH
+    ))
     return 0
 
 

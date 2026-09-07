@@ -98,7 +98,15 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from scripts.control_center import build as assemble_system, run_command  # noqa: E402
+from scripts.control_center import (  # noqa: E402
+    ConfigurationError,
+    ProviderConfigurationError,
+    TimezoneError,
+    build as assemble_system,
+    check_configuration,
+    classify_administrative_write,
+    run_command,
+)
 from scripts.exchange import exchange, memory_for  # noqa: E402
 from src.services.audit.action_log import DEFAULT_ACTION_LOG_PATH, load_action_log  # noqa: E402
 from scripts.export_ui import render  # noqa: E402
@@ -602,50 +610,12 @@ def _consume_confirmation_token(token: object, command: str) -> bool:
     return time.monotonic() <= expires_at and pending_command == command
 
 
-def classify_administrative_write(command: str) -> "tuple[bool, str]":
-    """Whether `command` is one of the administrative writes this repair
-    item gates, and - when it is - a plain-language description of what
-    it would do, shown to the person before they confirm. Returns
-    ``(False, "")`` for everything else, including every read-only verb.
-    """
-    parts = command.split()
-    if not parts:
-        return False, ""
-    verb = parts[0].lower()
-
-    if verb == "capabilities" and len(parts) >= 3 and parts[1].lower() in ("enable", "disable"):
-        return True, f"{parts[1].lower()} the '{parts[2]}' capability"
-
-    if verb == "provider" and len(parts) >= 3 and parts[2].lower() in ("add", "select", "revoke"):
-        category, action = parts[1], parts[2].lower()
-        if action == "add" and len(parts) >= 5:
-            return True, (
-                f"add a new '{parts[3]}' account '{parts[4]}' to '{category}' "
-                "(the credential itself is never shown here)"
-            )
-        if action == "select" and len(parts) >= 5:
-            return True, f"make '{parts[3]}/{parts[4]}' the active account for '{category}'"
-        if action == "revoke" and len(parts) >= 5:
-            return True, f"revoke the account '{parts[3]}/{parts[4]}' from '{category}'"
-        return True, f"{action} an account for '{category}'"
-
-    if verb == "connections" and len(parts) >= 3 and parts[2].lower() in ("connect", "disconnect"):
-        return True, f"{parts[2].lower()} the '{parts[1]}' connection"
-
-    if (
-        verb == "ecosystem" and len(parts) >= 5
-        and parts[2].lower() in ("run", "rollback")
-        and parts[4].lower() in ("yes", "y", "true")
-    ):
-        component_id, sub_action, proposal_id = parts[1], parts[2].lower(), parts[3]
-        verb_word = "apply" if sub_action == "run" else "roll back"
-        return True, f"{verb_word} proposal '{proposal_id}' for component '{component_id}'"
-
-    return False, ""
-
-
 def route_command(
-    command: object, confirm_token: object, system: LiveSystem
+    command: object,
+    confirm_token: object,
+    system: LiveSystem,
+    *,
+    action_log_path: "str | Path | None" = None,
 ) -> tuple[int, bytes, str]:
     """Decide what to answer for `POST /command` - administrative Control
     Center commands, reachable over this project's second door.
@@ -671,6 +641,17 @@ def route_command(
     exact command, executes. Everything else (every read-only view, and
     every pre-existing preference-setting verb) executes immediately,
     exactly as before this item existed.
+
+    ``action_log_path``, when given, is passed straight through to
+    ``run_command`` - the one real place that both classifies and records
+    an administrative write (see its own docstring), reused here rather
+    than a second recording call at this layer, so a command run from a
+    terminal and the identical command run from here are recorded by the
+    identical code, once. Never recorded for the earlier "pending" return
+    above, so a cancelled write leaves no record. None (the default)
+    writes nothing - the identical opt-in shape ``scripts/exchange.py``'s
+    own ``action_log_path`` parameter already has. Production callers
+    pass the real, shared default path explicitly.
     """
     if not isinstance(command, str) or not command.strip():
         return (
@@ -712,7 +693,10 @@ def route_command(
                 "application/json; charset=utf-8",
             )
 
-        result = run_command(system.centre, normalised, COMMAND_COLUMNS, system.channel, system.conversation)
+        result = run_command(
+            system.centre, normalised, COMMAND_COLUMNS, system.channel, system.conversation,
+            action_log_path=action_log_path,
+        )
 
     if requires_confirmation:
         return (
@@ -771,7 +755,9 @@ class SnapshotHandler(BaseHTTPRequestHandler):
         elif self.path == "/command":
             command = payload.get("command") if isinstance(payload, dict) else None
             confirm_token = payload.get("confirm_token") if isinstance(payload, dict) else None
-            status, body, content_type = route_command(command, confirm_token, self.server.system)
+            status, body, content_type = route_command(
+                command, confirm_token, self.server.system, action_log_path=DEFAULT_ACTION_LOG_PATH
+            )
         else:
             agent = payload.get("agent") if isinstance(payload, dict) else None
             fields = payload.get("fields") if isinstance(payload, dict) else None
@@ -799,7 +785,20 @@ def main(argv: list[str] | None = None) -> int:
     settings = Settings.from_env()
     configure_logging("WARNING")
 
-    system = build_live_system(settings)
+    try:
+        check_configuration(settings)
+        system = build_live_system(settings)
+    except (ConfigurationError, ProviderConfigurationError, TimezoneError) as exc:
+        # Final comprehensive audit (2026-09-08): the identical guard
+        # every other real entry point (main.py, control_center.py,
+        # heartbeat.py) already runs before building anything - found
+        # missing here, the one entry point that stays running longest.
+        # A server that started anyway on an incoherent configuration
+        # would keep answering requests from a system that should never
+        # have been built.
+        print(f"configuration error: {exc}")
+        return 2
+
     httpd = LiveServer((args.host, args.port), system)
     print(f"serving http://{args.host}:{args.port}/  (Ctrl+C to stop)")
     try:
