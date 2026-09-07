@@ -57,14 +57,36 @@ class TestActualCurrentRepositoryState:
 
 
 class TestCommittedVsUncommittedWork:
-    def test_the_real_working_tree_is_not_clean(self):
-        """A fact about this repository's actual current state: it has
-        genuine, substantial uncommitted work (independently established
-        earlier this session - 54+ modified tracked files)."""
-        state = current_git_state()
-        assert not state.is_clean
-        assert len(state.modified_tracked) > 0
-        assert len(state.untracked) > 0
+    def test_a_modified_tracked_file_is_detected(self):
+        """Self-verifying, without hardcoding a moment-in-time snapshot -
+        the identical repair test_a_newly_created_file_is_detected_as_
+        untracked below already documents for the untracked half of this
+        same test's original claim ("54+ modified tracked files",
+        independently true when this test was written, and false again
+        the moment the working tree next reached a clean commit - which
+        it has, repeatedly, since). This makes its own fact: a real,
+        temporary, byte-for-byte-reverted edit to an already-tracked
+        file, so the assertion stays true regardless of how many commits
+        have landed since, exactly as the untracked version already
+        does."""
+        target = REPO_ROOT / "README.md"
+        original = target.read_bytes()
+        # Scoped to this one file rather than requiring a pristine whole
+        # repository - a real, unrelated, legitimately in-progress edit
+        # elsewhere (this very file, mid-development, included) must
+        # never make this test spuriously fail.
+        assert "README.md" not in current_git_state().modified_tracked
+
+        target.write_bytes(original + b"\n")
+        try:
+            state = current_git_state()
+            assert not state.is_clean
+            assert "README.md" in state.modified_tracked
+        finally:
+            target.write_bytes(original)
+        assert "README.md" not in current_git_state().modified_tracked, (
+            "the temporary edit was not fully reverted"
+        )
 
     def test_modified_and_untracked_are_disjoint(self):
         """A path is either an existing tracked file with local edits, or
