@@ -179,7 +179,7 @@ additional vendor is a future idea (0.10), not a missing requirement.
 
 ### 0.8 Decisions that must remain stable
 
-§8 (Standing safety boundaries, 12 items) and §52.5 (architectural
+§8 (Standing safety boundaries, 13 items) and §52.5 (architectural
 decisions with reasons) are the authoritative record. Restated at their
 most compressed, for the questions this project must never re-litigate by
 accident:
@@ -189,7 +189,12 @@ accident:
   future provider is never "changing Alfred's Brain" (§8.7, §52.5).
 - Each provider owns its own credential; none may be substituted for
   another's; a future second real provider needs its **own** settings
-  field, never `MANAGER_API_KEY` (§8.9).
+  field, never `MANAGER_API_KEY` (§8.9). This is a fact about
+  **providers/vendors**, never about **agents**: a single configured
+  provider connection is shared by every agent by default, and a
+  specialist never needs its own separate credential merely for being a
+  separate agent — `specialist_accounts` is an optional, additive seam,
+  never a requirement (§8.13).
 - Memory belongs to the agent/user/conversation store, never to a
   provider; switching providers must never erase, silo, or hide it (§8.8).
 - Voice is independent of Brain and provider in both directions; a local,
@@ -587,6 +592,29 @@ planning. Not a redesign — an accumulation on the existing foundation.
     silently substitute a different installed voice (e.g. a generic Windows
     voice) once a specific voice has been genuinely configured and confirmed
     available.
+13. **A single configured provider connection may serve every agent in the
+    ecosystem; a specialist never needs its own separate credential merely
+    because it is a separate agent.** Canonical correction, recorded here so
+    it is never re-derived wrong from item 9 above by proximity: item 9 says
+    a *vendor* owns its own credential (Anthropic's key is never substituted
+    for OpenAI's) — a fact about **providers**, not about **agents**. The
+    default, expected, single-connection deployment already works exactly
+    this way: `src/composition.py::build_runtime`'s `specialist_accounts`
+    parameter defaults to `None` for every real caller
+    (`scripts/control_center.py::build`, `scripts/heartbeat.py`,
+    `scripts/export_ui.py` — confirmed by direct source inspection, none of
+    them pass it), and with it absent, every agent — Alfred and every
+    specialist alike — resolves the identical, one, environment-configured
+    credential (`src/providers/factory.py::build_provider`'s own docstring:
+    "Omitted, this reproduces the prior, environment-based lookup exactly").
+    `ProviderAccount`-per-specialist (Phase 1.5) is a real, tested,
+    *optional* seam for a hypothetical future need (a specialist someday
+    independently authorised against a genuinely different vendor account)
+    — never a requirement, never the default, and never something the
+    Control Center needs to expose merely because the mechanism exists.
+    "Independent Brain" (item 7, §11, §52.5) means each agent's own `Brain`
+    *object* is a distinct instance nothing else mutates — it has never
+    meant, and must never come to mean, a distinct *credential* per agent.
 
 ---
 
