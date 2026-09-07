@@ -25,6 +25,11 @@ from src.providers.media.image import (
     PollinationsImageProvider,
 )
 from src.providers.media.narration import KokoroNarrationProvider, NarrationProvider, NullNarrationProvider
+from src.providers.media.transcription import (
+    NullTranscriptionProvider,
+    TranscriptionProvider,
+    WhisperTranscriptionProvider,
+)
 from src.providers.media.video import FFmpegVideoComposer, NullVideoComposer, VideoComposer
 from src.providers.media.video_clipping import FFmpegVideoClipper, NullVideoClipper, VideoClipper
 from src.providers.media.video_generation import (
@@ -57,6 +62,15 @@ RUNWAY_KEY_ENV = "RUNWAY_API_KEY"
 # one video vendor yet.
 VEO_KEY_ENV = "VEO_API_KEY"
 
+# Video-*understanding* checkpoint: Whisper's own, dedicated credential -
+# never the openai_provider LLM key this project may also have
+# configured, even though both happen to be issued by OpenAI. The
+# identical per-*axis*, not per-*vendor*, isolation RUNWAY_KEY_ENV/
+# VEO_KEY_ENV already establish (see this module's own docstring),
+# applied to a transcription vendor that happens to share a company
+# with an entirely unrelated axis.
+WHISPER_KEY_ENV = "WHISPER_API_KEY"
+
 
 @dataclass(frozen=True)
 class MediaTools:
@@ -83,12 +97,23 @@ class MediaTools:
     # would still get the honest NullVideoClipper() every other Null*
     # collaborator here already is.
     clipper: VideoClipper = field(default_factory=NullVideoClipper)
+    # Video-*understanding* checkpoint: real speech-to-text over a
+    # video's own, locally-extracted audio - genuinely different work
+    # from clipper's mechanical cut, and from video_generator's
+    # synthesis. Vendor-backed like video_generator (a real credential
+    # may be required), so it gets its own independent axis
+    # (settings.video_understanding) rather than being folded into
+    # `media` or `video_generation` - the same "one deployment may want
+    # one without the other" reasoning this class's own docstring
+    # already states for every other collaborator here.
+    transcriber: TranscriptionProvider = field(default_factory=NullTranscriptionProvider)
 
     @property
     def name(self) -> str:
         return (
             f"{self.narrator.name}+{self.illustrator.name}+"
-            f"{self.composer.name}+{self.video_generator.name}+{self.clipper.name}"
+            f"{self.composer.name}+{self.video_generator.name}+"
+            f"{self.clipper.name}+{self.transcriber.name}"
         )
 
 
@@ -105,6 +130,60 @@ def _veo_credential(env: Mapping[str, str] | None = None) -> str | None:
     source = os.environ if env is None else env
     key = (source.get(VEO_KEY_ENV) or "").strip()
     return key or None
+
+
+def _whisper_credential(env: Mapping[str, str] | None = None) -> str | None:
+    """Whisper's own credential, and only Whisper's - never the LLM
+    provider's ``OPENAI_API_KEY``, even when both happen to be set."""
+    source = os.environ if env is None else env
+    key = (source.get(WHISPER_KEY_ENV) or "").strip()
+    return key or None
+
+
+def _build_video_understanding(
+    settings: Settings,
+    env: Mapping[str, str] | None = None,
+    account: ProviderAccount | None = None,
+) -> TranscriptionProvider:
+    """Construct the speech-transcription provider named by ``account``
+    (when given) or, otherwise, ``settings.video_understanding`` - the
+    identical "account picks the vendor, else Settings does" rule
+    ``_build_video_generation`` already establishes, applied to this
+    genuinely separate axis.
+
+    Fails fast on a missing credential, before any vendor SDK or
+    network call - the identical discipline every other real provider
+    builder in this project already holds itself to.
+    """
+    provider_name = account.provider if account is not None else settings.video_understanding
+
+    if provider_name == "null":
+        return NullTranscriptionProvider()
+
+    if provider_name == "whisper":
+        credential = account.credential if account is not None else _whisper_credential(env)
+        if credential is None:
+            raise ProviderConfigurationError(
+                "The 'whisper' video-understanding provider is selected but no "
+                f"API key is configured. Set {WHISPER_KEY_ENV} in the "
+                "environment. To run without one instead, set "
+                "MANAGER_VIDEO_UNDERSTANDING=null (the default)."
+            )
+        model = (account.model if account is not None and account.model else None) or settings.whisper_model
+        return WhisperTranscriptionProvider(api_key=credential, model=model)
+
+    raise ValueError(
+        f"Unknown video-understanding provider {provider_name!r}. "
+        f"Available: {', '.join(available_video_understanding_backends())}"
+    )
+
+
+def available_video_understanding_backends() -> list[str]:
+    """Every speech-transcription backend name that can currently be
+    configured - "null" (honestly unavailable) plus one real,
+    credentialed vendor, the identical shape
+    ``available_video_generation_backends`` already takes."""
+    return ["null", "whisper"]
 
 
 def _build_video_generation(
@@ -167,27 +246,35 @@ def available_video_generation_backends() -> list[str]:
     return ["null", "runway", "veo"]
 
 
-def _build_null(settings: Settings, video_generator: VideoGenerationProvider) -> MediaTools:
+def _build_null(
+    settings: Settings, video_generator: VideoGenerationProvider, transcriber: TranscriptionProvider
+) -> MediaTools:
     return MediaTools(
         narrator=NullNarrationProvider(),
         illustrator=NullImageProvider(),
         composer=NullVideoComposer(),
         video_generator=video_generator,
         clipper=NullVideoClipper(),
+        transcriber=transcriber,
     )
 
 
-def _build_local(settings: Settings, video_generator: VideoGenerationProvider) -> MediaTools:
+def _build_local(
+    settings: Settings, video_generator: VideoGenerationProvider, transcriber: TranscriptionProvider
+) -> MediaTools:
     return MediaTools(
         narrator=KokoroNarrationProvider(DEFAULT_KOKORO_MODEL_PATH, DEFAULT_KOKORO_VOICES_PATH),
         illustrator=LocalTitleCardImageProvider(),
         composer=FFmpegVideoComposer(),
         video_generator=video_generator,
         clipper=FFmpegVideoClipper(),
+        transcriber=transcriber,
     )
 
 
-def _build_ai_image(settings: Settings, video_generator: VideoGenerationProvider) -> MediaTools:
+def _build_ai_image(
+    settings: Settings, video_generator: VideoGenerationProvider, transcriber: TranscriptionProvider
+) -> MediaTools:
     """The AI media-generation checkpoint's own backend: genuine AI
     image generation (pollinations.ai - see
     ``src/providers/media/image.py``'s own docstring for why this
@@ -204,6 +291,7 @@ def _build_ai_image(settings: Settings, video_generator: VideoGenerationProvider
         composer=FFmpegVideoComposer(),
         video_generator=video_generator,
         clipper=FFmpegVideoClipper(),
+        transcriber=transcriber,
     )
 
 
@@ -211,7 +299,7 @@ def _build_ai_image(settings: Settings, video_generator: VideoGenerationProvider
 # constructed - no model loaded, no binary located, no network reached -
 # unless actually selected, the identical reasoning every other factory
 # here already states.
-_BUILDERS: dict[str, Callable[[Settings, VideoGenerationProvider], MediaTools]] = {
+_BUILDERS: dict[str, Callable[[Settings, VideoGenerationProvider, TranscriptionProvider], MediaTools]] = {
     "null": _build_null,
     "local": _build_local,
     "ai_image": _build_ai_image,
@@ -227,13 +315,17 @@ def build_media(
     settings: Settings,
     env: Mapping[str, str] | None = None,
     video_generation_account: ProviderAccount | None = None,
+    video_understanding_account: ProviderAccount | None = None,
 ) -> MediaTools:
     """Construct the media stack named by ``settings.media``, with its
     own AI video-generation provider built independently from
     ``settings.video_generation`` (or ``video_generation_account``, when
-    given - the identical account-overrides-Settings seam
+    given) and its own speech-transcription provider built independently
+    from ``settings.video_understanding`` (or ``video_understanding_account``,
+    when given) - the identical account-overrides-Settings seam
     ``src/providers/factory.py::build_provider`` already established for
-    the Brain's own providers).
+    the Brain's own providers, applied to two more, genuinely independent
+    axes.
 
     Fails fast and loudly on an unknown name, the same rule every other
     factory in this project already follows. Construction itself is
@@ -250,6 +342,7 @@ def build_media(
         ) from None
 
     video_generator = _build_video_generation(settings, env, video_generation_account)
-    tools = builder(settings, video_generator)
+    transcriber = _build_video_understanding(settings, env, video_understanding_account)
+    tools = builder(settings, video_generator, transcriber)
     logger.info("media backend ready: %s", tools.name)
     return tools

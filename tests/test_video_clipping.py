@@ -326,6 +326,15 @@ class TestClipVideoHalfBrainSafety:
         assert chosen is not CLIP_VIDEO
 
     def test_ai_guided_without_a_transcript_is_refused_not_guessed(self, tmp_path, source_video):
+        """Video-understanding checkpoint: this no longer refuses
+        immediately. clip_video now genuinely attempts to derive real
+        evidence from the video's own actual audio first (see that
+        function's own docstring, step 3) - real, local FFmpeg
+        extraction (which succeeds, since source_video has a genuine
+        audio track) followed by transcription, which fails honestly
+        here because MediaTools.transcriber defaults to
+        NullTranscriptionProvider. Still refused, never guessed - only
+        the reason now names the real, deeper attempt that was made."""
         source_path = tmp_path / "clip_source.mp4"
         source_path.write_bytes(source_video)
         runtime, manager, channel, conversation = real_manager(
@@ -335,7 +344,8 @@ class TestClipVideoHalfBrainSafety:
             Task(description=f"clip the video {source_path}, find the best moments")
         )
         assert not result.succeeded
-        assert "video-understanding/transcription provider" in result.error
+        assert "understanding its actual content" in result.error
+        assert "speech-transcription provider" in result.error
 
 
 class TestClipVideoAIGuidedWithARealTranscript:

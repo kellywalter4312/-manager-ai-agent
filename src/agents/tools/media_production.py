@@ -10,13 +10,15 @@ objective loop's own job (``src/manager/objective_loop.py``), driven by
 other kind of work; nothing about media production gets a second,
 competing planning mechanism. This tool answers a single, narrow
 question for one step at a time - "narrate this text", "illustrate this
-description", "compose these assets into a video", or "generate an AI
-video of this" - and does exactly that, through whichever real
+description", "compose these assets into a video", "generate an AI
+video of this", "cut a real clip from this video", or "transcribe this
+video's own real audio" - and does exactly that, through whichever real
 ``NarrationProvider``/``ImageProvider``/``VideoComposer``/
-``VideoGenerationProvider`` it was constructed with.
+``VideoGenerationProvider``/``VideoClipper``/``TranscriptionProvider``
+it was constructed with.
 
 Registered under the tool name ``media_production`` - one name for all
-four operations, the same reason ``live_information`` is one tool
+six operations, the same reason ``live_information`` is one tool
 rather than one per data source: what actually backs each operation is
 a replaceable provider, never something this class or its caller needs
 to know the vendor of.
@@ -42,7 +44,8 @@ from pathlib import Path
 from src.agents.tools.tool import Tool, ToolSpec
 from src.providers.media.image import ImageProvider
 from src.providers.media.narration import NarrationProvider
-from src.providers.media.video import FFmpegVideoComposer, VideoComposer, VideoScene
+from src.providers.media.transcription import NullTranscriptionProvider, TranscriptionProvider
+from src.providers.media.video import FFmpegVideoComposer, VideoComposer, VideoScene, extract_audio_wav
 from src.providers.media.video_clipping import ClipSpec, NullVideoClipper, VideoClipper
 from src.providers.media.video_generation import NullVideoGenerationProvider, VideoGenerationProvider
 
@@ -105,9 +108,11 @@ def parse_clip_specs(content: str) -> "list[ClipSpec]":
 
 
 class MediaProductionTool(Tool):
-    """Wraps a narration provider, an image provider and a video
-    composer behind the ordinary ``Tool`` contract - one tool, three
-    operations, each a genuine, real, local production step."""
+    """Wraps a narration provider, an image provider, a video composer,
+    an AI video-generation provider, a video clipper and a
+    speech-transcription provider behind the ordinary ``Tool`` contract -
+    one tool, six operations, each a genuine, real production or
+    understanding step."""
 
     def __init__(
         self,
@@ -116,6 +121,7 @@ class MediaProductionTool(Tool):
         composer: VideoComposer,
         video_generator: VideoGenerationProvider | None = None,
         clipper: VideoClipper | None = None,
+        transcriber: TranscriptionProvider | None = None,
         *,
         voice_id: str = "am_eric",
         asset_dir: Path | None = None,
@@ -131,6 +137,9 @@ class MediaProductionTool(Tool):
         # Video clipping checkpoint: the identical optional/additive
         # default, for the identical reason.
         self._clipper = clipper or NullVideoClipper()
+        # Video-understanding checkpoint: the identical optional/additive
+        # default, for the identical reason.
+        self._transcriber = transcriber or NullTranscriptionProvider()
         self._voice_id = voice_id
         self._asset_dir = asset_dir or DEFAULT_ASSET_DIR
 
@@ -142,8 +151,10 @@ class MediaProductionTool(Tool):
                 "Produces one real media asset per call - narrate text into "
                 "audio, illustrate a description into an image, compose "
                 "already-produced assets into a video, generate a real AI "
-                "video directly, or cut real clips from an existing video - "
-                "never a fabricated or placeholder file."
+                "video directly, cut real clips from an existing video, or "
+                "transcribe an existing video's own real audio into a "
+                "timestamped transcript - never a fabricated or placeholder "
+                "file, and never invented transcript text."
             ),
             schema={"operation": str, "content": str},
         )
@@ -170,9 +181,11 @@ class MediaProductionTool(Tool):
             return self._generate_video(content)
         if operation == "clip":
             return self._clip(content)
+        if operation == "transcribe":
+            return self._transcribe(content)
         raise ValueError(
-            f"unknown media_production operation {operation!r}; "
-            "expected one of: narrate, illustrate, compose, generate_video, clip"
+            f"unknown media_production operation {operation!r}; expected one of: "
+            "narrate, illustrate, compose, generate_video, clip, transcribe"
         )
 
     def _write(self, suffix: str, data: bytes) -> Path:
@@ -272,6 +285,36 @@ class MediaProductionTool(Tool):
                 f"{item.video.duration_seconds:.2f}s)"
             )
         return "\n".join(lines)
+
+    def _transcribe(self, content: str) -> str:
+        """Derive a real, timestamped transcript from an existing,
+        already-referenced source video's own actual audio - the
+        genuine-understanding half of the video-understanding
+        checkpoint's own pipeline (``video -> audio extraction ->
+        speech/audio analysis -> temporal understanding``).
+
+        ``content`` must already name a real source video path -
+        resolving a natural-language request into that reference is the
+        capability layer's own job (``src.manager.capabilities.clip_video``),
+        never this tool's. Local, deterministic audio extraction always
+        runs (no LLM, no vendor); the transcription step itself is only
+        as real as whichever ``TranscriptionProvider`` this tool was
+        constructed with - ``NullTranscriptionProvider`` by default,
+        which refuses honestly rather than inventing text.
+        """
+        video_paths = _VIDEO_PATH_PATTERN.findall(content)
+        if not video_paths:
+            raise ValueError(
+                "transcription needs a real source video path in the request; none was found"
+            )
+        source_path = Path(video_paths[0])
+        if not source_path.exists():
+            raise ValueError(f"the referenced source video does not exist: {source_path}")
+
+        source_bytes = source_path.read_bytes()
+        audio_bytes = extract_audio_wav(source_bytes)
+        transcript = self._transcriber.transcribe(audio_bytes)
+        return transcript.as_timestamped_text()
 
     def _compose(self, content: str) -> str:
         asset_paths = [Path(m) for m in dict.fromkeys(_ASSET_PATH_PATTERN.findall(content))]

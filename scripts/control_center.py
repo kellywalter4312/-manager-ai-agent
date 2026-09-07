@@ -91,7 +91,10 @@ from src.conversation.conversation import Conversation  # noqa: E402
 from src.providers.connection import AuthorizationState  # noqa: E402
 from src.providers.connection_factory import build_connection  # noqa: E402
 from src.providers.factory import ProviderConfigurationError, available_providers  # noqa: E402
-from src.providers.media.factory import available_video_generation_backends  # noqa: E402
+from src.providers.media.factory import (  # noqa: E402
+    available_video_generation_backends,
+    available_video_understanding_backends,
+)
 from src.providers.speech_factory import available_speech_providers  # noqa: E402
 from src.manager.cognition import assess_manager  # noqa: E402
 from src.services.credentials.account import ProviderAccount  # noqa: E402
@@ -329,6 +332,7 @@ def build(settings: Settings):
         settings,
         accounts=accounts,
         video_generation_account=accounts.active(settings.video_generation),
+        video_understanding_account=accounts.active(settings.video_understanding),
         speech_account=accounts.active(settings.speech),
         communication_account=accounts.active(settings.communication_provider),
         # Full Alfred OS Ecosystem Evolution: the one real, governed
@@ -390,23 +394,28 @@ def build(settings: Settings):
             # honours this file's own read-only invariant: a knowledge
             # source can be quoted and can do nothing else.
             KnowledgeLookupTool(runtime.knowledge),
-            # Creative-media / AI video-generation / video-clipping
-            # checkpoints: real narration/image/video production, real AI
-            # video generation, and real local video clipping, backed by
-            # runtime.media - honestly absent (every Null* collaborator)
-            # unless MANAGER_MEDIA and/or MANAGER_VIDEO_GENERATION were
-            # deliberately configured, the identical opt-in default every
-            # other real capability here already follows. Clipping needs
-            # no vendor configuration of its own (see MediaTools.clipper's
-            # own docstring) - it is real (FFmpegVideoClipper) whenever
-            # MANAGER_MEDIA selects "local"/"ai_image", null only for the
-            # "null" media backend, exactly mirroring composer.
+            # Creative-media / AI video-generation / video-clipping /
+            # video-understanding checkpoints: real narration/image/video
+            # production, real AI video generation, real local video
+            # clipping, and real speech transcription over a video's own
+            # audio, backed by runtime.media - honestly absent (every
+            # Null* collaborator) unless MANAGER_MEDIA,
+            # MANAGER_VIDEO_GENERATION and/or MANAGER_VIDEO_UNDERSTANDING
+            # were deliberately configured, the identical opt-in default
+            # every other real capability here already follows. Clipping
+            # needs no vendor configuration of its own (see
+            # MediaTools.clipper's own docstring) - it is real
+            # (FFmpegVideoClipper) whenever MANAGER_MEDIA selects
+            # "local"/"ai_image", null only for the "null" media backend,
+            # exactly mirroring composer. Transcription is vendor-backed
+            # like video_generator, and independently configured.
             MediaProductionTool(
                 runtime.media.narrator,
                 runtime.media.illustrator,
                 runtime.media.composer,
                 runtime.media.video_generator,
                 runtime.media.clipper,
+                runtime.media.transcriber,
                 asset_dir=Path(settings.media_asset_dir),
             ),
             # Phase 3: real, saved text documents ("create a report from
@@ -571,6 +580,16 @@ def render_capabilities(centre: "ControlCenter") -> str:
             f"provider={media.video_generator.name}"
             if media.video_generator.name != "null" else
             "no video-generation provider configured - see 'provider video_generation_provider'"
+        ),
+    ))
+    lines.append(_capability_row(
+        "Video Understanding (transcription)", ready=media.transcriber.name != "null",
+        detail=(
+            f"provider={media.transcriber.name}"
+            if media.transcriber.name != "null" else
+            "no transcription provider configured - clip_video can only reason over "
+            "explicit timestamps or a supplied transcript; see 'provider "
+            "video_understanding_provider'"
         ),
     ))
     lines.append(_capability_row(
@@ -911,6 +930,7 @@ def _provider_axis_backend_names() -> set[str]:
         set(available_providers())
         | set(available_speech_providers())
         | set(available_video_generation_backends())
+        | set(available_video_understanding_backends())
     )
 
 

@@ -211,6 +211,59 @@ class FFmpegVideoComposer(VideoComposer):
         return VideoAsset(data=data, format="mp4", duration_seconds=total_duration)
 
 
+def extract_audio_wav(video_bytes: bytes, *, ffmpeg_path: str | None = None) -> bytes:
+    """The real audio track of ``video_bytes``, decoded to 16kHz mono PCM
+    WAV - a widely-accepted input shape for speech-transcription vendors
+    (see ``transcription.py``).
+
+    Local and deterministic, like ``probe_duration_seconds`` and
+    ``video_clipping.py``'s own ``FFmpegVideoClipper`` - no vendor, no
+    credential, no LLM, ever. This is the genuine "video -> audio"
+    half of the video-*understanding* checkpoint's own pipeline
+    (``video -> audio extraction -> speech/audio analysis -> temporal
+    understanding``, see ``src/manager/capabilities.py::clip_video``'s
+    own docstring); what happens to the extracted audio afterward is a
+    separate, vendor-backed concern this function knows nothing about.
+
+    Raises ``VideoError`` if the source has no audio stream at all, or
+    on a genuine decode failure - never a fabricated silent track
+    standing in for audio that was never actually there.
+    """
+    ffmpeg = resolve_ffmpeg(ffmpeg_path)
+
+    with tempfile.TemporaryDirectory(prefix="alfred_audio_") as workdir:
+        work = Path(workdir)
+        source_path = work / "source.mp4"
+        source_path.write_bytes(video_bytes)
+        output_path = work / "audio.wav"
+        try:
+            run_ffmpeg(
+                ffmpeg,
+                [
+                    "-i", str(source_path),
+                    "-vn",
+                    "-acodec", "pcm_s16le",
+                    "-ar", "16000",
+                    "-ac", "1",
+                    str(output_path),
+                ],
+            )
+        except VideoError as exc:
+            # FFmpeg's own real, distinct wording for "the source opened
+            # fine but has no audio stream to pull" - never confused
+            # here with a genuine decode/corruption failure, which fails
+            # earlier, at opening the input, with different wording.
+            if "does not contain any stream" in str(exc) or "matches no streams" in str(exc):
+                raise VideoError(f"this video has no audio track to extract ({exc})") from exc
+            raise
+
+        data = output_path.read_bytes()
+
+    if len(data) <= 44:  # a bare WAV header with no encoded frames
+        raise VideoError("this video has no audio track to extract")
+    return data
+
+
 def probe_duration_seconds(video_bytes: bytes, *, ffmpeg_path: str | None = None) -> float:
     """The real, decoded duration of a video file, in seconds - never a
     vendor's claimed or estimated value taken on faith.

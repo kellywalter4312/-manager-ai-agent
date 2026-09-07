@@ -78,6 +78,7 @@ DEFAULT_GMAIL_ADAPTER_VERSION = "1"
 _PROVIDER_CATEGORIES: tuple[str, ...] = (
     "llm_provider",
     "video_generation_provider",
+    "video_understanding_provider",
     "speech_provider",
     "media",
     "avatar_provider",

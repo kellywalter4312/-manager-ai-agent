@@ -118,6 +118,21 @@ class Settings:
     # vendor's model string reaching the wrong builder.
     runway_model: str = "gen4_turbo"
     veo_model: str = "veo-3.1-generate-preview"
+    # Video-*understanding* checkpoint: a third, genuinely independent
+    # media axis from `media` (local production) and `video_generation`
+    # (AI synthesis) - whether a real speech-transcription vendor is
+    # configured, so clip_video can derive real, timestamped evidence
+    # from a video's own actual audio rather than only from text the
+    # user separately typed. Same "one deployment may want one without
+    # the others" reasoning video_generation's own comment already
+    # states.
+    #   null    the default; no vendor, media_production reports so honestly
+    #   whisper a real, credentialed vendor (OpenAI's Whisper API) - see
+    #           src/providers/media/transcription.py for why this one
+    video_understanding: str = "null"
+    # Whisper's own model identifier - the identical per-vendor-field
+    # discipline runway_model/veo_model already establish.
+    whisper_model: str = "whisper-1"
     # Stage 15: where Alfred's governed communication tools actually
     # reach for a real phone/messaging connection, selected by name
     # exactly as `live_info_provider` above already is. "null" (no
@@ -340,6 +355,16 @@ class Settings:
             raise ValueError("Settings.veo_model must not be empty")
         object.__setattr__(self, "veo_model", veo_model)
 
+        video_understanding = self.video_understanding.strip().lower()
+        if not video_understanding:
+            raise ValueError("Settings.video_understanding must not be empty")
+        object.__setattr__(self, "video_understanding", video_understanding)
+
+        whisper_model = self.whisper_model.strip()
+        if not whisper_model:
+            raise ValueError("Settings.whisper_model must not be empty")
+        object.__setattr__(self, "whisper_model", whisper_model)
+
         communication_provider = self.communication_provider.strip().lower()
         if not communication_provider:
             raise ValueError("Settings.communication_provider must not be empty")
@@ -504,6 +529,7 @@ class Settings:
             f"speech={self.speech} "
             f"router={self.router} live_info_provider={self.live_info_provider} "
             f"media={self.media} video_generation={self.video_generation} "
+            f"video_understanding={self.video_understanding} "
             f"communication_provider={self.communication_provider} "
             f"knowledge_provider={self.knowledge_provider} "
             f"celebration_provider={self.celebration_provider} "

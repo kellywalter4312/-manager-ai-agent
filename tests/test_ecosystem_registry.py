@@ -185,7 +185,8 @@ class TestRegistryFromRealComposition:
     def test_every_known_axis_is_registered(self):
         registry = build_ecosystem_registry(Settings.from_env(env={}))
         expected = {
-            "llm_provider", "video_generation_provider", "media", "speech_provider",
+            "llm_provider", "video_generation_provider", "video_understanding_provider",
+            "media", "speech_provider",
             "connection", "avatar_provider", "environment_provider", "knowledge_provider",
             "live_info_provider", "communication_provider", "celebration_provider",
             "calendar_event_provider", "capability",

@@ -309,6 +309,7 @@ def build_runtime(
     accounts: CredentialStore | None = None,
     specialist_accounts: Mapping[str, ProviderAccount] | None = None,
     video_generation_account: ProviderAccount | None = None,
+    video_understanding_account: ProviderAccount | None = None,
     speech_account: ProviderAccount | None = None,
     communication_account: ProviderAccount | None = None,
     connection_adapter_version: str = "1",
@@ -335,6 +336,11 @@ def build_runtime(
     checkpoint) is the identical seam applied to
     ``build_media``'s own AI video-generation vendor, entirely
     independent of which LLM account authorises the Brain.
+    ``video_understanding_account`` (video-understanding checkpoint) is
+    the same seam again, applied to ``build_media``'s own speech-
+    transcription vendor - a third, independent axis from both
+    ``video_generation_account`` and whichever LLM account authorises
+    the Brain.
     ``speech_account`` (Universal Ecosystem checkpoint) is the same
     seam again, applied to whichever of ``build_speech``'s own engines
     currently needs a credential - Runtime holds no opinion about which
@@ -426,7 +432,11 @@ def build_runtime(
         # "null" (honestly empty) unless a real backend was deliberately
         # configured.
         live_info=build_live_info_provider(settings),
-        media=build_media(settings, video_generation_account=video_generation_account),
+        media=build_media(
+            settings,
+            video_generation_account=video_generation_account,
+            video_understanding_account=video_understanding_account,
+        ),
         # Stage 15: selected by name from settings.communication_provider,
         # the identical pattern live_info above already uses - "null"
         # (honestly unavailable) unless a real connection was deliberately

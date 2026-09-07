@@ -385,8 +385,10 @@ class TestProductionWiring:
         runtime, manager, channel, conversation = real_system()
         # Video-clipping checkpoint: a fifth, independently-replaceable
         # collaborator (clipper) joined narrator/illustrator/composer/
-        # video_generator in this name - updated in step, not weakened.
-        assert runtime.media.name == "null+null+null+null+null"
+        # video_generator in this name. Video-understanding checkpoint:
+        # a sixth (transcriber) joined it here too - both updated in
+        # step, never weakened.
+        assert runtime.media.name == "null+null+null+null+null+null"
         assert "media_production" in manager.own_skills.tools.names()
         turn = exchange(channel, conversation, "narrate this: a short test line")
         assert not turn.succeeded
@@ -397,7 +399,10 @@ class TestProductionWiring:
         # Video-clipping checkpoint: "local" now also wires a real
         # FFmpegVideoClipper (see MediaTools.clipper's own docstring for
         # why clipping needs no vendor/credential axis of its own).
-        assert runtime.media.name == "kokoro+local-title-card+ffmpeg+null+ffmpeg"
+        # Video-understanding checkpoint: transcriber stays the honest
+        # NullTranscriptionProvider here - it is a vendor-backed axis
+        # independent of `media`, unaffected by selecting "local".
+        assert runtime.media.name == "kokoro+local-title-card+ffmpeg+null+ffmpeg+null"
         turn = exchange(channel, conversation, "narrate this: a short test line for production wiring")
         assert turn.succeeded
         assert "Narration produced" in turn.outcome

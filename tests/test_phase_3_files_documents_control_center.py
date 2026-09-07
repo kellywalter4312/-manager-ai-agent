@@ -420,6 +420,7 @@ class TestControlCenterCapabilityMatrix:
         for row in ("General Knowledge", "Live Information", "Research", "Files:",
                     "Image Analysis", "Document Generation", "AI Image Generation",
                     "Narration", "Video Composition", "AI Video Generation",
+                    "Video Understanding (transcription)",
                     "Voice (speech I/O)", "Connection"):
             line = next(l for l in report.splitlines() if row in l)
             assert "UNAVAILABLE" in line, line

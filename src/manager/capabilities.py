@@ -2139,11 +2139,13 @@ MEDIA_PRODUCTION = ManagerCapability(
 # instead of two capabilities each owning their own shape.
 # ---------------------------------------------------------------------------
 
-# How much real text, beyond the video path itself, counts as "a
-# transcript/description worth reasoning over" rather than a bare
-# instruction with nothing in it. Deliberately conservative: asking the
-# Brain to propose timestamps from three words would only invite it to
-# invent them.
+# How much real text, beyond the video path itself, counts as "the
+# person already supplied a transcript/description worth reasoning over
+# directly" rather than a bare instruction with nothing in it. Below
+# this, clip_video instead attempts to derive real evidence from the
+# video's own actual audio (see clip_video's own docstring, step 3) -
+# never asks the Brain to propose timestamps from three words, which
+# would only invite it to invent them.
 _CLIP_TRANSCRIPT_MIN_CHARS = 120
 
 _CLIP_VIDEO_MARKERS: tuple[str, ...] = (
@@ -2173,19 +2175,33 @@ def clip_video_intent(task: Task, participants: Sequence[str] = ()) -> bool:
 
 def clip_video(request: CapabilityRequest) -> TaskResult:
     """Cut one or more real clips from an existing video - deterministic
-    when explicit timestamps are given (Half-Brain safe, no LLM
-    involved at all), Brain-assisted when the request instead names
-    *what* to find (e.g. "the funniest moments") and supplies enough
-    real text (a transcript or description) for the Brain to genuinely
-    reason over.
+    when explicit timestamps are given (Half-Brain safe, no LLM and no
+    tool call beyond the cut itself), Brain-assisted when the request
+    instead names *what* to find (e.g. "the funniest moments").
 
-    Never watches or listens to the source video - no such capability
-    exists in this project. Selecting boundaries from actual video/audio
-    *content* would need a real vision-over-video or transcription
-    provider this codebase does not have; faking that would be exactly
-    the invented AI detection this capability must never do. What the
-    Brain genuinely can do - reason over text it is given - is used
-    instead, and only when there is real text to reason over.
+    Three ways real evidence reaches the Brain, tried in order, each
+    strictly more work than the last:
+
+    1. Explicit timestamps in the request itself - no Brain, no
+       transcript, nothing to understand; straight to the cut.
+    2. A transcript/description the person already typed alongside the
+       request - reasoned over directly.
+    3. Neither of the above, but a real video path is given: this
+       function asks ``media_production`` to genuinely extract that
+       video's own audio (local FFmpeg, deterministic) and transcribe it
+       (``video -> audio extraction -> speech/audio analysis -> temporal
+       understanding``) - real, timestamped evidence *derived from the
+       actual media*, never fabricated. The Brain then selects moments
+       from those real segments, exactly as it would from a
+       user-supplied transcript in step 2, through the identical
+       ``converse`` call - no separate "video brain", no bypass of the
+       ordinary capability/routing architecture.
+
+    Step 3 is only as real as whichever transcription provider is
+    configured. Unconfigured (the default, ``NullTranscriptionProvider``),
+    it fails honestly rather than guessing from a bare instruction -
+    this function never invents a transcript or a timestamp on the
+    video's own behalf.
     """
     text = request.task.description
     video_path = find_video_path(text)
@@ -2214,31 +2230,53 @@ def clip_video(request: CapabilityRequest) -> TaskResult:
             return TaskResult.failure(
                 request.task, request.own_name,
                 "I don't have a way to analyze this video's actual content - "
-                "no video-understanding/transcription provider is configured, "
-                "and no reasoning capability is available to work from a "
-                "transcript either. Give me specific timestamps (e.g. "
-                "'1:20-1:45'), or paste a transcript/description and tell me "
-                "what to look for.",
+                "no reasoning capability is available to work from a "
+                "transcript. Give me specific timestamps (e.g. '1:20-1:45') "
+                "instead.",
             )
+
         remainder = text.replace(video_path, "").strip()
-        if len(remainder) < _CLIP_TRANSCRIPT_MIN_CHARS:
-            return TaskResult.failure(
-                request.task, request.own_name,
-                "I don't have a way to analyze this video's actual content - "
-                "no video-understanding/transcription provider is configured. "
-                "Give me specific timestamps (e.g. '1:20-1:45'), or paste a "
-                "transcript/description of the video alongside your request "
-                "and I can find moments within that.",
-            )
-        decision = request.converse(
-            request.task,
-            (
+        if len(remainder) >= _CLIP_TRANSCRIPT_MIN_CHARS:
+            # Real transcript/description text was already supplied in
+            # the request - reason over it directly, no need to touch
+            # the actual media file at all.
+            notes = (
                 "The person supplied a transcript/description and asked for "
                 "clips from it. Propose the most fitting time range(s), each "
                 "written as exactly 'MM:SS-MM:SS' (or 'H:MM:SS-H:MM:SS'), one "
                 "per line, and nothing else.",
-            ),
-        )
+            )
+        else:
+            # No transcript was given. The only honest way to find real
+            # moments is to derive real, timestamped evidence from the
+            # video's own actual audio - never to guess from a bare
+            # instruction. media_production's "transcribe" operation
+            # does the genuine, deterministic audio extraction itself
+            # (no LLM); whether real speech-to-text can follow depends
+            # entirely on whether a transcription provider is configured.
+            transcription = request.tools.invoke(
+                "media_production", {"operation": "transcribe", "content": video_path},
+            )
+            if not transcription.ok:
+                return TaskResult.failure(
+                    request.task, request.own_name,
+                    "I can't find real moments in this video without "
+                    f"understanding its actual content, and that failed: "
+                    f"{transcription.error}. Give me specific timestamps "
+                    "(e.g. '1:20-1:45'), or paste a transcript/description "
+                    "of the video alongside your request.",
+                )
+            notes = (
+                "Below is the video's own real, timestamped transcript, "
+                "derived from its actual audio - not text the person typed. "
+                "Propose the most fitting time range(s) that match their "
+                "request, each written as exactly 'MM:SS-MM:SS' (or "
+                "'H:MM:SS-H:MM:SS'), one per line, and nothing else. Use "
+                "only timestamps that genuinely belong to the transcript's "
+                "own segments below.\n\n" + transcription.output,
+            )
+
+        decision = request.converse(request.task, notes)
         if not decision.is_decided or not parse_clip_specs(decision.reason):
             return TaskResult.failure(
                 request.task, request.own_name,
@@ -2265,8 +2303,10 @@ CLIP_VIDEO = ManagerCapability(
     handle=clip_video,
     description=(
         "Cuts one or more real clips from an existing video - explicit "
-        "timestamps need no Brain; finding moments from a supplied "
-        "transcript/description does, and it is refused honestly without one."
+        "timestamps need no Brain; finding moments instead reasons over a "
+        "supplied transcript/description, or, absent one, a real transcript "
+        "genuinely derived from the video's own audio - and is refused "
+        "honestly when neither reasoning nor transcription is available."
     ),
     claims=clip_video_intent,
     scoreable=False,

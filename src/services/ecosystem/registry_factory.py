@@ -39,6 +39,7 @@ from src.providers.live_info_factory import available_live_info_providers, build
 from src.providers.media.factory import (
     available_media_backends,
     available_video_generation_backends,
+    available_video_understanding_backends,
     build_media,
 )
 from src.providers.speech_factory import available_speech_providers, build_speech
@@ -99,6 +100,23 @@ def build_ecosystem_registry(settings: Settings) -> EcosystemRegistry:
             ),
             requires_credential=lambda key: key != "null",
             dependents=("the media_production capability's generate_video operation",),
+        )
+    )
+
+    registry.register(
+        GenericCategoryAdapter(
+            "video_understanding_provider",
+            list_backends=available_video_understanding_backends,
+            active_key=lambda: settings.video_understanding,
+            build=lambda key, credential: build_media(
+                replace(settings, video_understanding=key),
+                video_understanding_account=_credentialed_account(key, credential),
+            ),
+            requires_credential=lambda key: key != "null",
+            dependents=(
+                "the media_production capability's transcribe operation "
+                "(feeding clip_video's real, audio-derived moment selection)",
+            ),
         )
     )
 
