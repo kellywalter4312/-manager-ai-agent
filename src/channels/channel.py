@@ -399,4 +399,9 @@ class VoiceChannel(Channel):
         manager_name = self._manager.own_skills.name if self._manager.own_skills else None
         memory = self._manager.memory if answered == manager_name else getattr(agent, "memory", None)
         recall = memory.recall if memory is not None else None
-        return effective_voice_for(agent, recall=recall)
+        # Agent-autonomous voice selection checkpoint: resolves an
+        # explicit override the identical way an autonomous choice
+        # already is, against this same channel's own real speech
+        # adapter - never a second discovery mechanism.
+        discover_voices = getattr(self._speech, "available_voices", None)
+        return effective_voice_for(agent, recall=recall, discover_voices=discover_voices)

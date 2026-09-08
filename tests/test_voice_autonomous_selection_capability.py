@@ -138,6 +138,25 @@ class TestControlCenterReflectsRealBackendState:
         report = run_command(centre, f"voice {runtime.identity.name}", 100, channel, conversation)
         assert "source: declared default" in report
 
+    def test_the_discovered_options_listing_includes_gender_when_reported(self):
+        runtime, manager, channel, conversation = real_system()
+        centre = ControlCenter(runtime, manager)
+        report = run_command(centre, f"voice {runtime.identity.name}", 100, channel, conversation)
+        # This machine's real Windows voices report no gender - an
+        # honest "not reported", never a fabricated value, but the
+        # column itself is present in the listing header.
+        assert "gender" in report
+
+    def test_an_autonomous_choice_source_line_names_gender_honestly(self):
+        runtime, manager, channel, conversation = real_system()
+        centre = ControlCenter(runtime, manager)
+        # David (this project's real deterministic first pick among
+        # this machine's English voices) genuinely reports Male via
+        # VoiceInfo.Gender.
+        manager.handle_task(Task(description="Alfred, find me an English voice"))
+        report = run_command(centre, f"voice {runtime.identity.name}", 100, channel, conversation)
+        assert "gender=male" in report
+
 
 class TestSnapshotReflectsTheRealEffectiveVoiceNeverAStaleDeclaredDefault:
     """The exact UI/backend divergence a final weakness check should
@@ -169,6 +188,38 @@ class TestSnapshotReflectsTheRealEffectiveVoiceNeverAStaleDeclaredDefault:
         data = build_snapshot(centre, conversation=conversation, channel=channel)
         entry = next(a for a in data["agents"] if a["name"] == runtime.identity.name)
         assert entry["voice"]["preferred_voice"] == "Microsoft Zira Desktop"
+
+    def test_snapshot_resolves_an_override_through_real_discovery_not_just_preferred_voice(self):
+        """Requirement 7's completeness gap, closed this checkpoint: a
+        real Kokoro voice id typed as an override, through the real
+        Control Center command with Kokoro as the actually-configured
+        engine, must resolve into style - the field
+        KokoroSpeechAdapter.speak() actually reads - visible in the real
+        snapshot, not left uselessly in preferred_voice."""
+        from src.control_center.snapshot import snapshot as build_snapshot
+
+        runtime, manager, channel, conversation = real_system(MANAGER_SPEECH="kokoro")
+        centre = ControlCenter(runtime, manager)
+        # Kokoro's adapter has no installed_voice_names() (only Windows
+        # does), so the command stores this without local validation -
+        # exactly the case this fix exists for.
+        set_report = run_command(centre, f"voice {runtime.identity.name} bm_daniel", 100, channel, conversation)
+        assert "now" in set_report
+
+        # Snapshot still builds successfully and the agent is present -
+        # style is intentionally opaque to voice.py's own human-facing
+        # traits/describes (see that module's own docstring: no agent
+        # should have to know a vendor exists), so this is not where a
+        # provider-specific id would surface. What matters - and is
+        # checked below - is that the real resolution path a speaking
+        # channel actually calls applies it correctly.
+        data = build_snapshot(centre, conversation=conversation, channel=channel)
+        entry = next(a for a in data["agents"] if a["name"] == runtime.identity.name)
+        assert entry["voice"]["declared"] is True
+
+        agent = manager.registry.get(runtime.identity.name) or manager.own_skills
+        profile = effective_voice_for(agent, recall=manager.memory.recall, discover_voices=runtime.speech.available_voices)
+        assert profile.style["kokoro_voice_id"] == "bm_daniel"
 
 
 class TestPersistenceAcrossARestart:

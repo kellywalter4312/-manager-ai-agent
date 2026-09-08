@@ -98,6 +98,47 @@ class TestParseVoiceRequest:
         r2 = parse_voice_request("no, I want a Spanish voice")
         assert r2.language == "spanish"
 
+    def test_gender_is_recognised_independently_of_language_and_accent(self):
+        r = parse_voice_request("find a female voice that sounds appropriate for this")
+        assert r.gender == "female"
+        assert r.language is None
+        assert r.accent is None
+
+    def test_gender_combines_with_language(self):
+        r = parse_voice_request("find me a female Italian voice")
+        assert r.gender == "female"
+        assert r.language == "italian"
+        assert r.accent is None
+
+    def test_gender_combines_with_language_and_accent(self):
+        r = parse_voice_request("find me a male English voice with a British accent")
+        assert r.gender == "male"
+        assert r.language == "english"
+        assert r.accent == "british"
+
+    def test_articles_before_a_language_name_are_never_mistaken_for_an_accent(self):
+        """Real, observed false positive, fixed and pinned: 'Use a
+        Spanish voice' was parsing accent='a'."""
+        for text in ("Use a Spanish voice", "Give me an English voice", "the French option"):
+            r = parse_voice_request(text)
+            assert r.accent is None, (text, r.accent)
+
+    def test_implicit_regional_adjective_before_a_language_name_is_read_as_accent(self):
+        """'Nigerian English voice' names no word 'accent' at all, but
+        still clearly asks for a regional variant - requirement 3's own
+        example ('Use a Nigerian English voice if one is available')."""
+        r = parse_voice_request("Use a Nigerian English voice if one is available")
+        assert r.language == "english"
+        assert r.accent == "nigerian"
+
+    def test_a_second_distinct_language_word_is_not_swept_into_the_implicit_accent_reading(self):
+        """Two distinct, unmarked language words with no word 'accent' is
+        genuinely ambiguous - left alone rather than guessed at."""
+        r = parse_voice_request("Spanish or English, whichever voice you have")
+        # Whichever is picked (or neither), it must never silently
+        # invent an accent from the other language word.
+        assert r.accent is None
+
     def test_raw_text_is_preserved_for_honest_refusal_messages(self):
         r = parse_voice_request("some request")
         assert r.raw_text == "some request"
@@ -155,3 +196,41 @@ class TestSelectVoice:
         first = select_voice(request, self.OPTIONS)
         second = select_voice(request, self.OPTIONS)
         assert first.option == second.option
+
+
+class TestSelectVoiceWithGender:
+    FEMALE_ITALIAN = VoiceOption("g1", "Female Italian", "elevenlabs", language="italian", gender="female")
+    MALE_ITALIAN = VoiceOption("g2", "Male Italian", "elevenlabs", language="italian", gender="male")
+    FEMALE_ENGLISH = VoiceOption("g3", "Female English", "windows", language="english", gender="female")
+    NO_GENDER_ENGLISH = VoiceOption("g4", "Plain English", "windows", language="english")
+    OPTIONS = (FEMALE_ITALIAN, MALE_ITALIAN, FEMALE_ENGLISH, NO_GENDER_ENGLISH)
+
+    def test_gender_alone_is_matched_honestly(self):
+        result = select_voice(parse_voice_request("find a female voice"), self.OPTIONS)
+        assert result.option is not None
+        assert result.option.gender == "female"
+        assert result.gender_satisfied is True
+        assert result.language_satisfied is False
+
+    def test_language_and_gender_together_are_both_satisfied_when_possible(self):
+        result = select_voice(parse_voice_request("find me a female Italian voice"), self.OPTIONS)
+        assert result.option == self.FEMALE_ITALIAN
+        assert result.language_satisfied and result.gender_satisfied
+
+    def test_language_satisfied_but_gender_unavailable_degrades_honestly(self):
+        options = (VoiceOption("x1", "Some Italian", "elevenlabs", language="italian"),)
+        result = select_voice(parse_voice_request("find me a female Italian voice"), options)
+        assert result.option is not None
+        assert result.language_satisfied is True
+        assert result.gender_satisfied is False
+        assert "gender" in result.reason
+
+    def test_a_gender_no_option_reports_is_refused_never_substituted(self):
+        options = (self.MALE_ITALIAN,)
+        result = select_voice(parse_voice_request("find a female voice"), options)
+        assert result.option is None
+        assert "female" in result.reason
+
+    def test_options_with_no_reported_gender_never_satisfy_a_gender_request(self):
+        result = select_voice(parse_voice_request("find a female voice"), (self.NO_GENDER_ENGLISH,))
+        assert result.option is None

@@ -152,10 +152,12 @@ class AutonomousVoiceChoice:
     provider: str
     language: "str | None" = None
     accent: "str | None" = None
+    gender: "str | None" = None
 
 
 def build_voice_autonomous_choice_record(
-    agent_key: str, option: "VoiceOption", *, language_satisfied: bool, accent_satisfied: bool
+    agent_key: str, option: "VoiceOption", *,
+    language_satisfied: bool, accent_satisfied: bool, gender_satisfied: bool = False,
 ) -> MemoryRecord:
     """The MemoryRecord an agent's own governed write path
     (``request.retain`` inside the ``select_voice`` capability) records
@@ -175,8 +177,10 @@ def build_voice_autonomous_choice_record(
             "provider": option.provider,
             "language": option.language,
             "accent": option.accent,
+            "gender": option.gender,
             "language_satisfied": language_satisfied,
             "accent_satisfied": accent_satisfied,
+            "gender_satisfied": gender_satisfied,
             "source": "autonomous_selection",
         },
     )
@@ -207,12 +211,40 @@ def autonomous_voice_choice_for(agent_key: str, *, recall: "_Recall | None") -> 
             continue
         return AutonomousVoiceChoice(
             voice_id=str(voice_id), name=str(name), provider=str(provider),
-            language=ctx.get("language"), accent=ctx.get("accent"),
+            language=ctx.get("language"), accent=ctx.get("accent"), gender=ctx.get("gender"),
         )
     return None
 
 
-def effective_voice_for(agent: Any, *, recall: "_Recall | None") -> VoiceProfile | None:
+# Provider axes whose speak() reads a real id out of VoiceProfile.style
+# rather than matching preferred_voice by name - see each provider's own
+# _voice_id_for. Named here, once, so both the autonomous-choice branch
+# (which always knows a real provider) and the explicit-override branch
+# (which resolves one by name, when it can) apply a choice to the
+# correct field the identical way, never two implementations of this
+# mapping drifting apart.
+_STYLE_KEYED_PROVIDERS: "dict[str, str]" = {
+    "elevenlabs": "elevenlabs_voice_id",
+    "kokoro": "kokoro_voice_id",
+}
+
+
+def _apply_provider_choice(base: VoiceProfile, *, provider: str, voice_id: str, name: str) -> VoiceProfile:
+    """Write a real, provider-attributed choice onto ``base`` in
+    whichever field that provider's own adapter actually reads -
+    ``style[...]`` for an id-keyed provider, ``preferred_voice``
+    (matched by name at speak time) for everything else, Windows
+    included. The one place this mapping is expressed - both callers
+    below go through it."""
+    style_key = _STYLE_KEYED_PROVIDERS.get(provider)
+    if style_key is not None:
+        return replace(base, style={**base.style, style_key: voice_id})
+    return replace(base, preferred_voice=name)
+
+
+def effective_voice_for(
+    agent: Any, *, recall: "_Recall | None", discover_voices: "Callable[[], Any] | None" = None
+) -> VoiceProfile | None:
     """The voice this agent should actually be heard in right now.
 
     Governance order (requirement 4's own precedence, checked in this
@@ -226,6 +258,17 @@ def effective_voice_for(agent: Any, *, recall: "_Recall | None") -> VoiceProfile
     Never inventing a voice for an agent that published none at all -
     ``base is None`` short-circuits before either preference is even
     read.
+
+    ``discover_voices``, when given, lets an explicit override be
+    resolved against real, currently-discovered options the identical
+    way an autonomous choice already is - a person who typed a real
+    ElevenLabs/Kokoro voice's own name (``voice Alfred Bella``) gets it
+    applied to the field that provider's adapter actually reads, not
+    silently written to ``preferred_voice`` where an id-keyed provider
+    would never look. ``None`` (no discovery reaches this call) degrades
+    to the original, unchanged behaviour: the typed string goes straight
+    to ``preferred_voice``, which is exactly correct for a name-matched
+    engine like Windows and an honest best-effort for anything else.
     """
     base = voice_for(agent)
     if base is None:
@@ -235,12 +278,14 @@ def effective_voice_for(agent: Any, *, recall: "_Recall | None") -> VoiceProfile
 
     override = voice_preference_for(agent_key, recall=recall)
     if override:
+        if discover_voices is not None:
+            for option in discover_voices():
+                if option.name.lower() == override.lower() or option.voice_id.lower() == override.lower():
+                    return _apply_provider_choice(base, provider=option.provider, voice_id=option.voice_id, name=option.name)
         return replace(base, preferred_voice=override)
 
     choice = autonomous_voice_choice_for(agent_key, recall=recall)
     if choice is not None:
-        if choice.provider == "elevenlabs":
-            return replace(base, style={**base.style, "elevenlabs_voice_id": choice.voice_id})
-        return replace(base, preferred_voice=choice.name)
+        return _apply_provider_choice(base, provider=choice.provider, voice_id=choice.voice_id, name=choice.name)
 
     return base

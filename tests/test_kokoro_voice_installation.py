@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import io
 import wave
+from pathlib import Path
 from types import SimpleNamespace
 
 from src.channels.channel import VoiceChannel
@@ -215,4 +216,70 @@ class TestUserVoiceOverrideCompatibility:
         run_command(centre, "voice Arthur Microsoft Hazel Desktop", 80, channel, conversation)
 
         resolved = effective_voice_for(manager.own_skills, recall=manager.memory.recall)
+        assert resolved.style["kokoro_voice_id"] == "am_eric"
+
+
+class TestAvailableVoicesDiscoversTheRealLocalArchiveHonestly:
+    """Agent-autonomous voice selection checkpoint: Kokoro must
+    participate in the same VoiceOption architecture ElevenLabs/Windows
+    already do, not remain a special-case dead end - but never by
+    guessing the vendor's own (undocumented, in this repo) voice-naming
+    convention. What IS asserted (language=english, locale=en-US) is a
+    genuine, verifiable fact about this project's own speak() call
+    (always lang="en-us"), not a claim about the vendor's catalog."""
+
+    def test_returns_the_real_archive_entries_this_machine_actually_has(self):
+        adapter = KokoroSpeechAdapter()
+        options = adapter.available_voices()
+        ids = {o.voice_id for o in options}
+        # This project's own real, checked-in archive - see this
+        # module's own docstring on why only these two voices exist.
+        assert ids == {"am_eric", "bm_daniel"}
+        assert all(o.provider == "kokoro" for o in options)
+
+    def test_language_and_locale_are_honestly_asserted_accent_and_gender_are_not(self):
+        adapter = KokoroSpeechAdapter()
+        for option in adapter.available_voices():
+            assert option.language == "english"
+            assert option.locale == "en-US"
+            # No verifiable in-repo source for either exists - never guessed.
+            assert option.accent is None
+            assert option.gender is None
+
+    def test_a_missing_or_unreadable_archive_returns_empty_never_raises(self):
+        adapter = KokoroSpeechAdapter(voices_path=str(Path("does") / "not" / "exist.npz"))
+        assert adapter.available_voices() == ()
+
+
+class TestExplicitOverrideResolvesToTheCorrectKokoroField:
+    """Requirement 7/production-completeness: a person typing a real
+    Kokoro voice's own id/name into the explicit-override command must
+    have it applied to style["kokoro_voice_id"] - the field
+    KokoroSpeechAdapter.speak() actually reads - not silently left in
+    preferred_voice, where this engine never looks."""
+
+    def test_an_explicit_override_by_real_kokoro_id_is_applied_to_the_correct_field(self):
+        runtime, manager, channel, conversation = real_system()
+        from src.services.identity.voice_preference import set_voice_preference
+
+        set_voice_preference(
+            manager.own_skills.name, "bm_daniel",
+            recall=manager.memory.recall, remember=manager.memory.remember, forget=manager.memory.forget,
+        )
+        discover = KokoroSpeechAdapter().available_voices
+        resolved = effective_voice_for(manager.own_skills, recall=manager.memory.recall, discover_voices=discover)
+        assert resolved.style["kokoro_voice_id"] == "bm_daniel"
+
+    def test_without_discovery_the_same_override_falls_back_to_preferred_voice_honestly(self):
+        runtime, manager, channel, conversation = real_system()
+        from src.services.identity.voice_preference import set_voice_preference
+
+        set_voice_preference(
+            manager.own_skills.name, "bm_daniel",
+            recall=manager.memory.recall, remember=manager.memory.remember, forget=manager.memory.forget,
+        )
+        resolved = effective_voice_for(manager.own_skills, recall=manager.memory.recall)
+        assert resolved.preferred_voice == "bm_daniel"
+        # Unresolved without discovery - the pre-existing, unchanged
+        # behaviour, never silently promoted to style without evidence.
         assert resolved.style["kokoro_voice_id"] == "am_eric"

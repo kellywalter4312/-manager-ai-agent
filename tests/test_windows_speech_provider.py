@@ -187,15 +187,18 @@ class TestConfigurationIsNotProofOfWorking:
         assert adapter.availability.is_usable is False
 
 
-class TestAvailableVoicesReportsRealCultureNeverAFabricatedAccent:
+class TestAvailableVoicesReportsRealCultureAndGenderNeverAFabricatedAccent:
     """The voice-autonomy checkpoint's own discovery seam for this
-    engine - real per-voice locale from .NET's own ``VoiceInfo.Culture``,
-    never an accent (this engine genuinely does not expose one)."""
+    engine - real per-voice locale and gender from .NET's own
+    ``VoiceInfo.Culture``/``VoiceInfo.Gender`` (both live-confirmed
+    against this machine's own installed voices: David=Male/en-US,
+    Hazel=Female/en-GB, Zira=Female/en-US), never an accent (this engine
+    genuinely does not expose one)."""
 
-    def test_parses_name_and_culture_into_language_and_locale(self, monkeypatch):
+    def test_parses_name_culture_and_gender_into_language_locale_and_gender(self, monkeypatch):
         fake_run(monkeypatch, completed(
             returncode=0,
-            stdout="Microsoft David Desktop|en-US\nMicrosoft Hazel Desktop|en-GB\n",
+            stdout="Microsoft David Desktop|en-US|Male\nMicrosoft Hazel Desktop|en-GB|Female\n",
         ))
         options = WindowsSpeechAdapter().available_voices()
         assert len(options) == 2
@@ -203,14 +206,35 @@ class TestAvailableVoicesReportsRealCultureNeverAFabricatedAccent:
         assert options[0].provider == "windows"
         assert options[0].language == "english"
         assert options[0].locale == "en-US"
+        assert options[0].gender == "male"
         assert options[0].accent is None
         assert options[1].locale == "en-GB"
+        assert options[1].gender == "female"
 
     def test_an_unrecognised_culture_prefix_keeps_the_real_locale_honest_none_language(self, monkeypatch):
-        fake_run(monkeypatch, completed(returncode=0, stdout="Some Voice|xx-YY\n"))
+        fake_run(monkeypatch, completed(returncode=0, stdout="Some Voice|xx-YY|Male\n"))
         options = WindowsSpeechAdapter().available_voices()
         assert options[0].locale == "xx-YY"
         assert options[0].language is None
+        assert options[0].gender == "male"
+
+    def test_a_line_with_no_gender_field_is_honestly_none_never_a_crash(self, monkeypatch):
+        fake_run(monkeypatch, completed(returncode=0, stdout="Some Voice|en-US\n"))
+        options = WindowsSpeechAdapter().available_voices()
+        assert options[0].locale == "en-US"
+        assert options[0].gender is None
+
+    def test_a_genuinely_reported_neutral_gender_is_carried_through_honestly(self, monkeypatch):
+        """SAPI's real VoiceGender enum includes Neutral alongside
+        Male/Female - a genuinely reported fact, never discarded."""
+        fake_run(monkeypatch, completed(returncode=0, stdout="Some Voice|en-US|Neutral\n"))
+        options = WindowsSpeechAdapter().available_voices()
+        assert options[0].gender == "neutral"
+
+    def test_a_truly_unrecognised_gender_value_is_honestly_none_never_guessed(self, monkeypatch):
+        fake_run(monkeypatch, completed(returncode=0, stdout="Some Voice|en-US|NotARealValue\n"))
+        options = WindowsSpeechAdapter().available_voices()
+        assert options[0].gender is None
 
     def test_engine_failure_returns_empty_never_raises(self, monkeypatch):
         fake_run(monkeypatch, completed(returncode=1, stderr="boom"))

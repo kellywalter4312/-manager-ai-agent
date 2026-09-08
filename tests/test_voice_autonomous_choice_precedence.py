@@ -155,3 +155,46 @@ class TestEffectiveVoicePrecedence:
         profile = effective_voice_for(agent, recall=None)
         assert profile is not None
         assert profile.preferred_voice == "Microsoft David Desktop"
+
+    def test_an_explicit_override_by_real_name_resolves_through_discovery_to_the_correct_field(self):
+        """The identical fix, applied to explicit overrides: a person
+        who typed a real ElevenLabs voice's own display name must have
+        it applied to style["elevenlabs_voice_id"], not left inert in
+        preferred_voice, when discovery is available to resolve it."""
+        runtime, manager, channel, conversation = real_system()
+        agent = manager.registry.get("Alfred") or manager.own_skills
+        set_voice_preference(
+            agent.name, "Italian Voice One",
+            recall=manager.memory.recall, remember=manager.memory.remember, forget=manager.memory.forget,
+        )
+
+        def discover():
+            return (ITALIAN,)
+
+        profile = effective_voice_for(agent, recall=manager.memory.recall, discover_voices=discover)
+        assert profile.style.get("elevenlabs_voice_id") == "it-voice-1"
+
+    def test_the_same_override_without_discovery_falls_back_to_preferred_voice(self):
+        runtime, manager, channel, conversation = real_system()
+        agent = manager.registry.get("Alfred") or manager.own_skills
+        set_voice_preference(
+            agent.name, "Italian Voice One",
+            recall=manager.memory.recall, remember=manager.memory.remember, forget=manager.memory.forget,
+        )
+        profile = effective_voice_for(agent, recall=manager.memory.recall)
+        assert profile.preferred_voice == "Italian Voice One"
+
+    def test_an_override_naming_something_discovery_does_not_report_falls_back_honestly(self):
+        runtime, manager, channel, conversation = real_system()
+        agent = manager.registry.get("Alfred") or manager.own_skills
+        set_voice_preference(
+            agent.name, "Some Unrelated Name",
+            recall=manager.memory.recall, remember=manager.memory.remember, forget=manager.memory.forget,
+        )
+
+        def discover():
+            return (ITALIAN,)
+
+        profile = effective_voice_for(agent, recall=manager.memory.recall, discover_voices=discover)
+        assert profile.preferred_voice == "Some Unrelated Name"
+        assert "elevenlabs_voice_id" not in profile.style or profile.style.get("elevenlabs_voice_id") != "it-voice-1"

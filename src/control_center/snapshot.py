@@ -100,7 +100,7 @@ def _memory(view: Any) -> dict[str, Any]:
     }
 
 
-def _voice(agent: Any, *, recall: Any = None) -> dict[str, Any]:
+def _voice(agent: Any, *, recall: Any = None, discover_voices: Any = None) -> dict[str, Any]:
     """An agent's voice identity, and the truth about whether it can be heard.
 
     Two separate facts, deliberately. A profile existing says *what this agent
@@ -118,7 +118,10 @@ def _voice(agent: Any, *, recall: Any = None) -> dict[str, Any]:
     snapshot taken without a live Memory) degrades to the bare declared
     default, never a crash and never a fabricated preference.
     """
-    profile = effective_voice_for(agent, recall=recall) if recall is not None else voice_for(agent)
+    profile = (
+        effective_voice_for(agent, recall=recall, discover_voices=discover_voices)
+        if recall is not None else voice_for(agent)
+    )
     if profile is None:
         return {"declared": False}
     return {
@@ -185,7 +188,7 @@ def _tools(view_tools: Any) -> list[dict[str, Any]]:
     ]
 
 
-def _agent(view: Any, agent: Any, *, recall: Any = None) -> dict[str, Any]:
+def _agent(view: Any, agent: Any, *, recall: Any = None, discover_voices: Any = None) -> dict[str, Any]:
     """Everything an Agent Workspace needs about one agent.
 
     The workspace is an *interface into* this agent, so this gathers what the
@@ -209,7 +212,7 @@ def _agent(view: Any, agent: Any, *, recall: Any = None) -> dict[str, Any]:
             for capability in view.capabilities
         ],
         "tools": _tools(view.tools),
-        "voice": _voice(agent, recall=recall),
+        "voice": _voice(agent, recall=recall, discover_voices=discover_voices),
         "activation": _activation(agent),
         "personality": _personality(agent),
         "interface": {
@@ -364,8 +367,14 @@ def snapshot(
         memory = centre.manager.memory if name == manager_name else getattr(registry.get(name), "memory", None)
         return memory.recall if memory is not None else None
 
+    # The same real, live discovery call the voice command and the
+    # speaking channel already use - never a second mechanism - so an
+    # explicit override typed by real display name resolves to the
+    # correct provider field here too.
+    discover_voices = getattr(centre.runtime.speech, "available_voices", None)
+
     agents = [
-        _agent(view, registry.get(view.name), recall=_recall_for(view.name))
+        _agent(view, registry.get(view.name), recall=_recall_for(view.name), discover_voices=discover_voices)
         for view in (overview.manager,) + overview.specialists
     ]
 

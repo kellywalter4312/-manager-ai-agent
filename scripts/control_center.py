@@ -1920,7 +1920,17 @@ def run_command(
             if view.name == (centre.manager.own_skills.name if centre.manager.own_skills else None)
             else centre.manager.registry.get(view.name)
         )
-        current = effective_voice_for(agent, recall=memory.recall) if agent is not None else None
+        # Agent-autonomous voice selection checkpoint: the same real,
+        # live discovery call bound onto capabilities - never a second
+        # mechanism - so an explicit override typed by real display name
+        # (e.g. an ElevenLabs/Kokoro voice) resolves to the correct
+        # provider-specific field, exactly as an autonomous choice
+        # already does.
+        discover_fn = getattr(speech, "available_voices", None)
+        current = (
+            effective_voice_for(agent, recall=memory.recall, discover_voices=discover_fn)
+            if agent is not None else None
+        )
 
         # Only a Windows-style engine can enumerate its own installed
         # voices (SpeechAdapter's own contract carries no such method -
@@ -1945,7 +1955,8 @@ def run_command(
             elif autonomous is not None:
                 lines.append(
                     f"  source: agent's own autonomous choice "
-                    f"(language={autonomous.language or 'unknown'}, accent={autonomous.accent or 'unknown'})"
+                    f"(language={autonomous.language or 'unknown'}, accent={autonomous.accent or 'unknown'}, "
+                    f"gender={autonomous.gender or 'unknown'})"
                 )
             else:
                 lines.append("  source: declared default")
@@ -1958,19 +1969,20 @@ def run_command(
             # Real, live-discovered options with language/accent/locale,
             # when this adapter's own available_voices() reports them -
             # never persisted, always asked fresh (see VoiceOption's own
-            # docstring on why).
-            discover_fn = getattr(speech, "available_voices", None)
+            # docstring on why). Reuses the same discover_fn resolved
+            # above for the effective-voice override lookup.
             options = tuple(discover_fn()) if callable(discover_fn) else ()
             if options:
-                lines.append("  discovered options (language/accent/locale, where reported):")
+                lines.append("  discovered options (language/accent/locale/gender, where reported):")
                 for option in options:
                     facts = ", ".join(
                         f"{label}={value}"
                         for label, value in (
-                            ("language", option.language), ("accent", option.accent), ("locale", option.locale),
+                            ("language", option.language), ("accent", option.accent),
+                            ("locale", option.locale), ("gender", option.gender),
                         )
                         if value
-                    ) or "no language/accent/locale reported"
+                    ) or "no language/accent/locale/gender reported"
                     lines.append(f"    {option.name} ({option.provider}): {facts}")
             lines.append(f"  choose with: voice {view.name} <name>")
             lines.append(

@@ -97,7 +97,11 @@ from src.services.identity.voice_preference import (
     forget_prior_autonomous_choice,
     voice_preference_for,
 )
-from src.services.identity.voice_selection import parse_voice_request, select_voice as select_voice_option
+from src.services.identity.voice_selection import (
+    VoiceSelection,
+    parse_voice_request,
+    select_voice as select_voice_option,
+)
 from src.services.memory.capture import DEFAULT_PURPOSE as DEFAULT_CAPTURE_PURPOSE
 from src.services.memory.capture import build_recording, capture_intent
 from src.services.memory.learning import build_learning_record, learning_intent
@@ -4608,6 +4612,16 @@ def knowledge_intent(task: Task, participants: Sequence[str] = ()) -> bool:
         return False
     if _marker_present(text, CONVERSATION_CONTINUITY_MARKERS):
         return False
+    # Agent-autonomous voice selection checkpoint, the identical
+    # reasoning general_assistance_intent's own yield-checks already
+    # apply: "find me a voice that sounds professional for this
+    # presentation" matches this function's own marker shape and
+    # select_voice's Tier-2 imperative shape at once - alphabetical
+    # sorting would otherwise let this capability win ("knowledge" <
+    # "select_voice") and answer with a knowledge-style response about
+    # what a voice generically is, instead of actually choosing one.
+    if select_voice_intent(task, participants):
+        return False
     return True
 
 
@@ -4834,29 +4848,101 @@ LEARNING_CONTEXT = ManagerCapability(
 
 _VOICE_MARKERS = ("voice", "accent")
 
+# Anchored, imperative-shaped, mirrors _GENERAL_ACTION_PATTERN's own
+# convention - covers a genuine ask this project's own small language/
+# accent/gender table cannot parse ("find me a voice that sounds
+# professional for this") without also claiming an unrelated remark that
+# merely contains the word "voice" ("I have no voice in this decision",
+# "raise your voice").
+_VOICE_SELECTION_PATTERN = re.compile(
+    r"^(?:please\s+)?(?:can\s+you\s+|could\s+you\s+|would\s+you\s+)?"
+    r"(?:help\s+me\s+)?"
+    r"(find|give|use|pick|choose|get|select)\b.*\bvoice\b",
+    re.IGNORECASE,
+)
+
 
 def select_voice_intent(task: Task, participants: Sequence[str] = ()) -> bool:
-    """Claims only a request that both names voice/accent AND parses to
-    a genuine language/accent request - "I have no voice in this
-    decision" mentions the word but parses empty, and is correctly left
-    to whatever else already handles it."""
+    """Claims a request that either parses to a genuine language/accent/
+    gender ask (Tier 1, deterministic), or has the unmistakable
+    imperative shape of "pick me a voice" with nothing this project's
+    small table can parse (Tier 2, Brain-assisted - see select_voice's
+    own docstring). "I have no voice in this decision" and "raise your
+    voice" match neither shape and are correctly left to whatever else
+    already handles them."""
     if not _marker_present(task.description, _VOICE_MARKERS):
         return False
-    return not parse_voice_request(task.description).is_empty()
+    if not parse_voice_request(task.description).is_empty():
+        return True
+    working = _strip_vocative(task.description).strip()
+    return bool(_VOICE_SELECTION_PATTERN.match(working))
+
+
+def _describe_option_for_brain(option: "Any") -> str:
+    return (
+        f"{option.name} (provider={option.provider}, "
+        f"language={option.language or 'unknown'}, accent={option.accent or 'unknown'}, "
+        f"gender={option.gender or 'unknown'})"
+    )
+
+
+def _apply_voice_selection(
+    request: CapabilityRequest, agent_key: str, selection: "VoiceSelection", *, brain_assisted: bool = False
+) -> TaskResult:
+    """The one, shared governed-write tail both select_voice's Tier 1
+    (deterministic) and Tier 2 (Brain-assisted) paths end at - never two
+    implementations of "persist a genuine match, refuse honestly
+    otherwise"."""
+    if selection.option is None:
+        return TaskResult.failure(
+            request.task, request.own_name, f"I can't do that: {selection.reason}.",
+        )
+
+    if request.retain is None or request.recall is None or request.forget is None:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "I found a matching voice but have no way to remember the choice right now.",
+        )
+
+    forget_prior_autonomous_choice(agent_key, recall=request.recall, forget=request.forget)
+    verdict = request.retain(
+        build_voice_autonomous_choice_record(
+            agent_key, selection.option,
+            language_satisfied=selection.language_satisfied,
+            accent_satisfied=selection.accent_satisfied,
+            gender_satisfied=selection.gender_satisfied,
+        )
+    )
+    if not verdict.allowed:
+        return TaskResult.failure(
+            request.task, request.own_name, f"I couldn't save that choice: {verdict.reason}",
+        )
+
+    return TaskResult.success(
+        request.task, request.own_name,
+        f"I'll use '{selection.option.name}' ({selection.option.provider}) - {selection.reason}.",
+        payload={
+            "handled_by": "select_voice",
+            "voice_id": selection.option.voice_id,
+            "provider": selection.option.provider,
+            "language_satisfied": selection.language_satisfied,
+            "accent_satisfied": selection.accent_satisfied,
+            "gender_satisfied": selection.gender_satisfied,
+            "brain_assisted": brain_assisted,
+        },
+    )
 
 
 def select_voice(request: CapabilityRequest) -> TaskResult:
-    """Governed, deterministic voice autonomy - the real backend decision
-    path Section AUTONOMY MODEL of this checkpoint's brief asks for.
+    """Governed voice autonomy - the real backend decision path the
+    voice-autonomy checkpoints ask for, in two tiers.
 
-    Governance order, enforced in this exact sequence:
+    Governance order, enforced in this exact sequence regardless of
+    tier:
 
         1. an explicit user override already in effect always wins -
            this handler defers to it and never silently replaces it
         2. real, live-discovered options are evaluated
-           (``select_voice_option``, deterministic - no Brain call: see
-           that function's own docstring for why matching a request
-           against a small set of real options needs no reasoning)
         3. a genuine match is persisted as this agent's own autonomous
            choice, through the governed ``request.retain`` path - the
            same gate every other durable Manager write already crosses
@@ -4864,16 +4950,24 @@ def select_voice(request: CapabilityRequest) -> TaskResult:
            for and why it could not be satisfied, never a silent
            substitution
 
-    Half-Brain safe throughout: nothing here ever calls
-    ``request.converse``.
-    """
-    parsed = parse_voice_request(request.task.description)
-    if parsed.is_empty():
-        return TaskResult.failure(
-            request.task, request.own_name,
-            "I didn't recognise a specific language or accent in that request.",
-        )
+    **Tier 1 (deterministic, Half-Brain safe): ``select_voice_option``.**
+    Matching a request that names a real language/accent/gender against
+    real discovered options is a constraint-satisfaction problem with
+    one correct, checkable answer - no reasoning needed, and none used;
+    this tier never calls ``request.converse``.
 
+    **Tier 2 (Brain-assisted, only when Tier 1 found nothing to parse).**
+    Reserved for a request this project's small deterministic table
+    genuinely cannot classify ("find me a voice that sounds professional
+    for this presentation") but whose imperative shape still clearly
+    asks for one (``select_voice_intent``'s own second branch). The
+    Brain is given only the real, currently-discovered options - never
+    asked to invent one - and its free-text answer is trusted only when
+    it names exactly one of them unambiguously; anything else is an
+    honest refusal, never a guess. Unavailable (no Brain configured)
+    degrades to the identical honest refusal Half Brain already gives
+    every other capability that needs reasoning it does not have.
+    """
     agent_key = request.own_name
 
     existing_override = voice_preference_for(agent_key, recall=request.recall) if request.recall else None
@@ -4891,42 +4985,51 @@ def select_voice(request: CapabilityRequest) -> TaskResult:
             "I don't have a way to discover real voice options right now.",
         )
     available = tuple(request.discover_voices())
-    selection = select_voice_option(parsed, available)
 
-    if selection.option is None:
-        return TaskResult.failure(
-            request.task, request.own_name, f"I can't do that: {selection.reason}.",
-        )
+    parsed = parse_voice_request(request.task.description)
+    if not parsed.is_empty():
+        selection = select_voice_option(parsed, available)
+        return _apply_voice_selection(request, agent_key, selection)
 
-    if request.retain is None or request.recall is None or request.forget is None:
+    # Tier 2. select_voice_intent's own second branch already confirmed
+    # this request has the imperative shape of "pick me a voice" - the
+    # only thing left to check is whether real reasoning can actually be
+    # reached, and whether real options exist to reason over.
+    if not available:
         return TaskResult.failure(
             request.task, request.own_name,
-            "I found a matching voice but have no way to remember the choice right now.",
+            "I can't do that: no voice options are currently available from any configured provider.",
         )
-
-    forget_prior_autonomous_choice(agent_key, recall=request.recall, forget=request.forget)
-    verdict = request.retain(
-        build_voice_autonomous_choice_record(
-            agent_key, selection.option,
-            language_satisfied=selection.language_satisfied, accent_satisfied=selection.accent_satisfied,
-        )
-    )
-    if not verdict.allowed:
+    if request.converse is None:
         return TaskResult.failure(
-            request.task, request.own_name, f"I couldn't save that choice: {verdict.reason}",
+            request.task, request.own_name,
+            "I didn't recognise a specific language, accent or gender in that request, and "
+            "I have no way to reason about it further right now.",
         )
 
-    return TaskResult.success(
-        request.task, request.own_name,
-        f"I'll use '{selection.option.name}' ({selection.option.provider}) - {selection.reason}.",
-        payload={
-            "handled_by": "select_voice",
-            "voice_id": selection.option.voice_id,
-            "provider": selection.option.provider,
-            "language_satisfied": selection.language_satisfied,
-            "accent_satisfied": selection.accent_satisfied,
-        },
+    notes = tuple(_describe_option_for_brain(option) for option in available) + (
+        "Those are the only real, currently-available voice options. Reply naming exactly "
+        "one of them by its exact name, and briefly say why it fits.",
     )
+    decision = request.converse(request.task, notes)
+    if not decision.is_decided or not decision.reason.strip():
+        return TaskResult.failure(
+            request.task, request.own_name,
+            f"I couldn't reason about which voice fits, so I would rather say so than guess "
+            f"({decision.reason}).",
+        )
+
+    named = {option.voice_id: option for option in available if option.name.lower() in decision.reason.lower()}
+    if len(named) != 1:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "I reasoned about this but couldn't settle on a single available voice unambiguously, "
+            "so I would rather say so than guess.",
+        )
+
+    chosen = next(iter(named.values()))
+    selection = VoiceSelection(chosen, False, False, False, f"chosen by reasoning: {decision.reason.strip()}")
+    return _apply_voice_selection(request, agent_key, selection, brain_assisted=True)
 
 
 SELECT_VOICE = ManagerCapability(
@@ -4934,9 +5037,10 @@ SELECT_VOICE = ManagerCapability(
     capabilities=frozenset({"voice", "accent"}),
     handle=select_voice,
     description=(
-        "Autonomously chooses a real, currently-available voice matching a requested "
-        "language/accent, from whatever the configured speech provider genuinely offers - "
-        "never overriding an explicit user voice choice."
+        "Chooses a real, currently-available voice matching a requested "
+        "language/accent/gender, deterministically when the request states one, "
+        "Brain-assisted when it does not - from whatever the configured speech "
+        "provider genuinely offers, never overriding an explicit user voice choice."
     ),
     claims=select_voice_intent,
     scoreable=False,

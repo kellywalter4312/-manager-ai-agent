@@ -87,6 +87,18 @@ def normalize_language_token(value: "str | None") -> "str | None":
     return token
 
 
+# Small and deliberately open, the same discipline LANGUAGE_NAMES above
+# holds itself to - just enough to recognise an ordinary request for a
+# real, commonly-reported voice trait (ElevenLabs' own
+# ``labels["gender"]``), never a claim about every value a provider
+# might report.
+GENDER_WORDS: dict[str, str] = {
+    "female": "female", "woman": "female", "women": "female",
+    "male": "male", "man": "male", "men": "male",
+    "neutral": "neutral",
+}
+
+
 def languages_match(a: "str | None", b: "str | None") -> bool:
     """Whether two language facts genuinely name the same language -
     comparing a code against a name (``"it"`` vs ``"italian"``) correctly,
@@ -114,10 +126,14 @@ class VoiceOption:
     ``VoiceProfile`` (see ``voice_preference.py``) needs to know which
     provider-specific field it belongs in.
 
-    ``language``/``accent``/``locale`` are each optional and independent -
-    see the module docstring. A voice with ``language=None`` is not "any
-    language"; it is "this provider did not report one", and must never
-    be offered as satisfying a specific language request.
+    ``language``/``accent``/``locale``/``gender`` are each optional and
+    independent - see the module docstring. A voice with
+    ``language=None`` is not "any language"; it is "this provider did
+    not report one", and must never be offered as satisfying a specific
+    language request. ``gender`` is the same idea applied to a real,
+    commonly-reported voice trait (ElevenLabs' own ``labels["gender"]``)
+    - never inferred from a name, never guessed for a provider that does
+    not report it.
     """
 
     voice_id: str
@@ -126,6 +142,7 @@ class VoiceOption:
     language: "str | None" = None
     accent: "str | None" = None
     locale: "str | None" = None
+    gender: "str | None" = None
 
     def __post_init__(self) -> None:
         if not str(self.voice_id).strip():

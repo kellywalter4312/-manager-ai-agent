@@ -141,9 +141,11 @@ try {
 """
 
 # The same query, also emitting each voice's real .NET Culture (e.g.
-# "en-US") - a genuine per-voice fact this engine has always exposed
-# (``VoiceInfo.Culture``), never read before this checkpoint. A separate
-# script rather than changing the one above: installed_voice_names()'s
+# "en-US") and Gender - genuine per-voice facts this engine has always
+# exposed (``VoiceInfo.Culture``, ``VoiceInfo.Gender``), confirmed live
+# against this machine's own installed voices (David=Male, Hazel=Female,
+# Zira=Female) and never read before this checkpoint. A separate script
+# rather than changing the one above: installed_voice_names()'s
 # existing, tested, one-name-per-line output must stay byte-identical -
 # nothing about the Stage 11.2/11.4 voice-mapping behaviour it backs may
 # change as a side effect of adding discovery.
@@ -153,7 +155,7 @@ $ErrorActionPreference = 'Stop'
 try {
   $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
   $synth.GetInstalledVoices() | Where-Object { $_.Enabled } | ForEach-Object {
-    Write-Output ($_.VoiceInfo.Name + "|" + $_.VoiceInfo.Culture.Name)
+    Write-Output ($_.VoiceInfo.Name + "|" + $_.VoiceInfo.Culture.Name + "|" + $_.VoiceInfo.Gender)
   }
   $synth.Dispose()
 } catch {
@@ -276,12 +278,15 @@ class WindowsSpeechAdapter(SpeechAdapter):
     def available_voices(self) -> "tuple[VoiceOption, ...]":
         """This machine's own, real installed voices, each with the real
         locale .NET reports for it (``VoiceInfo.Culture``, e.g.
-        ``"en-US"``) and the language that locale's own prefix names via
-        ``voice_options.LANGUAGE_NAMES`` - never a guessed language, and
-        never an accent: SAPI genuinely does not expose one (see this
-        module's own docstring on why "nigerian-english" was never
-        reproducible here). A locale prefix this project's small table
-        does not recognise still yields a real, honest locale with
+        ``"en-US"``), the language that locale's own prefix names via
+        ``voice_options.LANGUAGE_NAMES`` (never guessed - see below), and
+        the real gender .NET reports (``VoiceInfo.Gender``, "Male" or
+        "Female" - live-confirmed against this machine's own installed
+        voices: David=Male, Hazel=Female, Zira=Female). Never an accent:
+        SAPI genuinely does not expose one (see this module's own
+        docstring on why "nigerian-english" was never reproducible
+        here). A locale prefix this project's small table does not
+        recognise still yields a real, honest locale with
         ``language=None`` rather than being dropped.
 
         Queried live, once per instance (mirrors ``installed_voice_names``'s
@@ -300,15 +305,20 @@ class WindowsSpeechAdapter(SpeechAdapter):
             line = line.strip()
             if not line:
                 continue
-            name, _, culture = line.partition("|")
-            name, culture = name.strip(), culture.strip()
+            name, _, rest = line.partition("|")
+            culture, _, gender_raw = rest.partition("|")
+            name, culture, gender_raw = name.strip(), culture.strip(), gender_raw.strip()
             if not name:
                 continue
             locale = culture or None
             prefix = culture.split("-", 1)[0].lower() if culture else ""
             language = LANGUAGE_NAMES.get(prefix)
+            gender = gender_raw.lower() if gender_raw.lower() in ("male", "female", "neutral") else None
             options.append(
-                VoiceOption(voice_id=name, name=name, provider=self.name, language=language, locale=locale)
+                VoiceOption(
+                    voice_id=name, name=name, provider=self.name,
+                    language=language, locale=locale, gender=gender,
+                )
             )
         return tuple(options)
 
