@@ -65,6 +65,7 @@ from src.agents.tools.live_information import LiveInformationTool  # noqa: E402
 from src.agents.tools.web_search import WebSearchTool  # noqa: E402
 from src.agents.tools.document_generation import DocumentGenerationTool  # noqa: E402
 from src.agents.tools.artifact_production import ArtifactProductionTool  # noqa: E402
+from src.services.artifacts.delivery import available_delivery_methods  # noqa: E402
 from src.agents.tools.media_production import MediaProductionTool  # noqa: E402
 from src.agents.tools.toolset import ToolSet  # noqa: E402
 from src.channels.channel import Channel  # noqa: E402
@@ -1649,10 +1650,11 @@ def run_command(
             for artifact in sorted(artifacts, key=lambda a: a.latest.created_at, reverse=True):
                 latest = artifact.latest
                 renditions = ", ".join(sorted(latest.renditions)) or "none"
+                delivery = ", ".join(available_delivery_methods(latest)) or "none yet"
                 lines.append(
                     f"  {artifact.artifact_id} [{artifact.type}] v{latest.version} "
                     f"owner={artifact.owner_agent} status={latest.status} "
-                    f"title={latest.title!r} renditions={renditions}"
+                    f"title={latest.title!r} renditions={renditions} delivery={delivery}"
                 )
             lines.append("  (type 'artifacts <id>' for one artifact's full version history)")
             return "\n".join(lines)
@@ -1665,10 +1667,11 @@ def run_command(
         ]
         for version in artifact.versions:
             renditions = ", ".join(f"{fmt}={path}" for fmt, path in sorted(version.renditions.items())) or "none"
+            delivery = ", ".join(available_delivery_methods(version)) or "none yet"
             lines.append(
                 f"  v{version.version} status={version.status} title={version.title!r} "
                 f"created={version.created_at.isoformat()} content={version.content_path} "
-                f"renditions={renditions}"
+                f"renditions={renditions} delivery={delivery}"
             )
         return "\n".join(lines)
 

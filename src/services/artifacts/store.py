@@ -19,6 +19,18 @@ identical discipline ``PersistentMemory`` already holds itself to
 fresh instance (a new process, or a fresh per-run rebuild) must see
 exactly what the last one wrote, and a crash right after a write must
 never lose it.
+
+**Where this sits in the whole picture.** Artifact/version identity
+(here) is the first of four genuinely separate concerns this project's
+artifact architecture keeps apart: what real *content* an artifact
+holds (``src/services/artifacts/models.py``, one schema per type);
+which real files exist for a version (``ArtifactVersion.renditions``,
+still this module); how an interface *presents* one to a person
+(``src/control_center/snapshot.py``, ``ui/index.html``); and what a
+person can actually *do* with it - view it, save it, one day send or
+print it (``src/services/artifacts/delivery.py``). None of the four
+decides another; a future artifact type or a future delivery mechanism
+extends exactly one of them.
 """
 
 from __future__ import annotations

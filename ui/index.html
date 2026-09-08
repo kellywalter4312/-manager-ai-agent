@@ -1858,13 +1858,20 @@
       const renditions = x.renditions || {};
       const formats = Object.keys(renditions);
       const label = `${x.title} (v${x.version}, ${x.status})`;
-      if(!formats.length) return `<span class="chip off">${esc(label)}</span>`;
+      // Whether this artifact can actually be taken out of Alfred right
+      // now is the backend's own computed fact (src/services/artifacts/
+      // delivery.py), read here rather than re-derived from renditions -
+      // the frontend must show what the backend actually decided, never
+      // its own guess at the identical question.
+      const canDownload = Array.isArray(x.delivery) && x.delivery.includes("download");
+      if(!canDownload || !formats.length) return `<span class="chip off">${esc(label)}</span>`;
       const format = formats[0];
       const href = `artifact/${esc(x.artifact_id)}.${esc(format)}`;
       const preview = x.type === "image"
         ? `<img src="${href}" alt="${esc(label)}" style="display:block;max-width:140px;max-height:100px;border-radius:6px;margin-top:4px">`
         : "";
-      return `<a class="chip on" href="${href}" target="_blank" rel="noopener" style="display:inline-block">${esc(label)} [${esc(format)}]${preview}</a>`;
+      return `<a class="chip on" href="${href}" target="_blank" rel="noopener" title="Download"
+        style="display:inline-block">${esc(label)} [${esc(format)}]${preview}</a>`;
     }).join("");
   }
 

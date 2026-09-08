@@ -36,6 +36,7 @@ from typing import Any
 
 from src.control_center.manifest import upgrade_manifest
 from src.control_center.observer import ControlCenter
+from src.services.artifacts.delivery import available_delivery_methods
 from src.services.identity.personality import personality_for
 from src.services.identity.voice import activation_for, voice_for
 
@@ -288,6 +289,11 @@ def _artifacts(store: Any) -> list[dict[str, Any]]:
             "title": artifact.latest.title,
             "created_at": _moment(artifact.latest.created_at),
             "renditions": dict(artifact.latest.renditions),
+            # The fourth, distinct concern src/services/artifacts/delivery.py's
+            # own docstring names - computed fresh here, never persisted
+            # alongside the version it describes, so an interface never
+            # reads a delivery claim that has gone stale.
+            "delivery": list(available_delivery_methods(artifact.latest)),
         }
         for artifact in sorted(store.all(), key=lambda a: a.latest.created_at, reverse=True)
     ]

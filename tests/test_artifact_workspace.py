@@ -282,6 +282,54 @@ class TestNullDocumentRenderer:
 
 
 # ---------------------------------------------------------------------------
+# Delivery - the fourth, distinct concern (Artifact -> Rendition ->
+# Presentation -> Delivery). A pure, computed fact, never persisted.
+# ---------------------------------------------------------------------------
+
+
+class TestAvailableDeliveryMethods:
+    def _version(self, renditions):
+        from datetime import datetime, timezone
+
+        from src.services.artifacts.store import ArtifactVersion
+
+        return ArtifactVersion(
+            version=1, title="t", status="ready",
+            created_at=datetime.now(timezone.utc), content_path="c", renditions=renditions,
+        )
+
+    def test_no_rendition_means_no_delivery_method(self):
+        from src.services.artifacts.delivery import available_delivery_methods
+
+        assert available_delivery_methods(self._version({})) == ()
+
+    def test_a_real_rendition_makes_download_available(self):
+        from src.services.artifacts.delivery import DOWNLOAD, available_delivery_methods
+
+        methods = available_delivery_methods(self._version({"pdf": "x.pdf"}))
+        assert methods == (DOWNLOAD,)
+
+    def test_the_same_method_regardless_of_which_rendition_format(self):
+        """The method is genuinely computed from "does a real file
+        exist", never keyed to one specific format - a future rendition
+        format needs no change here."""
+        from src.services.artifacts.delivery import available_delivery_methods
+
+        assert available_delivery_methods(self._version({"png": "x.png"})) == \
+            available_delivery_methods(self._version({"pdf": "x.pdf"}))
+
+    def test_never_claims_printing_sharing_or_sync(self):
+        """No real mechanism for these exists anywhere in this project -
+        asserted here so a future addition cannot silently start
+        claiming one without a deliberate, real implementation."""
+        from src.services.artifacts.delivery import available_delivery_methods
+
+        methods = available_delivery_methods(self._version({"pdf": "x.pdf"}))
+        for unsupported in ("print", "email", "share", "sync", "send"):
+            assert unsupported not in methods
+
+
+# ---------------------------------------------------------------------------
 # Document-rendering factory / provider independence
 # ---------------------------------------------------------------------------
 
@@ -1196,6 +1244,18 @@ class TestFullSystemIntegration:
         detail = cc.run_command(centre, f"artifacts {artifact_id}", 100, channel, conversation)
         assert artifact_id in detail
         assert "v1" in detail
+        assert "delivery=download" in listing
+        assert "delivery=download" in detail
+
+    def test_control_center_shows_no_delivery_when_no_rendition_exists(self, tmp_path):
+        import scripts.control_center as cc
+
+        runtime, manager, channel, conversation = _built(tmp_path, document_rendering="null")
+        manager.handle_task(Task(description=HANDOUT_TEXT))
+        centre = cc.ControlCenter(runtime, manager)
+
+        listing = cc.run_command(centre, "artifacts", 100, channel, conversation)
+        assert "delivery=none yet" in listing
 
     def test_control_center_capability_matrix_reflects_real_state(self, tmp_path):
         import scripts.control_center as cc
@@ -1221,7 +1281,19 @@ class TestFullSystemIntegration:
         assert entry["type"] == "document"
         assert entry["owner_agent"] == runtime.identity.name
         assert "pdf" in entry["renditions"]
+        assert entry["delivery"] == ["download"]
         assert entry["artifact_id"] == runtime.artifacts.all()[0].artifact_id
+
+    def test_snapshot_shows_no_delivery_when_no_rendition_exists(self, tmp_path):
+        import scripts.control_center as cc
+        from src.control_center.snapshot import snapshot
+
+        runtime, manager, channel, conversation = _built(tmp_path, document_rendering="null")
+        manager.handle_task(Task(description=HANDOUT_TEXT))
+        centre = cc.ControlCenter(runtime, manager)
+
+        data = snapshot(centre, conversation=conversation, channel=channel)
+        assert data["artifacts"][0]["delivery"] == []
 
     def test_missing_artifact_is_a_real_404_not_a_fabricated_response(self, tmp_path):
         import scripts.serve_ui as su
@@ -1629,6 +1701,55 @@ class TestUIRendersTheRealArtifact:
         # A genuine inline <img> preview, not merely a download link - the
         # real served file is what the src attribute points at.
         assert f'<img src="artifact/{artifact_id}.png"' in rendered
+
+    def test_an_artifact_with_no_delivery_method_renders_no_link(self, tmp_path):
+        """The frontend must show the backend's own real "nothing to
+        deliver yet" state honestly - no download link, no fabricated
+        href pointing at a file that does not exist."""
+        import re
+        import subprocess
+
+        node = self._node()
+        if node is None:
+            pytest.skip("no node runtime available in this environment")
+
+        import scripts.control_center as cc
+        from src.config.settings import Settings
+        from src.control_center.snapshot import snapshot as build_snapshot
+
+        runtime, manager, channel, conversation = cc.build(
+            Settings.from_env(
+                env={}, memory="ephemeral", artifacts_dir=str(tmp_path / "artifacts"),
+                document_rendering="null",
+            )
+        )
+        manager.handle_task(Task(description=HANDOUT_TEXT))
+        artifact_id = runtime.artifacts.all()[0].artifact_id
+        assert runtime.artifacts.get(artifact_id).latest.renditions == {}
+        centre = cc.ControlCenter(runtime, manager)
+        data = build_snapshot(centre, conversation=conversation, channel=channel)
+        assert data["artifacts"][0]["delivery"] == []
+
+        repo_root = Path(__file__).resolve().parent.parent
+        shell = (repo_root / "ui" / "index.html").read_text(encoding="utf-8")
+        script_match = re.search(r"<script>(.*)</script>", shell, re.S)
+        assert script_match is not None
+        (tmp_path / "ui_script.js").write_text(script_match.group(1), encoding="utf-8")
+        (tmp_path / "snapshot.json").write_text(json.dumps(data), encoding="utf-8")
+        harness = tmp_path / "harness.js"
+        harness.write_text(_UI_NODE_HARNESS, encoding="utf-8")
+
+        result = subprocess.run(
+            [node, str(harness), str(tmp_path / "ui_script.js"), str(tmp_path / "snapshot.json"), "agent"],
+            capture_output=True, text=True,
+        )
+        assert result.stdout.strip(), result.stderr
+        out = json.loads(result.stdout.strip().splitlines()[-1])
+        assert out.get("ok"), out.get("error")
+
+        rendered = out["views"]["boot"]
+        assert f"artifact/{artifact_id}." not in rendered
+        assert "The History of Volcanoes" in rendered
 
 
 # A trimmed copy of the real vm-based harness
