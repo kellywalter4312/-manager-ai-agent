@@ -114,6 +114,17 @@ from src.services.memory.capture import DEFAULT_PURPOSE as DEFAULT_CAPTURE_PURPO
 from src.services.memory.capture import build_recording, capture_intent
 from src.services.memory.learning import build_learning_record, learning_intent
 from src.services.memory.memory import MemoryRecord
+from src.services.memory.personal_context import (
+    PersonalContextCandidate,
+    STATUS_CURRENT,
+    STATUS_DISCONTINUED,
+    all_current_personal_context,
+    build_personal_context_record,
+    extract_personal_context_candidate,
+)
+from src.services.memory.personal_context import (
+    personal_context_intent as _personal_context_shape_matches,
+)
 from src.services.memory.milestones import (
     AUTO_CONFIRM_FACT_TYPE,
     CELEBRATION_INTENSITY_FACT_TYPE,
@@ -5167,6 +5178,171 @@ SELECT_VOICE = ManagerCapability(
 )
 
 
+# Generalized user knowledge/personal-context checkpoint. Words present only
+# so a person asking "what can you do" hears something honest - routing
+# itself never uses this set (scoreable=False below; see personal_context's
+# own claims=).
+#
+# Tier 2 eligibility: a marker this project has no fixed vocabulary for
+# ("skill"/"schedule"/"timetable"/...) is deliberately not exhaustive - it
+# only decides whether a Brain is even asked, never what the answer is.
+# personal_context.py's own deterministic layer, not this set, is what
+# actually recognises the acceptance examples.
+_PERSONAL_CONTEXT_TIER2_MARKERS = frozenset({
+    "learned", "learnt", "mastered", "skill", "skills",
+    "schedule", "timetable", "syllabus", "coursework",
+    "started", "starting",
+})
+_PERSONAL_CONTEXT_SELF_REFERENCE = re.compile(r"\b(?:i|i'm|i've|my)\b", re.IGNORECASE)
+
+
+def personal_context_intent(task: Task, participants: Sequence[str] = ()) -> bool:
+    """Claims a request shaped like a self-declared, updatable personal
+    fact - Tier 1's own deterministic shapes, or (Tier 2 eligibility only)
+    a self-referential remark carrying one of this domain's markers that
+    Tier 1's regexes did not happen to match.
+
+    Two deferrals:
+
+      - ``learning_intent`` already, correctly, owns present-continuous
+        study ("I am studying X") - LEARNING_CONTEXT's own capability,
+        deliberately untouched by this checkpoint (see personal_context.py's
+        own module docstring for why). A request already shaped that way is
+        never claimed here, Tier 1 or Tier 2, so the two capabilities can
+        never both fire for the same sentence.
+      - ``select_voice_intent`` reuses "learned"-adjacent phrasing nowhere,
+        but the deferral is added for the same documented reason every
+        other capability in this file already states one: a future
+        overlap must fail loud in a test, not fail silent in routing.
+    """
+    text = task.description
+    if learning_intent(text):
+        return False
+    if _personal_context_shape_matches(text):
+        return True
+    if select_voice_intent(task, participants):
+        return False
+    if not _PERSONAL_CONTEXT_SELF_REFERENCE.search(text):
+        return False
+    return bool(_PERSONAL_CONTEXT_TIER2_MARKERS & tokenize(text))
+
+
+def personal_context(request: CapabilityRequest) -> TaskResult:
+    """Generalized user knowledge - the mechanism, never a catalog.
+
+    Tier 1 (deterministic, Half-Brain-safe): personal_context.py's own
+    shape-recognised extraction. Tier 2 (Brain-assisted, only when Tier 1
+    found nothing whatsoever to parse): the Brain is given the user's exact
+    words and asked to name the topic and whether it is current or
+    discontinued, never asked to invent content - the record's own content
+    stays the user's real sentence either way, the identical "validate
+    against real evidence, never fabricate" discipline select_voice's own
+    Tier 2 already holds itself to.
+
+    Governed persistence only (``request.retain``) - never a raw write.
+    Nothing here is Alfred-specific: every fact this function touches is
+    the calling agent's own, exactly as select_voice already established.
+    """
+    text = request.task.description
+    candidate = extract_personal_context_candidate(text)
+    brain_assisted = False
+
+    if candidate is None:
+        if request.converse is None:
+            return TaskResult.failure(
+                request.task, request.own_name,
+                "That sounds like something about yourself, but I couldn't tell "
+                "what the topic is, and I have no way to reason about it further "
+                "right now.",
+            )
+        notes = (
+            f"The user said: \"{text}\". This appears to be the user teaching you "
+            "an updatable personal fact about themselves - a skill, a schedule, or "
+            "some other changing personal context, not a request for information. "
+            "Reply with exactly two lines and nothing else:\n"
+            "TOPIC: <a short noun phrase naming what this is about, taken from the "
+            "user's own words>\n"
+            "STATUS: <current, if this is newly true or newly ongoing; discontinued, "
+            "if the user is saying something has ended or is no longer the case>\n"
+            "If this is genuinely not a personal fact about the user, reply with "
+            "TOPIC: none",
+        )
+        decision = request.converse(request.task, notes)
+        if not decision.is_decided or not decision.reason.strip():
+            return TaskResult.failure(
+                request.task, request.own_name,
+                f"I couldn't reason about what to remember, so I would rather say "
+                f"so than guess ({decision.reason}).",
+            )
+        # Non-greedy, stopped at STATUS: or end-of-string explicitly - a
+        # Brain reply is not guaranteed to keep the two-line shape the
+        # prompt asked for (some providers collapse newlines to spaces),
+        # so "TOPIC: guitar lessons STATUS: current" on one physical line
+        # must not let a greedy capture swallow the status label too.
+        topic_match = re.search(
+            r"TOPIC:\s*(.+?)(?:\s*(?:\n|\bSTATUS:)|$)", decision.reason, re.IGNORECASE,
+        )
+        topic_raw = topic_match.group(1).strip() if topic_match else ""
+        if not topic_raw or topic_raw.lower().startswith("none"):
+            return TaskResult.failure(
+                request.task, request.own_name,
+                "I reasoned about this but couldn't confidently identify a "
+                "personal fact to remember, so I would rather say so than guess.",
+            )
+        status_match = re.search(r"STATUS:\s*(current|discontinued)", decision.reason, re.IGNORECASE)
+        status = status_match.group(1).lower() if status_match else STATUS_CURRENT
+        candidate = PersonalContextCandidate(
+            topic=topic_raw[:120],
+            content=text.strip(),
+            category="context",
+            status=status,
+        )
+        brain_assisted = True
+
+    if request.retain is None:
+        return TaskResult.failure(
+            request.task, request.own_name, "I don't have a way to remember that right now.",
+        )
+
+    record = build_personal_context_record(candidate, agent_name=request.own_name)
+    verdict = request.retain(record)
+    if not verdict.allowed:
+        return TaskResult.failure(
+            request.task, request.own_name, f"I couldn't record that: {verdict.reason}",
+        )
+
+    verb = "noted" if candidate.status == STATUS_CURRENT else "noted that this has ended"
+    return TaskResult.success(
+        request.task, request.own_name,
+        f"Got it - I've {verb} regarding {candidate.topic}.",
+        payload={
+            "handled_by": "personal_context",
+            "topic": candidate.topic,
+            "status": candidate.status,
+            "category": candidate.category,
+            "brain_assisted": brain_assisted,
+        },
+    )
+
+
+PERSONAL_CONTEXT = ManagerCapability(
+    name="personal_context",
+    capabilities=frozenset({
+        "learned", "skill", "skills", "schedule", "timetable", "syllabus",
+    }),
+    handle=personal_context,
+    description=(
+        "Learns and updates self-declared, changeable personal facts about the "
+        "user - a skill they say they have learned, a schedule, an organisational "
+        "context, or any other topic-shaped personal fact - so a later statement "
+        "about the same topic correctly supersedes an earlier one instead of both "
+        "being treated as simultaneously current."
+    ),
+    claims=personal_context_intent,
+    scoreable=False,
+)
+
+
 # Every Manager capability handler, keyed by handler name.
 #
 # **This is the extension point.** A future Manager capability is registered
@@ -5210,6 +5386,8 @@ MANAGER_CAPABILITIES: dict[str, ManagerCapability] = {
     KNOWLEDGE.name: KNOWLEDGE,
     LEARNING_CONTEXT.name: LEARNING_CONTEXT,
     SELECT_VOICE.name: SELECT_VOICE,
+    # Generalized user knowledge/personal-context checkpoint.
+    PERSONAL_CONTEXT.name: PERSONAL_CONTEXT,
 }
 
 # Used when a task reaches the Manager without matching any handler's words.

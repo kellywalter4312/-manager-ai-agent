@@ -31,6 +31,7 @@ from src.control_center.views import (
     ConversationTurn,
     HistoryView,
     OverviewView,
+    PersonalContextTopicView,
     UnresolvedFactView,
     VoiceView,
 )
@@ -492,4 +493,28 @@ def render_unresolved_facts(facts: tuple[UnresolvedFactView, ...], columns: int 
             f"    (restate it in conversation, e.g. \"{fact.person}'s birthday is "
             f"{fact.alternatives[0]}\" - id={fact.record_id})"
         )
+    return "\n".join(out)
+
+
+def render_personal_context(
+    topics: tuple[PersonalContextTopicView, ...], columns: int | None = None
+) -> str:
+    """The real, current state of everything the user has taught Alfred
+    about themselves - one line per topic, always the latest statement.
+    Read-only: teaching happens through ordinary conversation, never from
+    this screen."""
+    columns = columns if columns is not None else width()
+    out: list[str] = []
+    out += _heading("personal context", columns)
+
+    if not topics:
+        out.append("")
+        out.append("  nothing taught yet")
+        return "\n".join(out)
+
+    for topic in topics:
+        out.append("")
+        marker = "[ended]" if topic.status == "discontinued" else "[current]"
+        out.append(f"  {marker} {topic.topic} ({topic.category})")
+        out.append(f"    {topic.content}")
     return "\n".join(out)

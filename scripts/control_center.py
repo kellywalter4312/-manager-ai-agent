@@ -82,6 +82,7 @@ from src.control_center.render import (  # noqa: E402
     render_agent,
     render_history,
     render_overview,
+    render_personal_context,
     render_system,
     render_turn,
     render_unresolved_facts,
@@ -169,6 +170,8 @@ HELP = """
                            recorded across restarts (see 'Memory' step
                            in a talk trail for when one is recorded)
   unresolved               personal facts Alfred knows only as uncertainty
+  personal                 self-declared personal context taught in conversation
+                           (skills, schedules, ...) - current state, per topic
   artifacts                every real, persisted artifact (documents/handouts)
   artifacts <id>           one artifact's full version history
   avatar                   every agent's current presence and avatar
@@ -1617,6 +1620,13 @@ def run_command(
         # saying the correct date to Alfred (the "talk" command above),
         # never from this screen.
         return render_unresolved_facts(centre.unresolved_facts(), columns)
+
+    if verb == "personal":
+        # Generalized user knowledge/personal-context checkpoint:
+        # real, current, per-topic state - never decorative. Read-only,
+        # like every other view here: teaching happens through ordinary
+        # conversation, not from this screen.
+        return render_personal_context(centre.personal_context(), columns)
 
     if verb == "tasks":
         # Phase 5.1: read-only state visibility, the same "genuine

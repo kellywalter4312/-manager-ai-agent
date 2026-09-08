@@ -99,6 +99,22 @@ class MemoryCategory(str, Enum):
     # from "forget who I am", the identical reasoning RECORDING/MILESTONE
     # were kept out of USER_CONTEXT for above.
     TASK = "user_task"
+    # Generalized user knowledge/context checkpoint: a self-declared,
+    # updatable fact about the person - a skill they say they have
+    # learned, a schedule, an organisational context, or any other
+    # topic-shaped personal fact nobody has named yet. Deliberately not
+    # folded into USER_CONTEXT, for the identical reason LEARNING above
+    # already is not: this category's own facts genuinely supersede -
+    # "this is my new IT schedule" makes an earlier schedule no longer
+    # current - and USER_CONTEXT holds stable facts that do not work
+    # that way. Also deliberately not folded into LEARNING, which stays
+    # scoped to exactly what it always was (the present-continuous study
+    # subject an explanation should be pitched at); this category is the
+    # general mechanism a topic-keyed "latest record for this topic
+    # wins" resolution runs over (see src/services/memory/personal_context.py),
+    # open to skills, schedules and any future kind of personal fact
+    # without ever adding a new MemoryCategory for each one.
+    PERSONAL_CONTEXT = "personal_context"
 
     @property
     def label(self) -> str:
@@ -111,6 +127,7 @@ class MemoryCategory(str, Enum):
             "milestone": "MILESTONE",
             "learning": "LEARNING CONTEXT",
             "user_task": "TASK",
+            "personal_context": "PERSONAL CONTEXT",
         }[self.value]
 
     @property
@@ -152,6 +169,13 @@ class MemoryCategory(str, Enum):
                 "An outstanding, actionable item the person asked to be "
                 "tracked - pending or complete - never a stable fact about "
                 "who they are."
+            ),
+            "personal_context": (
+                "A self-declared, updatable fact about the person - a skill "
+                "they say they have learned, a schedule, an organisational "
+                "context - grouped by topic so a newer statement about the "
+                "same topic supersedes an older one rather than both being "
+                "treated as simultaneously current."
             ),
         }[self.value]
 

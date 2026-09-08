@@ -13,8 +13,23 @@ anything, and without knowing a single subject.
                                (a KnowledgeSourceProvider)    person's own
     LEARNING_CONTEXT           the agent's governed Memory    who is asking
                                                               and why
+    PERSONAL_CONTEXT           the agent's governed Memory    the resolved,
+                               (personal_context.py)          current-per-
+                                                              topic state of
+                                                              whatever the
+                                                              user has taught
+                                                              Alfred about
+                                                              themselves
     MODEL_KNOWLEDGE            the Brain, one layer up        settled, broad
     (live information)         deliberately NOT here          the present
+
+**PERSONAL_CONTEXT is resolved evidence, never raw history.** Every topic
+the user has ever taught Alfred may have several records behind it (see
+personal_context.py's own "lifecycle without mutation"); this module reads
+only ``all_current_personal_context`` - one record per topic, the latest -
+so a Brain reasoning over this evidence never sees a superseded fact beside
+its replacement and has to guess which one is true. Kept genuinely distinct
+from LEARNING_CONTEXT, which stays scoped to exactly what it always was.
 
 **Live information is deliberately absent, and its absence is the point.**
 ``LIVE_INFORMATION`` in ``capabilities.py`` already owns "what is true
@@ -46,6 +61,10 @@ from typing import Callable, Sequence
 from src.agents.tools.toolset import ToolSet
 from src.manager.memory_policy import MemoryCategory
 from src.services.memory.memory import MemoryRecord
+from src.services.memory.personal_context import (
+    STATUS_DISCONTINUED,
+    all_current_personal_context,
+)
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -61,12 +80,19 @@ KNOWLEDGE_TOOL = "knowledge_lookup"
 # travel in a TaskResult payload, which is a mapping of ordinary values.
 USER_DOCUMENTS = "user_documents"
 LEARNING_CONTEXT = "learning_context"
+PERSONAL_CONTEXT = "personal_context"
 MODEL_KNOWLEDGE = "model_knowledge"
 
 # How many stored learning-context records are worth carrying into one
 # answer. Small: this is context for pitching an explanation, not a
 # transcript of everything the person has ever studied.
 LEARNING_RECALL_LIMIT = 3
+
+# How many distinct personal-context topics are worth carrying into one
+# answer. Small, for the same reason: ambient context for an answer, never
+# a full transcript of everything the user has ever taught Alfred about
+# themselves.
+PERSONAL_CONTEXT_RECALL_LIMIT = 10
 
 # The inert line that stops settled evidence being read as current. Phrased
 # as a statement *about the evidence* rather than as an instruction, because
@@ -176,6 +202,30 @@ def gather_knowledge_evidence(
             else:
                 unavailable.append(
                     f"{LEARNING_CONTEXT}: nothing is stored about what the user is studying"
+                )
+
+    if recall is None:
+        unavailable.append(
+            f"{PERSONAL_CONTEXT}: no memory reaches this request, so nothing is "
+            "known about the user's other personal context"
+        )
+    else:
+        try:
+            personal = all_current_personal_context(recall=recall, limit=PERSONAL_CONTEXT_RECALL_LIMIT)
+        except Exception as exc:  # noqa: BLE001 - deliberate boundary catch
+            logger.warning("could not recall personal context: %s", exc)
+            unavailable.append(f"{PERSONAL_CONTEXT}: memory could not be read")
+        else:
+            if personal:
+                for item in personal:
+                    if item.status == STATUS_DISCONTINUED:
+                        notes.append(f"Personal context (no longer current): {item.content}")
+                    else:
+                        notes.append(f"Personal context: {item.content}")
+                sources.append(PERSONAL_CONTEXT)
+            else:
+                unavailable.append(
+                    f"{PERSONAL_CONTEXT}: nothing is stored about the user's personal context"
                 )
 
     return KnowledgeEvidence(

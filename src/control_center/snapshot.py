@@ -338,6 +338,24 @@ def _artifacts(store: Any) -> list[dict[str, Any]]:
     ]
 
 
+def _personal_context(topics: Any) -> list[dict[str, Any]]:
+    """Generalized user knowledge/personal-context checkpoint: the real,
+    current, per-topic state (see ``ControlCenter.personal_context``'s
+    own docstring) - one entry per topic, always the latest statement,
+    never a raw history dump and never a decorative example."""
+    return [
+        {
+            "record_id": item.record_id,
+            "topic": item.topic,
+            "content": item.content,
+            "category": item.category,
+            "status": item.status,
+            "noted_by": item.noted_by,
+        }
+        for item in topics
+    ]
+
+
 def snapshot(
     centre: ControlCenter,
     *,
@@ -398,6 +416,10 @@ def snapshot(
         # artifact - the one authoritative record (see this module's own
         # _artifacts docstring), never a fabricated or UI-only listing.
         "artifacts": _artifacts(centre.runtime.artifacts),
+        # Generalized user knowledge/personal-context checkpoint: the
+        # real, current per-topic state - the same data the "personal"
+        # terminal command renders, never a UI-only duplicate.
+        "personal_context": _personal_context(centre.personal_context()),
         "conversation": _conversation(conversation),
         "speech": _speech(channel),
         "system": {

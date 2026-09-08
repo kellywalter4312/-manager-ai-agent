@@ -181,6 +181,22 @@ class UnresolvedFactView:
 
 
 @dataclass(frozen=True)
+class PersonalContextTopicView:
+    """The resolved, current state of one topic the user has taught
+    Alfred about themselves - a skill, a schedule, any other self-
+    declared personal fact. Read-only, and genuinely live: this is one
+    ``PersonalContextRecord`` (personal_context.py's own "latest record
+    for this topic wins" resolution), never a decorative example."""
+
+    record_id: str
+    topic: str
+    content: str
+    category: str
+    status: str
+    noted_by: str
+
+
+@dataclass(frozen=True)
 class ToolView:
     """A concrete mechanism, and whether it is genuinely present.
 

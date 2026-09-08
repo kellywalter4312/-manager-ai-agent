@@ -251,6 +251,12 @@ class TestHandlersAreSelectedThroughTheRegistry:
             "milestone_recognition",
             "open_conversation",
             "participant_invitation",
+            # Generalized user knowledge/personal-context checkpoint: a
+            # self-declared, updatable fact about the person - a skill,
+            # a schedule, an organisational context - so a later
+            # statement about the same topic correctly supersedes an
+            # earlier one.
+            "personal_context",
             "personal_recurring_events",
             "recall_memory",
             "record_this",

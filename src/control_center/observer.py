@@ -50,6 +50,7 @@ from src.control_center.views import (
     MemoryRecordView,
     MemoryView,
     OverviewView,
+    PersonalContextTopicView,
     SystemView,
     ToolView,
     UnresolvedFactView,
@@ -57,6 +58,7 @@ from src.control_center.views import (
 from src.manager.capabilities import GENERAL_CAPABILITIES, PERSON_BIRTHDAY_FACT_TYPE
 from src.manager.cognition import assess_cognition, assess_manager
 from src.manager.manager import ManagerAgent
+from src.services.memory.personal_context import all_current_personal_context
 from src.services.identity.presence import environment_for, presence_for
 from src.utils.logging import get_logger
 
@@ -539,6 +541,32 @@ class ControlCenter:
                 )
             )
         return tuple(views)
+
+    def personal_context(self) -> tuple[PersonalContextTopicView, ...]:
+        """The real, current, per-topic state of everything the user has
+        taught Alfred about themselves - one entry per topic, always the
+        latest statement (personal_context.py's own supersession
+        resolution), never a raw history dump and never a decorative
+        example. Read-only: teaching happens through the ordinary
+        conversational path (the ``personal_context`` capability in
+        ``src/manager/capabilities.py``); this only presents what is
+        already, genuinely stored.
+        """
+        memory = self._manager.memory
+        if memory is None:
+            return ()
+        resolved = all_current_personal_context(recall=memory.recall, limit=200)
+        return tuple(
+            PersonalContextTopicView(
+                record_id=item.record_id,
+                topic=item.topic,
+                content=item.content,
+                category=item.category,
+                status=item.status,
+                noted_by=item.noted_by,
+            )
+            for item in resolved
+        )
 
 
 class _EmptyTools:

@@ -73,7 +73,7 @@ def refused(**fields):
 
 
 class TestTheCategoriesAreExplicit:
-    def test_there_are_exactly_eight(self):
+    def test_there_are_exactly_nine(self):
         """A small vocabulary on purpose. Adding a category is a decision -
         Stage 12 added two: RECORDING (an explicit "record this [for X]"
         capture, distinct from an ordinary durable fact) and MILESTONE (a
@@ -87,8 +87,14 @@ class TestTheCategoriesAreExplicit:
         provenance. Phase 5.1 added a fourth, TASK (an outstanding,
         actionable item with real state) - passes the identical test, and
         is deliberately not USER_CONTEXT: a task is something to do, not a
-        stable fact about who the person is."""
-        assert len(MemoryCategory) == 8
+        stable fact about who the person is. The generalized user
+        knowledge/personal-context checkpoint added a fifth,
+        PERSONAL_CONTEXT (a self-declared, updatable fact about the person
+        - a skill, a schedule, an organisational context) - passes the
+        identical test, and is deliberately not LEARNING or USER_CONTEXT:
+        its own facts genuinely supersede one another by topic, which
+        neither of those two categories is built to represent."""
+        assert len(MemoryCategory) == 9
 
     def test_the_categories_are_the_agreed_ones(self):
         assert POLICY.category_names == (
@@ -97,6 +103,7 @@ class TestTheCategoriesAreExplicit:
             "learning",
             "lesson",
             "milestone",
+            "personal_context",
             "recording",
             "user_context",
             "user_task",
