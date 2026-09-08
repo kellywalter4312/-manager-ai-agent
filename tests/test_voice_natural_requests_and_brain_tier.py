@@ -165,6 +165,22 @@ class TestTier2ReachesARealBrainOnlyWhenTier1FindsNothing:
         assert not result.succeeded
         assert "no reasoning capability is configured" in result.error
 
+    def test_reselect_after_a_tier_2_pick_excludes_it_without_a_second_brain_call(self):
+        runtime, manager, channel, conversation = real_system()
+        provider = ScriptedProvider("I'd recommend 'Microsoft Hazel Desktop'.")
+        manager.brain = LLMManagerBrain(provider, personality=runtime.identity.personality)
+        manager.own_skills._converse = manager.brain.converse
+
+        first = manager.handle_task(Task(description="find me a voice that sounds professional"))
+        assert first.succeeded and first.payload["brain_assisted"] is True
+        calls_after_first = len(provider.calls)
+
+        second = manager.handle_task(Task(description="choose another"))
+        assert second.succeeded
+        assert second.payload["voice_id"] != first.payload["voice_id"]
+        assert second.payload["brain_assisted"] is False
+        assert len(provider.calls) == calls_after_first, "reselect must be deterministic, never a second Brain call"
+
     def test_an_explicit_override_still_wins_ahead_of_tier_2(self):
         runtime, manager, channel, conversation = real_system()
         from src.control_center.observer import ControlCenter

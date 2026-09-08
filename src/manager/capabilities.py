@@ -93,13 +93,20 @@ from src.services.identity.introduction import (
     self_introduction,
 )
 from src.services.identity.voice_preference import (
+    autonomous_voice_choice_for,
     build_voice_autonomous_choice_record,
     forget_prior_autonomous_choice,
+    release_voice_preference,
     voice_preference_for,
 )
 from src.services.identity.voice_selection import (
+    VoiceRequest,
     VoiceSelection,
+    is_release_autonomy_request,
+    is_reselect_request,
+    is_unconstrained_selection_request,
     parse_voice_request,
+    pick_any,
     select_voice as select_voice_option,
 )
 from src.services.memory.capture import DEFAULT_PURPOSE as DEFAULT_CAPTURE_PURPOSE
@@ -4846,7 +4853,13 @@ LEARNING_CONTEXT = ManagerCapability(
 )
 
 
-_VOICE_MARKERS = ("voice", "accent")
+# "speak" added for requirement 2's own canonical example - "Alfred, I
+# want you to speak Italian" names no "voice"/"accent" word at all.
+# Safe to widen: every check below this gate still requires either a
+# genuinely parsed language/accent/gender or one of the anchored
+# imperative shapes, so a bare "speak" in an unrelated remark ("let's
+# speak later", "speak up") still correctly falls through to False.
+_VOICE_MARKERS = ("voice", "accent", "speak")
 
 # Anchored, imperative-shaped, mirrors _GENERAL_ACTION_PATTERN's own
 # convention - covers a genuine ask this project's own small language/
@@ -4863,18 +4876,36 @@ _VOICE_SELECTION_PATTERN = re.compile(
 
 
 def select_voice_intent(task: Task, participants: Sequence[str] = ()) -> bool:
-    """Claims a request that either parses to a genuine language/accent/
-    gender ask (Tier 1, deterministic), or has the unmistakable
-    imperative shape of "pick me a voice" with nothing this project's
-    small table can parse (Tier 2, Brain-assisted - see select_voice's
-    own docstring). "I have no voice in this decision" and "raise your
-    voice" match neither shape and are correctly left to whatever else
-    already handles them."""
+    """Claims a request shaped like any of select_voice's real, distinct
+    governance actions:
+
+      - a genuine language/accent/gender ask (Tier 1, deterministic)
+      - "choose your voice"/"pick whatever voice suits you" - identity
+        selection with no constraint at all (Tier 1, still deterministic)
+      - the unmistakable imperative shape of "pick me a voice" with
+        nothing this project's small table can parse otherwise
+        (Tier 2, Brain-assisted - see select_voice's own docstring)
+      - "choose another"/"not that one" - reselect, excluding the
+        current autonomous choice
+      - "you can choose your voice again" - release an explicit
+        override, restoring autonomous selection
+
+    The last two are matched independently of the ``voice``/``accent``
+    marker check below - a genuine "choose another" follow-up in
+    ordinary conversation often does not repeat the word "voice" at all.
+    "I have no voice in this decision" and "raise your voice" match none
+    of these shapes and are correctly left to whatever else already
+    handles them.
+    """
+    if is_reselect_request(task.description) or is_release_autonomy_request(task.description):
+        return True
     if not _marker_present(task.description, _VOICE_MARKERS):
         return False
     if not parse_voice_request(task.description).is_empty():
         return True
     working = _strip_vocative(task.description).strip()
+    if is_unconstrained_selection_request(working):
+        return True
     return bool(_VOICE_SELECTION_PATTERN.match(working))
 
 
@@ -4887,12 +4918,23 @@ def _describe_option_for_brain(option: "Any") -> str:
 
 
 def _apply_voice_selection(
-    request: CapabilityRequest, agent_key: str, selection: "VoiceSelection", *, brain_assisted: bool = False
+    request: CapabilityRequest, agent_key: str, selection: "VoiceSelection", *,
+    brain_assisted: bool = False,
+    requested_language: "str | None" = None,
+    requested_accent: "str | None" = None,
+    requested_gender: "str | None" = None,
 ) -> TaskResult:
-    """The one, shared governed-write tail both select_voice's Tier 1
-    (deterministic) and Tier 2 (Brain-assisted) paths end at - never two
-    implementations of "persist a genuine match, refuse honestly
-    otherwise"."""
+    """The one, shared governed-write tail every select_voice path -
+    Tier 1 constrained, Tier 1 unconstrained, Tier 2, and reselect -
+    ends at, never several implementations of "persist a genuine match,
+    refuse honestly otherwise".
+
+    ``requested_*`` is what was actually asked for (independent of what
+    the chosen option's own attributes happen to be) - persisted so a
+    later "choose another" can honour the original constraint (or lack
+    of one) rather than whatever the prior pick happened to be. See
+    ``AutonomousVoiceChoice``'s own docstring.
+    """
     if selection.option is None:
         return TaskResult.failure(
             request.task, request.own_name, f"I can't do that: {selection.reason}.",
@@ -4911,6 +4953,9 @@ def _apply_voice_selection(
             language_satisfied=selection.language_satisfied,
             accent_satisfied=selection.accent_satisfied,
             gender_satisfied=selection.gender_satisfied,
+            requested_language=requested_language,
+            requested_accent=requested_accent,
+            requested_gender=requested_gender,
         )
     )
     if not verdict.allowed:
@@ -4934,48 +4979,71 @@ def _apply_voice_selection(
 
 
 def select_voice(request: CapabilityRequest) -> TaskResult:
-    """Governed voice autonomy - the real backend decision path the
-    voice-autonomy checkpoints ask for, in two tiers.
+    """Governed voice autonomy - a real backend decision path generic to
+    any agent built on ``ManagerSkills`` (Alfred, Arthur's own
+    hypothetical future ManagerSkills-based sibling, or a specialist
+    nobody has written yet): every fact this function touches -
+    ``request.own_name``, ``request.discover_voices``, ``request.recall``/
+    ``forget``/``retain`` - is the calling agent's own, never Alfred's
+    by name. Nothing here is Alfred-specific; nothing needs to be to add
+    a new agent.
 
-    Governance order, enforced in this exact sequence regardless of
-    tier:
+    Five distinct actions, checked in this order (release first - it is
+    the one action meaningful regardless of what else is true):
 
-        1. an explicit user override already in effect always wins -
-           this handler defers to it and never silently replaces it
-        2. real, live-discovered options are evaluated
-        3. a genuine match is persisted as this agent's own autonomous
-           choice, through the governed ``request.retain`` path - the
-           same gate every other durable Manager write already crosses
-        4. no genuine match -> an honest refusal naming what was asked
-           for and why it could not be satisfied, never a silent
-           substitution
+        1. RELEASE: "you can choose your voice again" - clears this
+           agent's own explicit override (release_voice_preference),
+           restoring autonomous selection. A real governance state
+           change, not UI wording - a subsequent unconstrained/
+           constrained/reselect request genuinely reaches Tier 1/2
+           afterward, because voice_preference_for now returns None.
+        2. An explicit override already in effect always wins from here
+           on - deferred to, never silently replaced, for every
+           remaining action below.
+        3. RESELECT: "choose another"/"not that one" - re-runs the same
+           constraint (or lack of one) the agent's own last autonomous
+           choice actually satisfied, excluding that choice's own
+           voice_id, so a real different option is required rather than
+           silently repeating the same deterministic pick.
+        4. UNCONSTRAINED: "choose your voice that best suits you" -
+           identity selection alone, no language/accent/gender implied
+           at all (``pick_any`` - deterministic, no Brain needed: an
+           unconstrained delegation is the simplest case there is).
+        5. CONSTRAINED (Tier 1, deterministic) or, only once Tier 1 finds
+           nothing whatsoever to parse, Tier 2 (Brain-assisted, given
+           only real discovered options and validated against them
+           afterward - see this function's own git history for why).
 
-    **Tier 1 (deterministic, Half-Brain safe): ``select_voice_option``.**
-    Matching a request that names a real language/accent/gender against
-    real discovered options is a constraint-satisfaction problem with
-    one correct, checkable answer - no reasoning needed, and none used;
-    this tier never calls ``request.converse``.
-
-    **Tier 2 (Brain-assisted, only when Tier 1 found nothing to parse).**
-    Reserved for a request this project's small deterministic table
-    genuinely cannot classify ("find me a voice that sounds professional
-    for this presentation") but whose imperative shape still clearly
-    asks for one (``select_voice_intent``'s own second branch). The
-    Brain is given only the real, currently-discovered options - never
-    asked to invent one - and its free-text answer is trusted only when
-    it names exactly one of them unambiguously; anything else is an
-    honest refusal, never a guess. Unavailable (no Brain configured)
-    degrades to the identical honest refusal Half Brain already gives
-    every other capability that needs reasoning it does not have.
+    Half-Brain safe throughout except Tier 2 itself: nothing in
+    RELEASE/RESELECT/UNCONSTRAINED/CONSTRAINED ever calls
+    ``request.converse``.
     """
     agent_key = request.own_name
+    text = request.task.description
+
+    if is_release_autonomy_request(text):
+        if request.recall is None or request.forget is None:
+            return TaskResult.failure(
+                request.task, request.own_name,
+                "I don't have a way to change that right now.",
+            )
+        released = release_voice_preference(agent_key, recall=request.recall, forget=request.forget)
+        message = (
+            "You're free to choose your own voice autonomously again."
+            if released else
+            "Your voice was already being chosen autonomously - nothing was locked in."
+        )
+        return TaskResult.success(
+            request.task, request.own_name, message,
+            payload={"handled_by": "select_voice", "released_override": released},
+        )
 
     existing_override = voice_preference_for(agent_key, recall=request.recall) if request.recall else None
     if existing_override:
         return TaskResult.success(
             request.task, request.own_name,
             f"Your voice is already explicitly set to '{existing_override}' - that stays in "
-            f"effect. Use the voice command to change it explicitly.",
+            f"effect. Use the voice command, or say 'you can choose your voice again', to change it.",
             payload={"handled_by": "select_voice", "deferred_to_override": existing_override},
         )
 
@@ -4986,12 +5054,52 @@ def select_voice(request: CapabilityRequest) -> TaskResult:
         )
     available = tuple(request.discover_voices())
 
-    parsed = parse_voice_request(request.task.description)
-    if not parsed.is_empty():
-        selection = select_voice_option(parsed, available)
+    if is_reselect_request(text):
+        prior = autonomous_voice_choice_for(agent_key, recall=request.recall) if request.recall else None
+        if prior is None:
+            # No prior autonomous voice choice on record. Never
+            # fabricate one from nothing: a bare "choose another"/"try
+            # another" genuinely can belong to any topic ("choose
+            # another route"), and RESELECT_MARKERS is deliberately not
+            # anchored to the word "voice" (see its own docstring) - the
+            # only thing that keeps a stray collision from ever
+            # producing a nonsensical voice pick is refusing honestly
+            # right here, exactly the same "no genuine match, no silent
+            # substitution" rule select_voice_option itself already
+            # holds to.
+            return TaskResult.failure(
+                request.task, request.own_name,
+                "There's no previous voice choice of mine to change - tell me what "
+                "language, accent or voice you'd like, or ask me to choose one.",
+            )
+        exclude = frozenset({prior.voice_id})
+        req_lang, req_accent, req_gender = prior.requested_language, prior.requested_accent, prior.requested_gender
+        if req_lang or req_accent or req_gender:
+            reconstructed = VoiceRequest(
+                raw_text=text, language=req_lang, accent=req_accent, gender=req_gender,
+            )
+            selection = select_voice_option(reconstructed, available, exclude=exclude)
+        else:
+            selection = pick_any(available, exclude=exclude)
+        return _apply_voice_selection(
+            request, agent_key, selection,
+            requested_language=req_lang, requested_accent=req_accent, requested_gender=req_gender,
+        )
+
+    working = _strip_vocative(text).strip()
+    if is_unconstrained_selection_request(working):
+        selection = pick_any(available)
         return _apply_voice_selection(request, agent_key, selection)
 
-    # Tier 2. select_voice_intent's own second branch already confirmed
+    parsed = parse_voice_request(text)
+    if not parsed.is_empty():
+        selection = select_voice_option(parsed, available)
+        return _apply_voice_selection(
+            request, agent_key, selection,
+            requested_language=parsed.language, requested_accent=parsed.accent, requested_gender=parsed.gender,
+        )
+
+    # Tier 2. select_voice_intent's own third branch already confirmed
     # this request has the imperative shape of "pick me a voice" - the
     # only thing left to check is whether real reasoning can actually be
     # reached, and whether real options exist to reason over.

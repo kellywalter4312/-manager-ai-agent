@@ -126,6 +126,29 @@ def set_voice_preference(
     return True
 
 
+def release_voice_preference(agent_key: str, *, recall: "_Recall", forget: "_Forget") -> bool:
+    """Clear this agent's own explicit voice override, restoring
+    autonomous selection - the real governance state change "you can
+    choose your voice again" asks for, not merely a phrase Alfred
+    replies to. Returns whether anything was actually cleared (False,
+    honestly, when no explicit override was in effect - releasing
+    nothing is not an error, but the caller can still say so precisely
+    rather than claiming a change that did not happen).
+
+    Deliberately narrow: this touches only the explicit-override tag,
+    never the agent's own autonomous-choice record (see
+    ``forget_prior_autonomous_choice`` below for that, a genuinely
+    different operation) and never the declared default in ``voice.py``.
+    """
+    tag = _voice_tag(agent_key)
+    existing = recall(kind="user_context", tags={tag}, limit=5)
+    if not existing:
+        return False
+    for record in existing:
+        forget(record.id)
+    return True
+
+
 @dataclass(frozen=True)
 class AutonomousVoiceChoice:
     """What an agent's own governed decision path (``select_voice``, see
@@ -145,7 +168,18 @@ class AutonomousVoiceChoice:
     installed roster); an ElevenLabs choice needs its real
     ``voice_id`` written into ``style``, exactly where that provider
     already looks for one (see ``elevenlabs_speech_provider.py``'s own
-    ``_voice_id_for``)."""
+    ``_voice_id_for``).
+
+    ``requested_language``/``requested_accent``/``requested_gender`` are
+    a second, genuinely different fact from ``language``/``accent``/
+    ``gender`` above: those describe the CHOSEN OPTION's own real
+    attributes (what the voice actually is), these describe what was
+    actually ASKED FOR (which may be nothing at all, for an
+    unconstrained "choose your voice"). Collapsing the two would make
+    "choose another" - which must honour the original constraint, not
+    whatever the previous pick happened to be - impossible to implement
+    correctly; kept apart here so it can reconstruct the real request.
+    """
 
     voice_id: str
     name: str
@@ -153,18 +187,29 @@ class AutonomousVoiceChoice:
     language: "str | None" = None
     accent: "str | None" = None
     gender: "str | None" = None
+    requested_language: "str | None" = None
+    requested_accent: "str | None" = None
+    requested_gender: "str | None" = None
 
 
 def build_voice_autonomous_choice_record(
     agent_key: str, option: "VoiceOption", *,
     language_satisfied: bool, accent_satisfied: bool, gender_satisfied: bool = False,
+    requested_language: "str | None" = None,
+    requested_accent: "str | None" = None,
+    requested_gender: "str | None" = None,
 ) -> MemoryRecord:
     """The MemoryRecord an agent's own governed write path
     (``request.retain`` inside the ``select_voice`` capability) records
     for a genuine autonomous choice - constructed here, never written
     here: this module holds no Memory reference of its own, the same
     boundary every other collaborator in this project's capability
-    handlers already crosses through ``CapabilityRequest`` alone."""
+    handlers already crosses through ``CapabilityRequest`` alone.
+
+    ``requested_*`` default to ``None`` (an unconstrained choice) rather
+    than being required, so every existing caller that has no constraint
+    to record - or predates this checkpoint - keeps working unchanged.
+    """
     return MemoryRecord(
         content=f"{agent_key} autonomously chose the voice '{option.name}' ({option.provider}).",
         kind="user_context",
@@ -181,6 +226,9 @@ def build_voice_autonomous_choice_record(
             "language_satisfied": language_satisfied,
             "accent_satisfied": accent_satisfied,
             "gender_satisfied": gender_satisfied,
+            "requested_language": requested_language,
+            "requested_accent": requested_accent,
+            "requested_gender": requested_gender,
             "source": "autonomous_selection",
         },
     )
@@ -212,6 +260,9 @@ def autonomous_voice_choice_for(agent_key: str, *, recall: "_Recall | None") -> 
         return AutonomousVoiceChoice(
             voice_id=str(voice_id), name=str(name), provider=str(provider),
             language=ctx.get("language"), accent=ctx.get("accent"), gender=ctx.get("gender"),
+            requested_language=ctx.get("requested_language"),
+            requested_accent=ctx.get("requested_accent"),
+            requested_gender=ctx.get("requested_gender"),
         )
     return None
 

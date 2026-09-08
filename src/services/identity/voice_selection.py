@@ -117,15 +117,23 @@ def _find_gender(text: str) -> "str | None":
 _ACCENT_ADJECTIVE = re.compile(r"\b([a-z][a-z-]*)\s+accent\b", re.IGNORECASE)
 
 # Words that can immediately precede a language name in ordinary English
-# without describing a region at all - "a Spanish voice", "an English
-# voice", "the French option". Excluded from the implicit
-# "<adjective> <language>" reading below so "Use a Spanish voice" is
-# never misread as accent="a". Deliberately small: only what ordinary
-# grammar puts directly before a noun, never a stand-in for a real
-# regional-adjective catalog (there is none - any other word is read as
-# a genuine accent qualifier, honestly, even if it turns out not to
-# match anything real later).
-_NON_ACCENT_PRECEDING_WORDS = {"a", "an", "the", "this", "that", "some", "any", "one"}
+# without describing a region at all - determiners ("a Spanish voice",
+# "an English voice", "the French option") and the small set of ordinary
+# verbs a language name is the object of ("speak Italian", "use
+# Spanish", "understand French", "in English"). Excluded from the
+# implicit "<adjective> <language>" reading below so neither shape is
+# misread as naming an accent ("Use a Spanish voice" as accent="a";
+# "I want you to speak Italian" as accent="speak"- both real, observed
+# false positives, fixed here). Deliberately small: only what ordinary
+# grammar puts directly before a language name, never a stand-in for a
+# real regional-adjective catalog (there is none - any other word is
+# read as a genuine accent qualifier, honestly, even if it turns out not
+# to match anything real later).
+_NON_ACCENT_PRECEDING_WORDS = {
+    "a", "an", "the", "this", "that", "some", "any", "one",
+    "speak", "speaking", "spoke", "spoken", "use", "using", "understand",
+    "know", "learn", "learning", "in", "to", "into", "for", "with",
+}
 
 
 def parse_voice_request(text: str) -> VoiceRequest:
@@ -195,18 +203,122 @@ def parse_voice_request(text: str) -> VoiceRequest:
             return VoiceRequest(raw_text=text, language=distinct[0], accent=accent, gender=gender)
         return VoiceRequest(raw_text=text, language=distinct[0] if distinct else None, accent=None, gender=gender)
 
-    others = [name for name in distinct if name != accent]
-    if others:
-        return VoiceRequest(raw_text=text, language=others[0], accent=accent, gender=gender)
-    # No other distinct language word: if the accent word is itself a
-    # known language name, it describes both facts (requirement 7's own
-    # "Italian voice with an Italian accent" example); otherwise
-    # ("British accent" alone - "british" is not a language name) the
-    # language genuinely was not stated, and stays honestly None.
-    from src.services.identity.voice_options import LANGUAGE_NAMES  # noqa: PLC0415
-
-    language = accent if (accent in LANGUAGE_NAMES.values() or accent in LANGUAGE_NAMES) else None
+    # The language, if any, comes from a language occurrence OTHER than
+    # the one just consumed as the accent adjective - matched by
+    # POSITION, never by name, which is what correctly tells apart the
+    # two genuinely different shapes a repeated word can make: "an
+    # Italian voice with an Italian accent" has two real occurrences of
+    # "Italian" (the first explicitly names the voice's language,
+    # separately from the accent that happens to share its name), while
+    # "I want your voice to have an Italian accent" has exactly one -
+    # and that one IS the accent, so no language was actually stated.
+    # Deduplicating by name alone (the earlier design) could not tell
+    # these apart, and wrongly inferred a language from an accent-only
+    # request - fixed here, per this checkpoint's own explicit
+    # correction: accent selection must never imply the same-named
+    # language.
+    accent_position = accent_match.start(1)
+    remaining = [name for position, name in occurrences if position != accent_position]
+    language = remaining[0] if remaining else None
     return VoiceRequest(raw_text=text, language=language, accent=accent, gender=gender)
+
+
+# The ordinary English words a request delegating the choice entirely
+# ("choose your voice", "pick whatever voice suits you", "you decide")
+# is built from - never a stand-in for a language/accent/gender catalog
+# (there is none here), only the small, closed set of function/
+# delegation words this specific shape of sentence is made of. Used
+# only to recognise the shape; a real quality word ("professional",
+# "warm") left over after removing these is what routes to Tier 2
+# instead (see ``is_unconstrained_selection_request`` below).
+_UNCONSTRAINED_FILLER_WORDS = frozenset({
+    "choose", "pick", "select", "find", "give", "use", "get", "decide",
+    "your", "you", "yourself", "voice", "please", "can", "could", "would",
+    "will", "that", "best", "suits", "suit", "suited", "for", "me", "us",
+    "to", "a", "an", "the", "one", "any", "whatever", "want", "like",
+    "some", "this", "it", "of", "own", "and", "just",
+})
+
+_VOICE_IMPERATIVE_VERB = re.compile(
+    r"^(?:please\s+)?(?:can\s+you\s+|could\s+you\s+|would\s+you\s+)?"
+    r"(?:help\s+me\s+)?"
+    r"(find|give|use|pick|choose|get|select|decide)\b",
+    re.IGNORECASE,
+)
+
+# The same "who was addressed is not what was asked" shape
+# src/manager/capabilities.py's own _strip_vocative already applies
+# elsewhere in this project - a small, self-contained piece of ordinary
+# English handling, not capability-specific, so this module keeps its
+# own copy rather than reaching across the layer boundary for one regex.
+_LEADING_VOCATIVE = re.compile(
+    r"^(?:hey|hi|hello)?\s*[A-Z][\w'\-]*(?:\s+[A-Z][\w'\-]*){0,2}\s*,\s*", re.IGNORECASE
+)
+
+
+def is_unconstrained_selection_request(text: str) -> bool:
+    """True for voice-identity selection with no constraint at all -
+    "Alfred, choose your voice that best suits you" - distinct from a
+    request Tier 2 must reason over ("find me a voice that sounds
+    professional") by whether anything is left once the ordinary
+    delegation words above (and any real language/accent/gender term)
+    are removed. Requires the same imperative shape
+    ``select_voice_intent`` already anchors on - a bare "your voice" is
+    not this.
+    """
+    if not parse_voice_request(text).is_empty():
+        return False
+    working = _LEADING_VOCATIVE.sub("", text.strip(), count=1).strip() or text.strip()
+    if not _VOICE_IMPERATIVE_VERB.match(working):
+        return False
+    remaining = re.sub(r"[^\w\s]", " ", working.lower())
+    words = [w for w in remaining.split() if w not in _UNCONSTRAINED_FILLER_WORDS]
+    return len(words) == 0
+
+
+# Distinctive marker phrases, deliberately not built from "voice" alone -
+# a genuine "choose another" follow-up in an ordinary conversation often
+# does not repeat the word "voice" at all ("I don't like that. Choose
+# another."), so this is matched independently of _VOICE_MARKERS. Small
+# and open, the same discipline every other marker tuple in this
+# project's capabilities already holds itself to - never an exhaustive
+# phrase-book, just enough to recognise the shape.
+#
+# Deliberately narrower than an earlier draft: "not that one", "don't
+# like that", "something else" and "a different one" were removed after
+# a real, observed false positive ("can you give me something else to
+# read" was claimed as a voice reselect) - each is domain-neutral enough
+# to belong to any topic, not specifically voice. The select_voice
+# handler's own reselect branch additionally refuses honestly (never
+# fabricates a pick) when no prior autonomous voice choice is on record,
+# which is what keeps a residual collision here ("choose another route")
+# from ever producing a nonsensical fabricated voice choice - see that
+# function's own docstring.
+RESELECT_MARKERS = (
+    "choose another", "pick another", "select another", "try another",
+    "a different voice", "another voice",
+)
+
+# Equally distinctive - restoring autonomy is a deliberate, infrequent
+# act, so precision matters more than recall here: each phrase pairs a
+# choose/pick/select/decide verb with "again", which "you can choose"
+# alone (dangerously generic) never does.
+RELEASE_AUTONOMY_MARKERS = (
+    "choose your voice again", "choose your own voice again", "pick your own voice again",
+    "pick your voice again", "select your voice again", "decide your own voice again",
+    "you can choose your voice again", "you can choose again", "choose again from now on",
+    "choose your own voice from now on",
+)
+
+
+def is_reselect_request(text: str) -> bool:
+    lowered = " ".join(text.lower().split())
+    return any(marker in lowered for marker in RESELECT_MARKERS)
+
+
+def is_release_autonomy_request(text: str) -> bool:
+    lowered = " ".join(text.lower().split())
+    return any(marker in lowered for marker in RELEASE_AUTONOMY_MARKERS)
 
 
 @dataclass(frozen=True)
@@ -260,7 +372,32 @@ def _describe(has_lang: bool, has_accent: bool, has_gender: bool, lang_ok: bool,
     return "; ".join(parts) if parts else "matched"
 
 
-def select_voice(request: VoiceRequest, available: "tuple[VoiceOption, ...]") -> VoiceSelection:
+def pick_any(available: "tuple[VoiceOption, ...]", *, exclude: "frozenset[str]" = frozenset()) -> VoiceSelection:
+    """Unconstrained voice-identity selection - "choose your voice",
+    "pick whatever voice suits you". Genuinely distinct from a request
+    ``select_voice`` below refuses for naming nothing: this is not "I
+    could not parse a constraint", it is "no constraint was named on
+    purpose - the choice is delegated entirely". Deterministic, like
+    every other Tier 1 decision in this module: the same real catalog
+    always yields the same choice, so this never needs a Brain call
+    either. ``exclude`` (real voice_ids) is what "choose another" reuses
+    to avoid repeating the immediately prior choice - never a random
+    reshuffle, which would make "the same request twice" behave
+    unpredictably."""
+    candidates = [o for o in available if o.voice_id not in exclude]
+    if not candidates:
+        reason = (
+            "no other voice options are currently available to choose instead"
+            if exclude else
+            "no voice options are currently available from any configured provider"
+        )
+        return VoiceSelection(None, False, False, False, reason)
+    return VoiceSelection(_pick(candidates), False, False, False, "chosen freely - no constraint was requested")
+
+
+def select_voice(
+    request: VoiceRequest, available: "tuple[VoiceOption, ...]", *, exclude: "frozenset[str]" = frozenset()
+) -> VoiceSelection:
     """Deterministic constraint matching over real, currently-discovered
     options - never a Brain call, never a fabricated option.
 
@@ -272,8 +409,13 @@ def select_voice(request: VoiceRequest, available: "tuple[VoiceOption, ...]") ->
     first, then each alone, so a real partial match is preferred over no
     match, and ``VoiceSelection`` always reports precisely which of the
     three were actually satisfied. A request naming none of the three is
-    refused with a reason naming that, rather than picking arbitrarily.
+    refused with a reason naming that, rather than picking arbitrarily -
+    see ``pick_any`` above for the genuinely different "no constraint was
+    named on purpose" case. ``exclude`` (real voice_ids), when given, is
+    removed from ``available`` before any matching happens - the same
+    "choose another" reuse ``pick_any`` documents.
     """
+    available = tuple(o for o in available if o.voice_id not in exclude)
     if request.is_empty():
         return VoiceSelection(
             None, False, False, False,
