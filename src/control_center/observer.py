@@ -350,7 +350,14 @@ class ControlCenter:
         warnings = []
         manager_brain = assess_manager(self._manager)
         if manager_brain.is_degraded:
-            warnings.append(f"model configured but unusable: {manager_brain.reason}")
+            # General weakness-audit repair: manager_brain.reason is
+            # already the self-contained "the model is configured but
+            # unusable: ..." sentence cognition.py composes - prefixing
+            # it with the identical phrase again produced a triply
+            # nested "unusable: unusable: unusable: ..." warning, found
+            # live once a genuine brain-level (not router-level) failure
+            # was actually exercised.
+            warnings.append(manager_brain.reason)
         if not any(view.tools for view in (self.manager_view(),) + specialists):
             warnings.append("no tools are installed; capabilities needing one cannot run")
 

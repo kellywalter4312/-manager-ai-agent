@@ -272,6 +272,21 @@ def assess_cognition(brain: Any, router: Any = None) -> CognitiveProfile:
     # configuration says. Checked before anything else for the same reason the
     # degradation check is: a configured-but-unusable model must never be
     # reported as full reasoning.
+    #
+    # General weakness-audit repair: `degraded` here used to stay whatever
+    # the router-only check above left it as - None whenever the failure
+    # was the *brain's* own (an LLMManagerBrain's converse()/deliberate()
+    # call genuinely failing, with no FallbackRouter involved at all).
+    # CognitiveProfile.is_degraded ("True when a model was configured but
+    # is not currently usable") and Control Center's own RED/AMBER
+    # indicator (BrainView.degraded) both read that field, so a brain-level
+    # failure - proven live: a scripted provider whose complete() raises -
+    # was reported exactly like a healthy, deliberately-Half-Brain
+    # deployment: AMBER, "not degraded". `availability` is the genuine
+    # broken evidence this branch is keyed on to begin with, and is never
+    # None here (the `is_known_broken` check above already proves it is a
+    # real Availability record) - so it is the correct fallback whenever no
+    # router degradation was separately recorded.
     if availability.is_known_broken and configured:
         return CognitiveProfile(
             mode=CognitiveMode.HALF_BRAIN,
@@ -279,7 +294,7 @@ def assess_cognition(brain: Any, router: Any = None) -> CognitiveProfile:
             brain_name=brain_name,
             brain_provider=brain_provider,
             router_provider=router_provider,
-            degraded=degraded,
+            degraded=degraded if degraded is not None else availability,
             availability=availability,
         )
 

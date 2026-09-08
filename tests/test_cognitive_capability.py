@@ -366,6 +366,25 @@ class TestProviderFailureIsUnavailability:
         assert router.last_degradation is None
         assert assess_cognition(NullBrain(), router).mode is CognitiveMode.HALF_BRAIN
 
+    def test_a_bare_brain_level_failure_with_no_router_involved_is_also_degraded(self):
+        """General weakness-audit repair: every prior test in this class
+        drives the failure through a FallbackRouter, whose own
+        last_degradation is what the old implementation actually read.
+        A brain's own converse()/deliberate() call can fail with no
+        router in the picture at all (an LLMManagerBrain called
+        directly, exactly how personal_context/calendar's own Tier 2
+        reaches it) - found live, this audit: that case reported
+        is_degraded=False, indistinguishable from a deliberately healthy
+        Half Brain deployment, because `degraded` was read only from the
+        router's own record."""
+        brain = LLMManagerBrain(FailingProvider(), personality=None)
+        brain.converse(Task(description="anything"))
+
+        profile = assess_cognition(brain, CapabilityRouter())
+        assert profile.mode is CognitiveMode.HALF_BRAIN
+        assert profile.is_degraded
+        assert "unusable" in profile.reason
+
     def test_a_broken_router_with_no_model_is_not_called_model_unavailable(self):
         """A degradation exists here, but no model was ever configured, so
         calling it "the model is unavailable" would be a fabrication - it would
