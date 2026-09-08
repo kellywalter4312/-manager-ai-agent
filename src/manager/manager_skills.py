@@ -49,6 +49,7 @@ from src.manager.recognition import Recognition, recognise
 from src.providers.celebration import CelebrationProvider, CelebrationReaction
 from src.providers.connection import Connection
 from src.providers.default_celebration_provider import DefaultCelebrationProvider
+from src.control_center.interfaces import InterfaceDescriptor
 from src.services.identity.identity import AgentIdentity
 from src.services.memory.day import Calendar
 from src.services.memory.memory import MemoryRecord
@@ -82,6 +83,7 @@ class ManagerSkills(BaseAgent):
         activity_sessions: "ActivitySessions | None" = None,
         activity_brain: "ActivityBrainOps | None" = None,
         discover_voices: "Callable[[], tuple[Any, ...]] | None" = None,
+        interface: "InterfaceDescriptor | None" = None,
     ) -> None:
         """``roster`` supplies the currently registered agents.
 
@@ -225,6 +227,24 @@ class ManagerSkills(BaseAgent):
         # collaborator already has: select_voice reports honestly that
         # no voice options are available, rather than crashing.
         self._discover_voices = discover_voices
+        # What this agent offers as a screen, asked the same way
+        # EmailAgent already answers it (see src/agents/email_agent.py's
+        # own ``interface`` property) - a declaration, not a grant, per
+        # InterfaceDescriptor's own docstring. None by default, the same
+        # honest-fallback shape every collaborator above already has:
+        # describe_interface() (src/control_center/interfaces.py) treats
+        # a ManagerSkills with no descriptor exactly like any other agent
+        # that declares nothing, and falls back to the conversational
+        # default rather than crashing. This class stays generic - it is
+        # composition.py's build_manager() that actually decides what
+        # Alfred declares, the same place EmailAgent's own hardcoded
+        # descriptor lives, one call site per agent rather than a branch
+        # in here.
+        self._interface = interface
+
+    @property
+    def interface(self) -> "InterfaceDescriptor | None":
+        return self._interface
 
     def bind_conversation_history(self, history: "Callable[[], Sequence[str]]") -> None:
         """Wire the real conversation's recent history in, once the room

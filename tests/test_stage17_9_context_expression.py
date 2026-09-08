@@ -953,17 +953,21 @@ class TestConversationRoomIntegration:
     def test_every_surface_with_a_body_uses_the_same_data_attribute(self):
         """The invariant is "one attribute, one renderer, one wiring loop"
         - not "exactly two surfaces". Stage 17.18 added a third surface
-        that draws a Digital Human (the private agent interface), and it
-        draws it by mounting the identical [data-avatarbody3d] container
-        the Room and the Workspace already use, through the identical
+        that draws a Digital Human (the private agent interface), and
+        Alfred's Real 3D Workspace (V.space) added a fourth - each draws
+        it by mounting the identical [data-avatarbody3d] container every
+        earlier surface already uses, through the identical
         wireAvatarBody3D/mountAvatarBody3D pair asserted either side of
-        this test. A new surface reaching for a *different* attribute is
-        what this guards against, and that is still what it catches: the
-        count must equal the number of surfaces, and the two tests around
-        it pin that there is still exactly one mount function and exactly
-        one wiring loop behind all of them."""
+        this test. This is what makes an agent's own avatar/presence
+        agent-owned rather than interface-owned: the Workspace does not
+        invent a second avatar mount, it reuses the one every other
+        surface already has. A new surface reaching for a *different*
+        attribute is what this guards against, and that is still what it
+        catches: the count must equal the number of surfaces, and the two
+        tests around it pin that there is still exactly one mount
+        function and exactly one wiring loop behind all of them."""
         shell = _shell()
-        assert shell.count('data-avatarbody3d="${esc(') == 3
+        assert shell.count('data-avatarbody3d="${esc(') == 4
         assert shell.count("function mountAvatarBody3D(container") == 1
         assert shell.count("function wireAvatarBody3D(){") == 1
 

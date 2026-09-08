@@ -315,9 +315,17 @@ class TestNoOtherBlockingMechanismExists:
             rule = block[1].split("}", 1)[0]
             assert "pointer-events:none" not in rule.replace(" ", "")
 
-    def test_only_one_keydown_listener_exists_and_it_is_bound_to_the_input_itself(self):
+    def test_keydown_listeners_are_bound_to_their_own_input_never_globally(self):
+        """The real invariant the original bug report needed: no
+        document/window-level keydown listener can ever globally
+        intercept keystrokes. Alfred's Real 3D Workspace added a second,
+        legitimate element-scoped listener (the task board's own
+        add-input, wired the identical way the conversation composer's
+        own input already is) - a second safe listener is not the bug
+        this test exists to catch, and the count below is updated to
+        say so explicitly rather than silently drifting stale."""
         shell = _shell()
-        assert shell.count('addEventListener("keydown"') == 1
+        assert shell.count('addEventListener("keydown"') == 2
         assert 'input.addEventListener("keydown"' in shell
         assert "document.addEventListener(\"keydown\"" not in shell
         assert "window.addEventListener(\"keydown\"" not in shell

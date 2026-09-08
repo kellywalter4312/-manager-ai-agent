@@ -63,6 +63,12 @@ Seven routes:
                          identical set_environment_preference() a
                          terminal session's own ``environment`` command
                          calls - never a second write path.
+    POST /workspace/enter {"agent": "..."} -> the one real acknowledgement
+                         a served page calls once a person has genuinely
+                         entered an agent's own 3D Workspace, through
+                         record_workspace_entry() -
+                         refused for an agent that never declared
+                         InterfaceFeature.WORKSPACE.
     GET  /vendor/...    a fixed, explicit allowlist of static presentation
                          assets (today: the vendored Three.js build and the
                          one font ui/index.html actually declares) - never
@@ -111,6 +117,7 @@ from scripts.exchange import exchange, memory_for  # noqa: E402
 from src.services.audit.action_log import DEFAULT_ACTION_LOG_PATH, load_action_log  # noqa: E402
 from scripts.export_ui import render  # noqa: E402
 from src.config.settings import Settings  # noqa: E402
+from src.control_center.interfaces import InterfaceFeature, describe_interface  # noqa: E402
 from src.control_center.observer import ControlCenter  # noqa: E402
 from src.control_center.render import render_overview  # noqa: E402
 from src.control_center.snapshot import snapshot  # noqa: E402
@@ -121,6 +128,7 @@ from src.services.identity.presence import (  # noqa: E402
     set_digital_human_style,
     set_environment_preference,
 )
+from src.services.identity.workspace import record_workspace_entry  # noqa: E402
 from src.utils.logging import configure_logging, get_logger  # noqa: E402
 
 logger = get_logger(__name__)
@@ -618,6 +626,72 @@ def route_environment(agent: object, environment_id: object, system: LiveSystem)
     )
 
 
+def route_workspace_enter(agent: object, system: LiveSystem) -> tuple[int, bytes, str]:
+    """Decide what to answer for `POST /workspace/enter`. No socket involved.
+
+    The one real acknowledgement a served page calls once a person has
+    genuinely entered an agent's own 3D Workspace - never a side effect of
+    merely reading a snapshot (GET requests stay unlocked and idempotent),
+    the identical "the caller is the only place that can honestly say the
+    thing happened" reasoning `route_experience` above already documents
+    for its own event.
+
+    Resolves ``agent`` through `memory_for()`, the identical rule every
+    other write route in this file already applies - an unrecognised name,
+    or one with no Memory, writes nothing. Refuses an agent that has not
+    actually declared `InterfaceFeature.WORKSPACE` (see
+    `src/control_center/interfaces.py`): entering a Workspace that was never
+    offered would be the frontend inventing a capability the agent itself
+    never claimed, exactly what `InterfaceDescriptor`'s own docstring calls
+    out as a lie a screen must not tell.
+
+    The write itself is `record_workspace_entry()`
+    (`src/services/identity/workspace.py`), the identical governed
+    forget-then-remember path `set_avatar_preference` already established -
+    this route is another caller of it, never a second implementation.
+    """
+    if not isinstance(agent, str) or not agent.strip():
+        return (
+            400,
+            json.dumps({"error": "agent must not be empty"}).encode("utf-8"),
+            "application/json; charset=utf-8",
+        )
+
+    manager_name = system.manager.own_skills.name if system.manager.own_skills else None
+    resolved = system.manager.own_skills if agent == manager_name else system.manager.registry.get(agent)
+    if resolved is None:
+        return (
+            404,
+            json.dumps({"error": f"no such agent: {agent!r}"}).encode("utf-8"),
+            "application/json; charset=utf-8",
+        )
+    interface = describe_interface(resolved)
+    if not interface.can_render(InterfaceFeature.WORKSPACE):
+        return (
+            400,
+            json.dumps({"error": f"'{agent}' has no Workspace to enter"}).encode("utf-8"),
+            "application/json; charset=utf-8",
+        )
+
+    memory = memory_for(system.manager, agent)
+    if memory is None:
+        return (
+            404,
+            json.dumps({"error": f"no such agent: {agent!r}"}).encode("utf-8"),
+            "application/json; charset=utf-8",
+        )
+
+    with system.lock:
+        session = record_workspace_entry(
+            agent, recall=memory.recall, remember=memory.remember, forget=memory.forget
+        )
+
+    return (
+        200,
+        json.dumps({"agent": agent, "workspace": session.to_dict()}).encode("utf-8"),
+        "application/json; charset=utf-8",
+    )
+
 
 # Foundation Repair #5, part 2 (reconciliation audit, 2026-09-05): the
 # management verbs run_command() already handles for a terminal, minus
@@ -634,6 +708,7 @@ MANAGEMENT_VERBS = frozenset(
         "status", "history", "actions", "unresolved", "avatar", "environment",
         "profile", "voice", "review", "capabilities", "provider", "connections",
         "ecosystem", "tasks", "artifacts", "personal", "calendar", "experience",
+        "workspace",
     }
 )
 
@@ -811,7 +886,15 @@ class SnapshotHandler(BaseHTTPRequestHandler):
         self._respond(status, body, content_type)
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib's naming, not ours to change
-        if self.path not in ("/message", "/avatar", "/profile", "/environment", "/command", "/experience"):
+        if self.path not in (
+            "/message",
+            "/avatar",
+            "/profile",
+            "/environment",
+            "/command",
+            "/experience",
+            "/workspace/enter",
+        ):
             self._respond(404, b"not found", "text/plain; charset=utf-8")
             return
 
@@ -848,6 +931,9 @@ class SnapshotHandler(BaseHTTPRequestHandler):
         elif self.path == "/experience":
             record_id = payload.get("record_id") if isinstance(payload, dict) else None
             status, body, content_type = route_experience(record_id, self.server.system)
+        elif self.path == "/workspace/enter":
+            agent = payload.get("agent") if isinstance(payload, dict) else None
+            status, body, content_type = route_workspace_enter(agent, self.server.system)
         else:
             agent = payload.get("agent") if isinstance(payload, dict) else None
             fields = payload.get("fields") if isinstance(payload, dict) else None

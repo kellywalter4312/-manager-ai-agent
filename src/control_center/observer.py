@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from src.agents.base_agent import BaseAgent
-from src.control_center.interfaces import describe_interface
+from src.control_center.interfaces import InterfaceFeature, describe_interface
 from src.core.versioning import SYSTEM_VERSION
 from src.events.narrator import compose
 from src.control_center.views import (
@@ -54,18 +54,23 @@ from src.control_center.views import (
     OverviewView,
     PersonalContextTopicView,
     SystemView,
+    TaskItemView,
     ToolView,
     UnresolvedFactView,
+    WorkspaceAgentView,
 )
 from src.manager.capabilities import GENERAL_CAPABILITIES, PERSON_BIRTHDAY_FACT_TYPE
 from src.manager.cognition import assess_cognition, assess_manager
 from src.manager.manager import ManagerAgent
+from src.manager.memory_policy import MemoryCategory
 from src.manager.proactive_experience import evaluate_and_persist_experiences
 from src.services.memory.calendar_items import all_current_calendar_items
 from src.services.memory.day import Calendar
 from src.services.memory.experience_history import all_experiences
 from src.services.memory.personal_context import all_current_personal_context
+from src.services.memory.tasks import describe_task
 from src.services.identity.presence import environment_for, presence_for
+from src.services.identity.workspace import workspace_session_for
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -643,6 +648,64 @@ class ControlCenter:
             )
             for item in resolved
         )
+
+    def _memory_for(self, agent_name: str) -> Any:
+        """The real Memory behind ``agent_name`` - the identical rule
+        ``specialist_views``' own ``manager_name`` resolution above already
+        applies, extracted so ``workspaces()`` below can read tasks and a
+        WorkspaceSession from the correct store without a second
+        implementation of "which agent is the Manager"."""
+        manager_name = self._manager.own_skills.name if self._manager.own_skills else None
+        if agent_name == manager_name:
+            return self._manager.memory
+        resolved = self._manager.registry.get(agent_name)
+        return getattr(resolved, "memory", None) if resolved is not None else None
+
+    def workspaces(self) -> tuple[WorkspaceAgentView, ...]:
+        """Every agent with a genuine Workspace to observe - discovered
+        from each agent's own declared ``InterfaceDescriptor``
+        (``InterfaceFeature.WORKSPACE``), never a fixed list naming Alfred.
+        A future agent that declares and implements a Workspace appears
+        here with no change to this method, the same discovery
+        ``specialist_views`` already performs for capabilities and tools.
+
+        Reads the identical governed task store
+        (``MemoryCategory.TASK``) and ``WorkspaceSession`` record
+        (``src/services/identity/workspace.py``) a served page's own
+        snapshot reads - the same backend source of truth, so Control
+        Center and the frontend never disagree about whether a Workspace
+        has been entered or what it holds. Read-only: entering happens
+        through the real Workspace route
+        (``scripts/serve_ui.py``'s ``POST /workspace/enter``), never from
+        this screen.
+        """
+        views: list[WorkspaceAgentView] = []
+        for view in (self.manager_view(),) + self.specialist_views():
+            if view.interface is None or not view.interface.can_render(InterfaceFeature.WORKSPACE):
+                continue
+            memory = self._memory_for(view.name)
+            recall = memory.recall if memory is not None else None
+            session = workspace_session_for(view.name, recall=recall)
+            records = recall(kind=MemoryCategory.TASK.value, tags=set(), limit=100) if recall is not None else ()
+            tasks = tuple(
+                TaskItemView(
+                    record_id=record.id,
+                    content=record.content,
+                    status=str((record.context or {}).get("status") or "pending"),
+                    describe=describe_task(record),
+                )
+                for record in records
+            )
+            views.append(
+                WorkspaceAgentView(
+                    agent=view.name,
+                    visits=session.visits,
+                    first_entered=session.first_entered,
+                    last_entered=session.last_entered,
+                    tasks=tasks,
+                )
+            )
+        return tuple(views)
 
 
 class _EmptyTools:

@@ -237,6 +237,40 @@ class ExperienceView:
 
 
 @dataclass(frozen=True)
+class TaskItemView:
+    """One real task, read-only - the identical governed
+    ``MemoryCategory.TASK`` record (``src/services/memory/tasks.py``)
+    both a conversational answer and a served page's own snapshot
+    already read. ``describe`` is the one shared rendering
+    (``describe_task``) so this, a served page, and a conversational
+    answer never describe the same task two different ways."""
+
+    record_id: str
+    content: str
+    status: str
+    describe: str
+
+
+@dataclass(frozen=True)
+class WorkspaceAgentView:
+    """One agent's own Workspace, as Control Center actually observes
+    it - read from the identical backend source of truth
+    (``src/services/identity/workspace.py``'s ``WorkspaceSession`` and
+    the same governed task store) a served page's own snapshot reads,
+    never a fabricated or Control-Center-only state. Discovered from
+    each agent's own declared ``InterfaceDescriptor`` (see
+    ``ControlCenter.workspaces()``) - never a fixed list naming one
+    agent, so a future agent that declares a Workspace appears here
+    with no change to this type."""
+
+    agent: str
+    visits: int
+    first_entered: "str | None"
+    last_entered: "str | None"
+    tasks: "tuple[TaskItemView, ...]"
+
+
+@dataclass(frozen=True)
 class ToolView:
     """A concrete mechanism, and whether it is genuinely present.
 

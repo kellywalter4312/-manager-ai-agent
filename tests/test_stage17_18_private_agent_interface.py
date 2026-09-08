@@ -815,7 +815,7 @@ class TestTheShellHasAHierarchy:
         out = _boot(data, tmp_path)
         primary = [m["key"] for m in out["modes"] if "deep" not in m["cls"]]
         deep = [m["key"] for m in out["modes"] if "deep" in m["cls"]]
-        assert primary == ["agent", "room"]
+        assert primary == ["agent", "room", "space"]
         assert "control" in deep
         assert set(deep) == {"control", "workspace", "brain", "memory", "status", "history"}
 

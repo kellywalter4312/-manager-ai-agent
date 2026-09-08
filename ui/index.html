@@ -554,6 +554,50 @@
     z-index:2;display:flex;flex-direction:column;align-items:flex-end;gap:5px;
     font-size:var(--t-meta);font-family:var(--mono);letter-spacing:.14em;
     text-transform:uppercase;color:var(--ink-4);text-align:right;pointer-events:none}
+  /* .env-foot itself takes no pointer events (it overlays the live scene
+     everywhere else this shell uses it), so the one real control the
+     Workspace puts there opts back in explicitly. */
+  .env-foot .ws-leave{pointer-events:auto;cursor:pointer;
+    font:inherit;letter-spacing:inherit;text-transform:inherit;color:var(--ink-3);
+    background:rgba(10,16,24,.72);border:1px solid rgba(var(--ac,125,216,232),.28);
+    border-radius:4px;padding:6px 12px;
+    -webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);transition:color .2s,border-color .2s}
+  .env-foot .ws-leave:hover{color:var(--ink);border-color:rgba(var(--ac,125,216,232),.55)}
+
+  /* Alfred's Real 3D Workspace: the task board itself - a genuinely
+     iterative environment, distinct from a transcript. Shares .env-talk's
+     glass-panel-over-a-live-scene positioning (see that rule's own
+     comment) so it reads as standing in the room, not as a form
+     dropped on top of one. */
+  .ws-board{gap:12px}
+  .ws-meta{display:flex;gap:14px;flex-wrap:wrap;font-family:var(--mono);
+    font-size:var(--t-meta);letter-spacing:.1em;text-transform:uppercase;color:var(--ink-4)}
+  .ws-tasks{overflow:auto;display:flex;flex-direction:column;gap:8px;min-height:0;
+    padding:2px 2px 6px 0;
+    -webkit-mask-image:linear-gradient(to bottom,transparent 0,#000 22px);
+    mask-image:linear-gradient(to bottom,transparent 0,#000 22px)}
+  .ws-tasks::-webkit-scrollbar{width:6px}
+  .ws-tasks::-webkit-scrollbar-thumb{background:rgba(140,170,225,.18);border-radius:6px}
+  .ws-empty{font-size:var(--t-control);color:var(--ink-4);line-height:1.5;
+    background:rgba(10,16,24,.55);border:1px dashed rgba(var(--ac,125,216,232),.22);
+    border-radius:6px;padding:14px 16px}
+  .ws-done-heading{font-family:var(--mono);font-size:var(--t-meta);letter-spacing:.12em;
+    text-transform:uppercase;color:var(--ink-4);margin-top:2px}
+  .ws-task{display:flex;align-items:center;gap:10px;
+    background:rgba(10,16,24,.6);border:1px solid rgba(var(--ac,125,216,232),.16);
+    border-radius:6px;padding:9px 12px;
+    -webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px)}
+  .ws-task.done{opacity:.55}
+  .ws-task.done .ws-task-text{text-decoration:line-through}
+  .ws-task-text{font-size:var(--t-control);color:var(--ink-2);line-height:1.4;word-break:break-word}
+  .ws-task-toggle{flex:none;width:20px;height:20px;border-radius:5px;cursor:pointer;
+    border:1px solid rgba(var(--ac,125,216,232),.4);background:transparent;
+    transition:background .2s,border-color .2s}
+  .ws-task-toggle:hover{background:rgba(var(--ac,125,216,232),.18);border-color:rgba(var(--ac,125,216,232),.7)}
+  .ws-task-toggle:disabled{opacity:.4;cursor:default}
+  .ws-task-mark{flex:none;width:20px;height:20px;display:flex;align-items:center;justify-content:center;
+    border-radius:5px;color:#4fd1a5;border:1px solid rgba(79,209,165,.4);background:rgba(79,209,165,.1)}
+  .ws-none{padding:40px 0}
 
   /* Last in the hierarchy, and quiet on purpose: what this agent is made
      of, under the environment rather than inside it. */
@@ -1672,6 +1716,20 @@
   // hardcoded name - manager() is already that lookup.
   const openAgentOf = () => agentNamed(openAgent) || manager();
 
+  // Alfred's Real 3D Workspace: which agent this Workspace is currently
+  // open for - the identical shape/reason openAgent already has above,
+  // and the identical resolution rule (go() decides it before V[key]()
+  // renders). Discovered from each agent's own declared interface, never
+  // a hardcoded name - so a future agent that implements a Workspace
+  // appears in the switcher below with no change to this function.
+  let openWorkspaceAgent = null;
+  const workspaceCapableAgents = () => S.agents.filter(a =>
+    a.interface && Array.isArray(a.interface.implemented) && a.interface.implemented.includes("workspace"));
+  const openWorkspaceAgentOf = () => {
+    const capable = workspaceCapableAgents();
+    return capable.find(a => a.name === openWorkspaceAgent) || capable[0] || null;
+  };
+
   // Product wording for a reading the system already made - never a second
   // assessment. assess_cognition decided GREEN/AMBER/RED and the exact
   // mode string, its provider and its reason all stay intact and one click
@@ -1866,6 +1924,85 @@
     </div>`;
   };
 
+  // Alfred's Real 3D Workspace: a distinct, living, entered environment -
+  // never Alfred Conversation with a 3D background, never Presentation
+  // (appearance configuration), never Control Center. It is a genuine
+  // Workspace in the project's own sense (InterfaceFeature.WORKSPACE:
+  // "iterative work with state between turns") - real, persisted state
+  // (S.agents[].workspace, S.agents[].tasks, both read from the identical
+  // backend Control Center's own "workspace" command reads) that a person
+  // can act on and see change, not a decorative canvas.
+  //
+  // The avatar mounted here (data-avatarbody3d) is the SAME agent-owned
+  // mount V.agent uses above - wireAvatarBody3D() wires every such
+  // element on the page from the identical S.agents[].avatar data, so
+  // Alfred's presence here is continuous with Alfred's presence in
+  // Conversation: one identity, rendered on two surfaces, never two
+  // avatars. Discovered, not hardcoded: any future agent whose interface
+  // declares and implements "workspace" appears in the switcher below
+  // with zero change to this function.
+  V.space = () => {
+    const capable = workspaceCapableAgents();
+    if(!capable.length){
+      return `<div class="private"><div class="ws-none">${absent(
+        "NO WORKSPACE YET", "no agent has declared a 3D Workspace to enter")}</div></div>`;
+    }
+    const a = openWorkspaceAgentOf();
+    const id = identityOf(a);
+    const state = a.activity || "idle";
+    const ws = a.workspace || {visits: 0, first_entered: null, last_entered: null};
+    const tasks = a.tasks || [];
+    const pending = tasks.filter(t => t.status !== "complete");
+    const done = tasks.filter(t => t.status === "complete");
+
+    const switcher = capable.map(x => `<button class="pick${x.name === a.name ? " on" : ""}"
+      data-goto="space" data-agent="${esc(x.name)}"
+      style="--pc:${identityOf(x).hue}">${esc(x.name)}</button>`).join("");
+
+    const taskRow = t => `<div class="ws-task${t.status === "complete" ? " done" : ""}">
+      ${t.status === "complete"
+        ? `<span class="ws-task-mark">&check;</span>`
+        : `<button class="ws-task-toggle" data-ws-complete="${esc(t.content)}" data-ws-agent="${esc(a.name)}" aria-label="Mark done">&nbsp;</button>`}
+      <span class="ws-task-text">${esc(t.content)}</span>
+    </div>`;
+
+    return `<div class="private">
+      <div class="private-env ${esc(state)}" style="--ac:${id.hue}">
+        <div class="agent3d" data-avatarbody3d="${esc(a.name)}">
+          <div class="agent3d-fallback">preparing presence</div>
+        </div>
+        <div class="env-veil"></div>
+        <div class="env-top">
+          <div class="glyphwrap" data-focus="${esc(a.name)}">${identityGlyph(a, 54)}</div>
+          <div class="who">
+            <div class="nm">${esc(a.name)}'s Workspace</div>
+            <div class="rl">${esc(shortRole(a))}<span class="pstate"><span class="pdot ${esc(state)}"></span>${esc(state)}</span></div>
+          </div>
+          <div class="private-switch"><div class="lab">Workspace</div>${switcher}</div>
+        </div>
+        <div class="env-talk ws-board">
+          <div class="ws-meta">
+            <span>${ws.visits} visit${ws.visits === 1 ? "" : "s"}</span>
+            <span>${ws.last_entered ? "last entered " + when(ws.last_entered) : "first time here"}</span>
+          </div>
+          <div class="ws-tasks">
+            ${tasks.length ? "" : `<div class="ws-empty">Nothing on ${esc(a.name)}'s board yet - add the first thing to work on below.</div>`}
+            ${pending.map(taskRow).join("")}
+            ${done.length ? `<div class="ws-done-heading">${done.length} completed</div>${done.map(taskRow).join("")}` : ""}
+          </div>
+          <div class="glass say private-say ws-add">${cut}
+            <span class="addressed">Add to ${esc(a.name)}'s board</span>
+            <input class="composer ws-add-input" data-ws-agent="${esc(a.name)}" placeholder="What should ${esc(a.name)} work on?"${LIVE ? "" : " disabled"}>
+          </div>
+        </div>
+        <div class="env-foot">
+          <span>${a.avatar ? esc(a.avatar.avatar.label) : "presence"}</span>
+          <button class="ws-leave" data-goto="agent" data-agent="${esc(a.name)}">Back to conversation</button>
+        </div>
+      </div>
+    </div>`;
+  };
+
   // Workspace/artifact checkpoint: the real, persisted
   // artifacts this agent has produced - read straight off S.artifacts
   // (the same /snapshot.json field every restart/poll re-reads from the
@@ -1950,6 +2087,7 @@
   const MODES = [
     ["agent","Agents","private",           "primary"],
     ["room","Conversation Room","shared",  "primary"],
+    ["space","Workspace","living",   "primary"],
     ["control","Control Center","system",  "deep"],
     ["workspace","Presentation","appearance","deep"],
     ["brain","Cognition","reasoning",      "deep"],
@@ -4226,6 +4364,16 @@
       openAgent = (agentName && agentNamed(agentName)) ? agentName
                 : (agentNamed(openAgent) ? openAgent : manager().name);
     }
+    // Alfred's Real 3D Workspace: the identical resolution rule openAgent
+    // just used above, applied to which agent's Workspace is open -
+    // discovered from workspaceCapableAgents(), never hardcoded.
+    const prevWorkspaceAgent = openWorkspaceAgent;
+    if(key === "space"){
+      const capable = workspaceCapableAgents();
+      openWorkspaceAgent = (agentName && capable.some(x => x.name === agentName)) ? agentName
+        : (capable.some(x => x.name === openWorkspaceAgent) ? openWorkspaceAgent
+        : (capable[0] ? capable[0].name : null));
+    }
     // Stage 17.15 bug fix: the root cause of a real, reported Control
     // Center flicker. Every refreshFromLive() poll (every 5s, live-
     // served) calls go(current) - the exact same view, just re-rendered
@@ -4239,6 +4387,15 @@
     // already on) - a genuine navigation (key actually changes, or this
     // is the very first render) still gets the real entrance animation.
     const isRefresh = hasEnteredAnyView && current === key;
+    // Alfred's Real 3D Workspace: a genuine entry is either a real
+    // navigation into "space" (isRefresh false - the same signal
+    // Stage 17.15's own fix already established) OR switching, within
+    // this view, to a *different* agent's Workspace via the switcher -
+    // both are a person actually entering an environment, never a
+    // five-second poll re-rendering the one already open.
+    const enteringWorkspace = key === "space"
+      && (!isRefresh || openWorkspaceAgent !== prevWorkspaceAgent)
+      && openWorkspaceAgent;
     current = key;
     hasEnteredAnyView = true;
     stage.innerHTML = `<div class="view on${isRefresh ? " no-enter" : ""}">${V[key]()}</div>`;
@@ -4269,6 +4426,25 @@
     wireBrain3D();
     wireMemory3D();
     wireRoom3D();
+    wireWorkspaceBoard();
+    if(enteringWorkspace) enterWorkspace(openWorkspaceAgent);
+  }
+
+  // Alfred's Real 3D Workspace: the one real acknowledgement that a
+  // person has genuinely entered an agent's Workspace, POSTed to the
+  // real backend route (scripts/serve_ui.py's POST /workspace/enter) -
+  // never a side effect of merely reading a snapshot. Fire-and-forget,
+  // like every other write on this page: the write itself is what
+  // matters, and the follow-up refreshFromLive() (the identical pattern
+  // wireComposer's own send already uses) is what shows the real,
+  // governed result - never a locally-guessed visit count.
+  function enterWorkspace(agentName){
+    if(!LIVE || !agentName) return;
+    fetch("workspace/enter", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({agent: agentName}),
+    }).then(() => refreshFromLive()).catch(() => {});
   }
 
   // The crown is chrome, not a status dump. It printed the orchestrator's
@@ -4613,6 +4789,54 @@
           group.querySelectorAll(".pick").forEach(b=>b.disabled = false);
           return;
         }
+        await refreshFromLive();
+      });
+    });
+  }
+
+  // Alfred's Real 3D Workspace: the task board's own interaction. Never a
+  // second, form-based task-mutation route - both actions construct the
+  // exact natural-language phrases the existing, governed capabilities
+  // (src/manager/capabilities.py's create_task/complete_task, reached
+  // through src/services/memory/tasks.py's own marker phrases) already
+  // recognise, and send them through the one existing /message endpoint -
+  // the identical write path a private line's own composer already uses,
+  // addressed to the Workspace's own agent so create/complete lands in
+  // *that* agent's tasks and nowhere else.
+  function wireWorkspaceBoard(){
+    if(!LIVE) return;
+    const input = stage.querySelector(".ws-add-input");
+    if(input){
+      input.addEventListener("keydown", async (e) => {
+        if(e.key !== "Enter") return;
+        const agent = input.dataset.wsAgent;
+        const text = input.value.trim();
+        if(!text || input.disabled) return;
+        input.value = "";
+        input.disabled = true;
+        try{
+          await fetch("message", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({text: "add a task to " + text, to: agent}),
+          });
+        }catch(e){ /* honest silence - refreshFromLive shows the real state */ }
+        await refreshFromLive();
+      });
+    }
+    stage.querySelectorAll(".ws-task-toggle").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        if(btn.disabled) return;
+        const agent = btn.dataset.wsAgent;
+        const content = btn.dataset.wsComplete;
+        btn.disabled = true;
+        try{
+          await fetch("message", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({text: "complete the task " + content, to: agent}),
+          });
+        }catch(e){ /* honest silence - refreshFromLive shows the real state */ }
         await refreshFromLive();
       });
     });

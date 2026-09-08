@@ -66,6 +66,7 @@ from src.manager.activity_session import ActivityBrainOps
 from src.manager.brain import ManagerBrain
 from src.manager.brain_factory import build_brain
 from src.manager.manager import ManagerAgent
+from src.control_center.interfaces import InterfaceDescriptor, InterfaceFeature
 from src.manager.manager_skills import ManagerSkills
 from src.manager.memory_policy import ManagerMemoryPolicy
 from src.manager.router import Router
@@ -709,6 +710,26 @@ def build_manager(
         # never a second one - so current_datetime answers "what day is
         # it" from this person's actual local day, not bare UTC.
         calendar=runtime.calendar,
+        # Alfred's own declared surface, asked the same way EmailAgent's
+        # hardcoded ``interface`` property already answers it - see
+        # InterfaceDescriptor's own docstring. WORKSPACE is declared and
+        # implemented: Alfred's 3D Workspace (src/services/identity/
+        # workspace.py, wired into Control Center and the UI) is a real,
+        # persistent, iterative environment, not a claim about something
+        # planned. This is the one call site that decides it - ManagerSkills
+        # itself stays generic, exactly as EmailAgent's own descriptor lives
+        # only on EmailAgent and nowhere in the generic base class.
+        interface=InterfaceDescriptor(
+            agent=runtime.identity.name,
+            display_name=runtime.identity.name,
+            features=frozenset(
+                {InterfaceFeature.CHAT, InterfaceFeature.ACTIVITY, InterfaceFeature.WORKSPACE}
+            ),
+            implemented=frozenset(
+                {InterfaceFeature.CHAT, InterfaceFeature.ACTIVITY, InterfaceFeature.WORKSPACE}
+            ),
+            summary="coordinates specialists, and keeps a living 3D workspace for iterative work",
+        ),
     )
 
     manager = ManagerAgent(

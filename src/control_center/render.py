@@ -36,6 +36,7 @@ from src.control_center.views import (
     PersonalContextTopicView,
     UnresolvedFactView,
     VoiceView,
+    WorkspaceAgentView,
 )
 
 # Below this many columns the renderer assumes a phone-sized terminal and
@@ -574,4 +575,35 @@ def render_experiences(items: tuple[ExperienceView, ...], columns: int | None = 
                 f"    {item.event_type} ({item.agent_key}) - {item.reaction_id} "
                 f"[{item.intensity}, {item.duration_ms}ms]"
             )
+    return "\n".join(out)
+
+
+def render_workspaces(items: tuple[WorkspaceAgentView, ...], columns: int | None = None) -> str:
+    """Alfred's Real 3D Workspace checkpoint: every agent's own real
+    Workspace state - discovered from that agent's own declared
+    InterfaceDescriptor, never a fixed list naming one agent. Read-only:
+    entering happens through the real Workspace route, never from this
+    screen; the visible task board is the identical governed task store
+    the 'tasks' command already reads."""
+    columns = columns if columns is not None else width()
+    out: list[str] = []
+    out += _heading("workspace", columns)
+
+    if not items:
+        out.append("")
+        out.append("  no agent has declared a Workspace yet")
+        return "\n".join(out)
+
+    for item in items:
+        out.append("")
+        out.append(f"  {item.agent} - {item.visits} visit(s)")
+        if item.last_entered:
+            out.append(f"    last entered: {item.last_entered}")
+        else:
+            out.append("    never entered")
+        if not item.tasks:
+            out.append("    no tasks yet")
+        else:
+            for task in item.tasks:
+                out.append(f"    {task.describe}")
     return "\n".join(out)

@@ -188,7 +188,33 @@ def _tools(view_tools: Any) -> list[dict[str, Any]]:
     ]
 
 
-def _agent(view: Any, agent: Any, *, recall: Any = None, discover_voices: Any = None) -> dict[str, Any]:
+def _workspace(workspace: Any) -> dict[str, Any]:
+    """This agent's own Workspace, exactly as ``ControlCenter.workspaces()``
+    already resolved it (real tasks, real WorkspaceSession) - never a
+    second read of Memory from this module, which is what keeps this file
+    "reads the observer and nothing else". ``workspace`` is None for an
+    agent that never declared ``InterfaceFeature.WORKSPACE`` - a real
+    "no Workspace" answer, never a fabricated zero-visit one.
+    """
+    if workspace is None:
+        return {"tasks": [], "workspace": None}
+    return {
+        "tasks": [
+            {"id": t.record_id, "content": t.content, "status": t.status, "describe": t.describe}
+            for t in workspace.tasks
+        ],
+        "workspace": {
+            "agent_key": workspace.agent,
+            "visits": workspace.visits,
+            "first_entered": workspace.first_entered,
+            "last_entered": workspace.last_entered,
+        },
+    }
+
+
+def _agent(
+    view: Any, agent: Any, *, recall: Any = None, discover_voices: Any = None, workspace: Any = None
+) -> dict[str, Any]:
     """Everything an Agent Workspace needs about one agent.
 
     The workspace is an *interface into* this agent, so this gathers what the
@@ -238,6 +264,12 @@ def _agent(view: Any, agent: Any, *, recall: Any = None, discover_voices: Any = 
         # absent from every snapshot, so no UI surface could show or
         # change it. Exposed here the identical way "avatar" already is.
         "environment": view.environment.to_dict() if view.environment is not None else None,
+        # This agent's own Workspace - real tasks and a real, persisted
+        # visit record, read from the identical ControlCenter.workspaces()
+        # discovery a served page's own "workspace" command already uses.
+        # None/empty for an agent that never declared
+        # InterfaceFeature.WORKSPACE - a real answer, never invented.
+        **_workspace(workspace),
     }
 
 
@@ -444,8 +476,20 @@ def snapshot(
     # correct provider field here too.
     discover_voices = getattr(centre.runtime.speech, "available_voices", None)
 
+    # Discovered from each agent's own declared InterfaceDescriptor (see
+    # ControlCenter.workspaces()'s own docstring), never a fixed list
+    # naming one agent - a future agent that implements a Workspace
+    # appears here with no change to this function.
+    workspace_by_agent = {view.agent: view for view in centre.workspaces()}
+
     agents = [
-        _agent(view, registry.get(view.name), recall=_recall_for(view.name), discover_voices=discover_voices)
+        _agent(
+            view,
+            registry.get(view.name),
+            recall=_recall_for(view.name),
+            discover_voices=discover_voices,
+            workspace=workspace_by_agent.get(view.name),
+        )
         for view in (overview.manager,) + overview.specialists
     ]
 

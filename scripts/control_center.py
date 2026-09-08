@@ -85,6 +85,7 @@ from src.control_center.render import (  # noqa: E402
     render_calendar,
     render_experiences,
     render_personal_context,
+    render_workspaces,
     render_system,
     render_turn,
     render_unresolved_facts,
@@ -178,6 +179,9 @@ HELP = """
                            current state, per item
   experience               genuinely due events and the real visual/animation
                            experience selected for each - pending and delivered
+  workspace                every agent with a declared 3D Workspace: real
+                           visit history and its current task board - the
+                           same backend state the live page reads
   artifacts                every real, persisted artifact (documents/handouts)
   artifacts <id>           one artifact's full version history
   avatar                   every agent's current presence and avatar
@@ -1647,6 +1651,16 @@ def run_command(
         # decorative. Read-only: selection happens through the governed
         # proactive evaluation step, not from this screen.
         return render_experiences(centre.experiences(), columns)
+
+    if verb == "workspace":
+        # Alfred's Real 3D Workspace checkpoint: real, current Workspace
+        # state - discovered from each agent's own declared
+        # InterfaceDescriptor, never a fixed list naming Alfred. Read-only,
+        # like every other view here: entering happens through the real
+        # served-page route (POST /workspace/enter), never from this
+        # screen - Control Center manages/observes, it does not substitute
+        # for actually entering.
+        return render_workspaces(centre.workspaces(), columns)
 
     if verb == "tasks":
         # Phase 5.1: read-only state visibility, the same "genuine
