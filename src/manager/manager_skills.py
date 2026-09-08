@@ -28,7 +28,7 @@ no algorithm and grows no branch when a capability is added.
 
 from __future__ import annotations
 
-from typing import Callable, Sequence
+from typing import Any, Callable, Sequence
 
 from src.agents.base_agent import BaseAgent
 from src.agents.tools.toolset import ToolSet
@@ -81,6 +81,7 @@ class ManagerSkills(BaseAgent):
         history: "Callable[[], Sequence[str]] | None" = None,
         activity_sessions: "ActivitySessions | None" = None,
         activity_brain: "ActivityBrainOps | None" = None,
+        discover_voices: "Callable[[], tuple[Any, ...]] | None" = None,
     ) -> None:
         """``roster`` supplies the currently registered agents.
 
@@ -217,6 +218,13 @@ class ManagerSkills(BaseAgent):
         # open_conversation treats that exactly like "no reasoning
         # capability available" rather than crashing.
         self._activity_brain = activity_brain
+        # Agent-autonomous voice selection checkpoint: a bound, live
+        # discovery call - never the speech adapter itself, the same
+        # narrowing every other collaborator here already lives under.
+        # None by default, the same honest-refusal shape every sibling
+        # collaborator already has: select_voice reports honestly that
+        # no voice options are available, rather than crashing.
+        self._discover_voices = discover_voices
 
     def bind_conversation_history(self, history: "Callable[[], Sequence[str]]") -> None:
         """Wire the real conversation's recent history in, once the room
@@ -231,6 +239,20 @@ class ManagerSkills(BaseAgent):
         never a second implementation of "what was recently said."
         """
         self._history = history
+
+    def bind_discover_voices(self, discover_voices: "Callable[[], tuple[Any, ...]]") -> None:
+        """Wire the real, live voice-discovery call in, once the speech
+        channel that can answer it exists.
+
+        Construction order makes this necessary rather than a choice,
+        exactly as it does for bind_retain/bind_conversation_history: the
+        real Channel/speech adapter is built in scripts/control_center.py's
+        build(), after build_manager() returns, so it does not exist yet
+        when ManagerSkills itself is constructed. Called at most once,
+        with a real bound accessor - never a persisted catalog, and
+        never a second discovery mechanism.
+        """
+        self._discover_voices = discover_voices
 
     def celebration_reaction(
         self, milestone_type: str, *, occurrence: int = 0, intensity: str = "full"
@@ -508,5 +530,6 @@ class ManagerSkills(BaseAgent):
                 history=self._history,
                 activity_sessions=self._activity_sessions,
                 activity_brain=self._activity_brain,
+                discover_voices=self._discover_voices,
             )
         )

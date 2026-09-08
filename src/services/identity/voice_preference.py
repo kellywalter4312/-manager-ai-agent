@@ -30,10 +30,11 @@ for the same reason.
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 from src.services.identity.voice import VoiceProfile, voice_for
+from src.services.identity.voice_options import VoiceOption
 from src.services.memory.memory import MemoryRecord
 
 _Recall = Callable[..., "tuple[MemoryRecord, ...]"]
@@ -42,9 +43,17 @@ _Forget = Callable[[str], bool]
 
 VOICE_PREFERENCE_FACT_TYPE = "voice_preference"
 
+# A genuinely different fact from VOICE_PREFERENCE_FACT_TYPE above, and
+# kept apart on purpose - see AutonomousVoiceChoice's own docstring.
+VOICE_AUTONOMOUS_CHOICE_FACT_TYPE = "voice_autonomous_choice"
+
 
 def _voice_tag(agent_key: str) -> str:
     return "voice_preference:" + "_".join(str(agent_key).lower().split())
+
+
+def _autonomous_tag(agent_key: str) -> str:
+    return "voice_autonomous_choice:" + "_".join(str(agent_key).lower().split())
 
 
 def voice_preference_for(agent_key: str, *, recall: "_Recall | None") -> str | None:
@@ -117,24 +126,121 @@ def set_voice_preference(
     return True
 
 
-def effective_voice_for(agent: Any, *, recall: "_Recall | None") -> VoiceProfile | None:
-    """The voice this agent should actually be heard in right now: a
-    runtime-stored preference when one exists, overriding
-    ``voice_for(agent)``'s own declared default - never the reverse,
-    and never inventing a voice for an agent that published none at
-    all.
+@dataclass(frozen=True)
+class AutonomousVoiceChoice:
+    """What an agent's own governed decision path (``select_voice``, see
+    ``src/services/identity/voice_selection.py``) chose for itself,
+    genuinely distinct from ``VOICE_PREFERENCE_FACT_TYPE`` above - that
+    tag exists only for a person's own explicit, typed choice
+    (``voice <agent> <name>`` in Control Center). This one records the
+    agent's own autonomous choice among real, discovered options, and
+    exists specifically so the two can be told apart: an explicit
+    override always outranks an autonomous choice (see
+    ``effective_voice_for`` below), and only an explicit override may
+    ever silence future autonomous re-selection.
 
-    This is the one function a channel about to speak should call
-    instead of bare ``voice_for`` - see ``VoiceChannel._voice_of``. The
-    override changes only ``preferred_voice``; every other declared
-    characteristic (accent, pace, pitch, warmth, style) is untouched,
-    because choosing a different real voice to speak in is not the same
-    fact as redescribing who the agent is.
+    ``provider`` is carried so ``effective_voice_for`` applies the
+    choice to the correct provider-specific field - a plain name is
+    only ever enough for the Windows engine (matched against its own
+    installed roster); an ElevenLabs choice needs its real
+    ``voice_id`` written into ``style``, exactly where that provider
+    already looks for one (see ``elevenlabs_speech_provider.py``'s own
+    ``_voice_id_for``)."""
+
+    voice_id: str
+    name: str
+    provider: str
+    language: "str | None" = None
+    accent: "str | None" = None
+
+
+def build_voice_autonomous_choice_record(
+    agent_key: str, option: "VoiceOption", *, language_satisfied: bool, accent_satisfied: bool
+) -> MemoryRecord:
+    """The MemoryRecord an agent's own governed write path
+    (``request.retain`` inside the ``select_voice`` capability) records
+    for a genuine autonomous choice - constructed here, never written
+    here: this module holds no Memory reference of its own, the same
+    boundary every other collaborator in this project's capability
+    handlers already crosses through ``CapabilityRequest`` alone."""
+    return MemoryRecord(
+        content=f"{agent_key} autonomously chose the voice '{option.name}' ({option.provider}).",
+        kind="user_context",
+        tags={VOICE_AUTONOMOUS_CHOICE_FACT_TYPE, _autonomous_tag(agent_key)},
+        context={
+            "fact_type": VOICE_AUTONOMOUS_CHOICE_FACT_TYPE,
+            "agent_key": agent_key,
+            "voice_id": option.voice_id,
+            "voice_name": option.name,
+            "provider": option.provider,
+            "language": option.language,
+            "accent": option.accent,
+            "language_satisfied": language_satisfied,
+            "accent_satisfied": accent_satisfied,
+            "source": "autonomous_selection",
+        },
+    )
+
+
+def forget_prior_autonomous_choice(agent_key: str, *, recall: "_Recall", forget: "_Forget") -> None:
+    """Remove any previously-recorded autonomous choice for this agent -
+    the same forget-then-remember composition ``set_voice_preference``
+    already uses for explicit overrides, exposed here so a capability
+    handler (which writes through the governed ``request.retain`` path,
+    not a raw ``remember``) can still keep this fact singular rather than
+    accumulating one record per re-selection."""
+    for existing in recall(kind="user_context", tags={_autonomous_tag(agent_key)}, limit=5):
+        forget(existing.id)
+
+
+def autonomous_voice_choice_for(agent_key: str, *, recall: "_Recall | None") -> "AutonomousVoiceChoice | None":
+    """This agent's own last autonomous choice, if any - the identical
+    honest-absence shape ``voice_preference_for`` already has. Reads
+    back exactly what ``build_voice_autonomous_choice_record`` wrote,
+    never re-derives it."""
+    if recall is None:
+        return None
+    for record in recall(kind="user_context", tags={_autonomous_tag(agent_key)}, limit=1):
+        ctx = record.context or {}
+        voice_id, name, provider = ctx.get("voice_id"), ctx.get("voice_name"), ctx.get("provider")
+        if not voice_id or not name or not provider:
+            continue
+        return AutonomousVoiceChoice(
+            voice_id=str(voice_id), name=str(name), provider=str(provider),
+            language=ctx.get("language"), accent=ctx.get("accent"),
+        )
+    return None
+
+
+def effective_voice_for(agent: Any, *, recall: "_Recall | None") -> VoiceProfile | None:
+    """The voice this agent should actually be heard in right now.
+
+    Governance order (requirement 4's own precedence, checked in this
+    order and stopping at the first that applies):
+
+        1. an explicit user override (``voice_preference_for``) - always
+           wins, and is never silently replaced by an autonomous choice
+        2. the agent's own last autonomous choice (``autonomous_voice_choice_for``)
+        3. the bare declared default (``voice_for(agent)``), unchanged
+
+    Never inventing a voice for an agent that published none at all -
+    ``base is None`` short-circuits before either preference is even
+    read.
     """
     base = voice_for(agent)
     if base is None:
         return None
-    override = voice_preference_for(getattr(agent, "name", base.key), recall=recall)
-    if not override:
-        return base
-    return replace(base, preferred_voice=override)
+
+    agent_key = getattr(agent, "name", base.key)
+
+    override = voice_preference_for(agent_key, recall=recall)
+    if override:
+        return replace(base, preferred_voice=override)
+
+    choice = autonomous_voice_choice_for(agent_key, recall=recall)
+    if choice is not None:
+        if choice.provider == "elevenlabs":
+            return replace(base, style={**base.style, "elevenlabs_voice_id": choice.voice_id})
+        return replace(base, preferred_voice=choice.name)
+
+    return base

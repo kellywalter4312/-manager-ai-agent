@@ -107,15 +107,54 @@ class TestListenIsHonestlyUnsupported:
 
 
 class TestDiscoveryIsReal:
-    def test_available_voices_returns_id_name_pairs(self, monkeypatch):
+    def test_available_voices_returns_a_real_voiceoption_per_voice(self, monkeypatch):
         voices = fake_voices_client(
             voices=[
-                SimpleNamespace(voice_id="v1", name="Some Voice"),
-                SimpleNamespace(voice_id="v2", name="Another Voice"),
+                SimpleNamespace(voice_id="v1", name="Some Voice", verified_languages=None, labels=None),
+                SimpleNamespace(voice_id="v2", name="Another Voice", verified_languages=None, labels=None),
             ]
         )
         speech = adapter(monkeypatch, voices=voices)
-        assert speech.available_voices() == (("v1", "Some Voice"), ("v2", "Another Voice"))
+        options = speech.available_voices()
+        assert [(o.voice_id, o.name, o.provider) for o in options] == [
+            ("v1", "Some Voice", "elevenlabs"), ("v2", "Another Voice", "elevenlabs"),
+        ]
+        # No verified_languages and no labels -> honestly unknown, never guessed.
+        assert all(o.language is None and o.accent is None and o.locale is None for o in options)
+
+    def test_verified_languages_produce_one_option_per_language_with_real_metadata(self, monkeypatch):
+        italian = SimpleNamespace(language="it", accent="italian", locale="it-IT")
+        english = SimpleNamespace(language="en", accent=None, locale=None)
+        voices = fake_voices_client(
+            voices=[
+                SimpleNamespace(
+                    voice_id="v1", name="Multilingual Voice", labels=None,
+                    verified_languages=[italian, english],
+                ),
+            ]
+        )
+        speech = adapter(monkeypatch, voices=voices)
+        options = speech.available_voices()
+        assert len(options) == 2
+        assert options[0].language == "it" and options[0].accent == "italian" and options[0].locale == "it-IT"
+        assert options[1].language == "en" and options[1].accent is None and options[1].locale is None
+        assert all(o.voice_id == "v1" and o.name == "Multilingual Voice" for o in options)
+
+    def test_labels_accent_is_used_when_no_verified_languages_exist(self, monkeypatch):
+        voices = fake_voices_client(
+            voices=[
+                SimpleNamespace(
+                    voice_id="v1", name="Labeled Voice", verified_languages=None,
+                    labels={"accent": "british", "gender": "male"},
+                ),
+            ]
+        )
+        speech = adapter(monkeypatch, voices=voices)
+        options = speech.available_voices()
+        assert len(options) == 1
+        assert options[0].accent == "british"
+        # A labels-only voice never gets a fabricated language.
+        assert options[0].language is None
 
     def test_a_catalog_failure_returns_empty_never_raises(self, monkeypatch):
         voices = fake_voices_client(raises=RuntimeError("account suspended"))

@@ -185,3 +185,44 @@ class TestConfigurationIsNotProofOfWorking:
     def test_unknown_is_not_treated_as_usable(self):
         adapter = WindowsSpeechAdapter()
         assert adapter.availability.is_usable is False
+
+
+class TestAvailableVoicesReportsRealCultureNeverAFabricatedAccent:
+    """The voice-autonomy checkpoint's own discovery seam for this
+    engine - real per-voice locale from .NET's own ``VoiceInfo.Culture``,
+    never an accent (this engine genuinely does not expose one)."""
+
+    def test_parses_name_and_culture_into_language_and_locale(self, monkeypatch):
+        fake_run(monkeypatch, completed(
+            returncode=0,
+            stdout="Microsoft David Desktop|en-US\nMicrosoft Hazel Desktop|en-GB\n",
+        ))
+        options = WindowsSpeechAdapter().available_voices()
+        assert len(options) == 2
+        assert options[0].voice_id == "Microsoft David Desktop"
+        assert options[0].provider == "windows"
+        assert options[0].language == "english"
+        assert options[0].locale == "en-US"
+        assert options[0].accent is None
+        assert options[1].locale == "en-GB"
+
+    def test_an_unrecognised_culture_prefix_keeps_the_real_locale_honest_none_language(self, monkeypatch):
+        fake_run(monkeypatch, completed(returncode=0, stdout="Some Voice|xx-YY\n"))
+        options = WindowsSpeechAdapter().available_voices()
+        assert options[0].locale == "xx-YY"
+        assert options[0].language is None
+
+    def test_engine_failure_returns_empty_never_raises(self, monkeypatch):
+        fake_run(monkeypatch, completed(returncode=1, stderr="boom"))
+        assert WindowsSpeechAdapter().available_voices() == ()
+
+    def test_a_process_error_returns_empty_never_raises(self, monkeypatch):
+        fake_run(monkeypatch, raises=OSError("no powershell"))
+        assert WindowsSpeechAdapter().available_voices() == ()
+
+    def test_installed_voice_names_output_is_unchanged_by_this_addition(self, monkeypatch):
+        """The pre-existing, tested seam _select_voice_name depends on
+        must remain byte-identical - a separate script backs discovery,
+        never a reparsed version of this one's output."""
+        fake_run(monkeypatch, completed(returncode=0, stdout="Microsoft David Desktop\n"))
+        assert WindowsSpeechAdapter().installed_voice_names() == ("Microsoft David Desktop",)

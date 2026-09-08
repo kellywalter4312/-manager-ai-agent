@@ -263,6 +263,10 @@ class TestHandlersAreSelectedThroughTheRegistry:
             # identity, a new real version rather than a disconnected file.
             "revise_diagram",
             "roster_report",
+            # Agent-autonomous voice selection checkpoint: chooses a
+            # real, currently-available voice matching a requested
+            # language/accent, never overriding an explicit user choice.
+            "select_voice",
             "small_talk",
             "temporal_derivation",
             "update_task",

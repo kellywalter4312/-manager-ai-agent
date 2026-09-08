@@ -49,6 +49,7 @@ from elevenlabs.client import ElevenLabs
 from src.channels.speech import SpeechAdapter, SpeechUnavailable
 from src.providers.availability import Availability, AvailabilityState
 from src.services.identity.voice import VoiceProfile
+from src.services.identity.voice_options import VoiceOption
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -132,24 +133,59 @@ class ElevenLabsSpeechAdapter(SpeechAdapter):
             "listen. Type instead, or select a provider that hears."
         )
 
-    def available_voices(self) -> tuple[tuple[str, str], ...]:
-        """(voice_id, name) pairs from this account's real voice library.
+    def available_voices(self) -> "tuple[VoiceOption, ...]":
+        """Real, currently-available voices from this account's own
+        library, each with whatever language/accent/locale metadata the
+        vendor's own API genuinely reports for it - never invented.
 
-        The live discovery seam - what a person or a future resolution step
-        actually calls to turn a voice's display name into a stable id, the
+        Two real sources, in preference order, per voice: ``verified_languages``
+        (``VerifiedVoiceLanguageResponseModel`` - the vendor's own explicit
+        per-language records, each already carrying ``language``,
+        ``accent`` and ``locale`` as distinct fields) when present, one
+        ``VoiceOption`` per verified language so a multilingual voice is
+        correctly offered for each language it actually supports rather
+        than only one. Falling back to ``labels.get("accent")`` (the
+        vendor's own free-text label dict) with ``language=None`` when a
+        voice reports no verified languages at all - an honest partial
+        fact, never a guessed language.
+
+        The live discovery seam - what a person or the ``select_voice``
+        capability actually calls to see what is genuinely available, the
         same role ``installed_voice_names()`` plays for Windows. Never
-        cached: unlike a
-        local engine's fixed roster, an account's ElevenLabs library can
-        change between calls, and pretending otherwise would be the same
-        mistake ``Availability`` already exists to prevent - stale evidence
-        presented as current.
+        cached: unlike a local engine's fixed roster, an account's
+        ElevenLabs library can change between calls, and pretending
+        otherwise would be the same mistake ``Availability`` already
+        exists to prevent - stale evidence presented as current.
         """
         try:
             response = self._client.voices.get_all()
         except Exception as exc:  # noqa: BLE001 - a paid HTTP API fails in more ways than OSError
             logger.warning("elevenlabs voice catalog could not be listed: %s", exc)
             return ()
-        return tuple((v.voice_id, v.name) for v in response.voices if v.voice_id and v.name)
+
+        options: list[VoiceOption] = []
+        for v in response.voices:
+            if not v.voice_id or not v.name:
+                continue
+            verified = getattr(v, "verified_languages", None) or ()
+            if verified:
+                for entry in verified:
+                    language = str(entry.language).strip() if entry.language else None
+                    options.append(
+                        VoiceOption(
+                            voice_id=v.voice_id, name=v.name, provider=self.name,
+                            language=language or None,
+                            accent=str(entry.accent).strip() if entry.accent else None,
+                            locale=str(entry.locale).strip() if entry.locale else None,
+                        )
+                    )
+            else:
+                labels = getattr(v, "labels", None) or {}
+                accent = str(labels.get("accent") or "").strip() or None
+                options.append(
+                    VoiceOption(voice_id=v.voice_id, name=v.name, provider=self.name, accent=accent)
+                )
+        return tuple(options)
 
     def speak(self, text: str, voice: VoiceProfile | None = None) -> bool:
         voice_id = _voice_id_for(voice)

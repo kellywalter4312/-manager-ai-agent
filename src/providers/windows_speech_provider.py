@@ -77,6 +77,7 @@ from typing import Any
 from src.channels.speech import SpeechAdapter, SpeechUnavailable
 from src.providers.availability import Availability, AvailabilityState
 from src.services.identity.voice import VoiceProfile
+from src.services.identity.voice_options import LANGUAGE_NAMES, VoiceOption
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -132,6 +133,28 @@ $ErrorActionPreference = 'Stop'
 try {
   $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
   $synth.GetInstalledVoices() | Where-Object { $_.Enabled } | ForEach-Object { Write-Output $_.VoiceInfo.Name }
+  $synth.Dispose()
+} catch {
+  Write-Error $_.Exception.Message
+  exit 1
+}
+"""
+
+# The same query, also emitting each voice's real .NET Culture (e.g.
+# "en-US") - a genuine per-voice fact this engine has always exposed
+# (``VoiceInfo.Culture``), never read before this checkpoint. A separate
+# script rather than changing the one above: installed_voice_names()'s
+# existing, tested, one-name-per-line output must stay byte-identical -
+# nothing about the Stage 11.2/11.4 voice-mapping behaviour it backs may
+# change as a side effect of adding discovery.
+_VOICES_WITH_CULTURE_SCRIPT = """
+Add-Type -AssemblyName System.Speech
+$ErrorActionPreference = 'Stop'
+try {
+  $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
+  $synth.GetInstalledVoices() | Where-Object { $_.Enabled } | ForEach-Object {
+    Write-Output ($_.VoiceInfo.Name + "|" + $_.VoiceInfo.Culture.Name)
+  }
   $synth.Dispose()
 } catch {
   Write-Error $_.Exception.Message
@@ -249,6 +272,45 @@ class WindowsSpeechAdapter(SpeechAdapter):
             line.strip() for line in result.stdout.splitlines() if line.strip()
         )
         return self._voice_names
+
+    def available_voices(self) -> "tuple[VoiceOption, ...]":
+        """This machine's own, real installed voices, each with the real
+        locale .NET reports for it (``VoiceInfo.Culture``, e.g.
+        ``"en-US"``) and the language that locale's own prefix names via
+        ``voice_options.LANGUAGE_NAMES`` - never a guessed language, and
+        never an accent: SAPI genuinely does not expose one (see this
+        module's own docstring on why "nigerian-english" was never
+        reproducible here). A locale prefix this project's small table
+        does not recognise still yields a real, honest locale with
+        ``language=None`` rather than being dropped.
+
+        Queried live, once per instance (mirrors ``installed_voice_names``'s
+        own caching - a real subprocess call, not repeated for no reason),
+        never persisted: a fresh instance always re-asks this machine.
+        """
+        try:
+            result = _run_powershell(_VOICES_WITH_CULTURE_SCRIPT, timeout=_SPEAK_TIMEOUT_SECONDS)
+        except (OSError, subprocess.TimeoutExpired):
+            return ()
+        if result.returncode != 0:
+            return ()
+
+        options: list[VoiceOption] = []
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            name, _, culture = line.partition("|")
+            name, culture = name.strip(), culture.strip()
+            if not name:
+                continue
+            locale = culture or None
+            prefix = culture.split("-", 1)[0].lower() if culture else ""
+            language = LANGUAGE_NAMES.get(prefix)
+            options.append(
+                VoiceOption(voice_id=name, name=name, provider=self.name, language=language, locale=locale)
+            )
+        return tuple(options)
 
     def listen(self, timeout: float | None = None) -> str:
         wait = float(timeout) if timeout else DEFAULT_LISTEN_TIMEOUT_SECONDS

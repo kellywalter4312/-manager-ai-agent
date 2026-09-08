@@ -39,6 +39,7 @@ from src.control_center.observer import ControlCenter
 from src.services.artifacts.delivery import available_delivery_methods
 from src.services.identity.personality import personality_for
 from src.services.identity.voice import activation_for, voice_for
+from src.services.identity.voice_preference import effective_voice_for
 
 # What this format is. An interface reads it to know whether it understands
 # what it was handed, rather than guessing from the shape.
@@ -99,15 +100,25 @@ def _memory(view: Any) -> dict[str, Any]:
     }
 
 
-def _voice(agent: Any) -> dict[str, Any]:
+def _voice(agent: Any, *, recall: Any = None) -> dict[str, Any]:
     """An agent's voice identity, and the truth about whether it can be heard.
 
     Two separate facts, deliberately. A profile existing says *what this agent
     would sound like*; it says nothing about whether any engine can produce it.
     Collapsing them is how an interface ends up showing a speaker icon for a
     system that has never made a sound.
+
+    Agent-autonomous voice selection checkpoint: ``recall``, when given,
+    resolves the real *effective* voice (an explicit override or the
+    agent's own autonomous choice, applied over the bare declared
+    default) - exactly what the Control Center's own ``voice`` command
+    and the real speaking channel (``VoiceChannel._voice_of``) already
+    resolve, so this snapshot cannot show a stale ``preferred_voice`` a
+    person just changed. ``None`` (no recall reaches this call - a
+    snapshot taken without a live Memory) degrades to the bare declared
+    default, never a crash and never a fabricated preference.
     """
-    profile = voice_for(agent)
+    profile = effective_voice_for(agent, recall=recall) if recall is not None else voice_for(agent)
     if profile is None:
         return {"declared": False}
     return {
@@ -174,7 +185,7 @@ def _tools(view_tools: Any) -> list[dict[str, Any]]:
     ]
 
 
-def _agent(view: Any, agent: Any) -> dict[str, Any]:
+def _agent(view: Any, agent: Any, *, recall: Any = None) -> dict[str, Any]:
     """Everything an Agent Workspace needs about one agent.
 
     The workspace is an *interface into* this agent, so this gathers what the
@@ -198,7 +209,7 @@ def _agent(view: Any, agent: Any) -> dict[str, Any]:
             for capability in view.capabilities
         ],
         "tools": _tools(view.tools),
-        "voice": _voice(agent),
+        "voice": _voice(agent, recall=recall),
         "activation": _activation(agent),
         "personality": _personality(agent),
         "interface": {
@@ -341,8 +352,20 @@ def snapshot(
     beat = system.heartbeat
     registry = {agent.name: agent for agent in centre.manager.registry.all_agents()}
 
+    # Agent-autonomous voice selection checkpoint: the identical
+    # per-agent Memory lookup VoiceChannel._voice_of already performs at
+    # speak time - the Manager's own store when the agent IS the
+    # Manager (own_skills exposes no .memory directly), that agent's own
+    # store otherwise - so this snapshot's voice field can resolve the
+    # real effective voice rather than only the bare declared default.
+    manager_name = centre.manager.own_skills.name if centre.manager.own_skills else None
+
+    def _recall_for(name: str) -> Any:
+        memory = centre.manager.memory if name == manager_name else getattr(registry.get(name), "memory", None)
+        return memory.recall if memory is not None else None
+
     agents = [
-        _agent(view, registry.get(view.name))
+        _agent(view, registry.get(view.name), recall=_recall_for(view.name))
         for view in (overview.manager,) + overview.specialists
     ]
 

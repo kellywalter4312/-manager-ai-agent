@@ -306,6 +306,7 @@ class TestThisIsNotASecondRouter:
             "media_production",
             "milestone_recognition", "participant_invitation", "personal_recurring_events",
             "recall_memory", "record_this", "revise_artifact", "revise_diagram",
+            "select_voice",
             "small_talk", "temporal_derivation", "update_task",
         ]
 

@@ -147,8 +147,10 @@ from src.services.identity.presence import (  # noqa: E402
     set_environment_preference,
 )
 from src.services.identity.voice_preference import (  # noqa: E402
+    autonomous_voice_choice_for,
     effective_voice_for,
     set_voice_preference,
+    voice_preference_for,
 )
 from src.services.memory.day import TimezoneError  # noqa: E402
 from src.services.profile.loader import load_profile  # noqa: E402
@@ -509,6 +511,15 @@ def build(settings: Settings):
             if len(conversation)
             else []
         )
+        # Agent-autonomous voice selection checkpoint: bound to whichever
+        # real speech adapter runtime.speech actually is - never a second
+        # discovery mechanism, and never assumed present. An adapter with
+        # no available_voices() (NoSpeech, or an engine this checkpoint
+        # did not add discovery to) yields an honestly empty tuple rather
+        # than an AttributeError, the same "ask, don't assume" rule
+        # request.tools.permits already lives under.
+        _discover = getattr(runtime.speech, "available_voices", None)
+        manager.own_skills.bind_discover_voices(_discover if _discover is not None else (lambda: ()))
 
     return (
         runtime,
@@ -1921,13 +1932,51 @@ def run_command(
         if not voice_name:
             lines = [f"VOICE - {view.name}"]
             lines.append(f"  current preferred_voice: {current.preferred_voice if current else '(none declared)'}")
+            # Agent-autonomous voice selection checkpoint: which of the
+            # three governed sources (explicit override, this agent's
+            # own autonomous choice, the bare declared default) the
+            # current value actually came from - real state, read the
+            # same way effective_voice_for itself resolves precedence,
+            # never inferred from the string alone.
+            override = voice_preference_for(view.name, recall=memory.recall) if memory else None
+            autonomous = autonomous_voice_choice_for(view.name, recall=memory.recall) if memory else None
+            if override:
+                lines.append("  source: explicit user override")
+            elif autonomous is not None:
+                lines.append(
+                    f"  source: agent's own autonomous choice "
+                    f"(language={autonomous.language or 'unknown'}, accent={autonomous.accent or 'unknown'})"
+                )
+            else:
+                lines.append("  source: declared default")
             if available is not None:
                 lines.append("  choices (this engine's installed voices):")
                 for name in available:
                     lines.append(f"    {name}")
             else:
                 lines.append("  choices: unknown for this engine - type the exact voice name it reports")
+            # Real, live-discovered options with language/accent/locale,
+            # when this adapter's own available_voices() reports them -
+            # never persisted, always asked fresh (see VoiceOption's own
+            # docstring on why).
+            discover_fn = getattr(speech, "available_voices", None)
+            options = tuple(discover_fn()) if callable(discover_fn) else ()
+            if options:
+                lines.append("  discovered options (language/accent/locale, where reported):")
+                for option in options:
+                    facts = ", ".join(
+                        f"{label}={value}"
+                        for label, value in (
+                            ("language", option.language), ("accent", option.accent), ("locale", option.locale),
+                        )
+                        if value
+                    ) or "no language/accent/locale reported"
+                    lines.append(f"    {option.name} ({option.provider}): {facts}")
             lines.append(f"  choose with: voice {view.name} <name>")
+            lines.append(
+                "  or ask in conversation, e.g. 'find me an Italian voice' - "
+                "select_voice will choose autonomously among the options above"
+            )
             return "\n".join(lines)
 
         ok = set_voice_preference(

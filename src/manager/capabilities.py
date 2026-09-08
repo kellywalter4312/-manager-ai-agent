@@ -92,6 +92,12 @@ from src.services.identity.introduction import (
     identity_question,
     self_introduction,
 )
+from src.services.identity.voice_preference import (
+    build_voice_autonomous_choice_record,
+    forget_prior_autonomous_choice,
+    voice_preference_for,
+)
+from src.services.identity.voice_selection import parse_voice_request, select_voice as select_voice_option
 from src.services.memory.capture import DEFAULT_PURPOSE as DEFAULT_CAPTURE_PURPOSE
 from src.services.memory.capture import build_recording, capture_intent
 from src.services.memory.learning import build_learning_record, learning_intent
@@ -309,6 +315,20 @@ class CapabilityRequest:
     # construction gets an honest "no reasoning capability available"
     # rather than a crash.
     activity_brain: "ActivityBrainOps | None" = None
+    # Agent-autonomous voice selection checkpoint: a bound, live call to
+    # whatever speech adapter this Manager is actually configured with -
+    # never the adapter itself, the same narrowing every other
+    # collaborator here already lives under, and never a persisted
+    # catalog (see select_voice's own docstring for why discovery is
+    # always live). Returns real ``VoiceOption``s reported by that
+    # adapter's own ``available_voices()`` when it has one, or an
+    # honestly empty tuple for an adapter that does not (Null speech, or
+    # an engine this checkpoint did not add discovery to) - never a
+    # fabricated option. None when no speech channel reaches this
+    # request at all (a bare construction, or an older caller) - the
+    # same honest-refusal shape every other optional collaborator here
+    # already has.
+    discover_voices: "Callable[[], tuple[Any, ...]] | None" = None
 
     @property
     def knows_the_user(self) -> bool:
@@ -1079,6 +1099,15 @@ def general_assistance_intent(task: Task, participants: Sequence[str] = ()) -> b
     # ("general_assistance" < "generate_document") and answer with
     # composed prose instead of a real, saved file.
     if document_generation_intent(task, participants):
+        return False
+    # Agent-autonomous voice selection checkpoint, the identical
+    # reasoning again: "find me an Italian voice" matches this
+    # function's own "find" verb gate and select_voice's own
+    # voice/accent+language shape at once - alphabetical sorting would
+    # otherwise let this capability win ("general_assistance" <
+    # "select_voice") and send a request about the agent's own voice to
+    # a live web search instead.
+    if select_voice_intent(task, participants):
         return False
     return True
 
@@ -4803,6 +4832,117 @@ LEARNING_CONTEXT = ManagerCapability(
 )
 
 
+_VOICE_MARKERS = ("voice", "accent")
+
+
+def select_voice_intent(task: Task, participants: Sequence[str] = ()) -> bool:
+    """Claims only a request that both names voice/accent AND parses to
+    a genuine language/accent request - "I have no voice in this
+    decision" mentions the word but parses empty, and is correctly left
+    to whatever else already handles it."""
+    if not _marker_present(task.description, _VOICE_MARKERS):
+        return False
+    return not parse_voice_request(task.description).is_empty()
+
+
+def select_voice(request: CapabilityRequest) -> TaskResult:
+    """Governed, deterministic voice autonomy - the real backend decision
+    path Section AUTONOMY MODEL of this checkpoint's brief asks for.
+
+    Governance order, enforced in this exact sequence:
+
+        1. an explicit user override already in effect always wins -
+           this handler defers to it and never silently replaces it
+        2. real, live-discovered options are evaluated
+           (``select_voice_option``, deterministic - no Brain call: see
+           that function's own docstring for why matching a request
+           against a small set of real options needs no reasoning)
+        3. a genuine match is persisted as this agent's own autonomous
+           choice, through the governed ``request.retain`` path - the
+           same gate every other durable Manager write already crosses
+        4. no genuine match -> an honest refusal naming what was asked
+           for and why it could not be satisfied, never a silent
+           substitution
+
+    Half-Brain safe throughout: nothing here ever calls
+    ``request.converse``.
+    """
+    parsed = parse_voice_request(request.task.description)
+    if parsed.is_empty():
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "I didn't recognise a specific language or accent in that request.",
+        )
+
+    agent_key = request.own_name
+
+    existing_override = voice_preference_for(agent_key, recall=request.recall) if request.recall else None
+    if existing_override:
+        return TaskResult.success(
+            request.task, request.own_name,
+            f"Your voice is already explicitly set to '{existing_override}' - that stays in "
+            f"effect. Use the voice command to change it explicitly.",
+            payload={"handled_by": "select_voice", "deferred_to_override": existing_override},
+        )
+
+    if request.discover_voices is None:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "I don't have a way to discover real voice options right now.",
+        )
+    available = tuple(request.discover_voices())
+    selection = select_voice_option(parsed, available)
+
+    if selection.option is None:
+        return TaskResult.failure(
+            request.task, request.own_name, f"I can't do that: {selection.reason}.",
+        )
+
+    if request.retain is None or request.recall is None or request.forget is None:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "I found a matching voice but have no way to remember the choice right now.",
+        )
+
+    forget_prior_autonomous_choice(agent_key, recall=request.recall, forget=request.forget)
+    verdict = request.retain(
+        build_voice_autonomous_choice_record(
+            agent_key, selection.option,
+            language_satisfied=selection.language_satisfied, accent_satisfied=selection.accent_satisfied,
+        )
+    )
+    if not verdict.allowed:
+        return TaskResult.failure(
+            request.task, request.own_name, f"I couldn't save that choice: {verdict.reason}",
+        )
+
+    return TaskResult.success(
+        request.task, request.own_name,
+        f"I'll use '{selection.option.name}' ({selection.option.provider}) - {selection.reason}.",
+        payload={
+            "handled_by": "select_voice",
+            "voice_id": selection.option.voice_id,
+            "provider": selection.option.provider,
+            "language_satisfied": selection.language_satisfied,
+            "accent_satisfied": selection.accent_satisfied,
+        },
+    )
+
+
+SELECT_VOICE = ManagerCapability(
+    name="select_voice",
+    capabilities=frozenset({"voice", "accent"}),
+    handle=select_voice,
+    description=(
+        "Autonomously chooses a real, currently-available voice matching a requested "
+        "language/accent, from whatever the configured speech provider genuinely offers - "
+        "never overriding an explicit user voice choice."
+    ),
+    claims=select_voice_intent,
+    scoreable=False,
+)
+
+
 # Every Manager capability handler, keyed by handler name.
 #
 # **This is the extension point.** A future Manager capability is registered
@@ -4845,6 +4985,7 @@ MANAGER_CAPABILITIES: dict[str, ManagerCapability] = {
     # subject, and the learning context that pitches it.
     KNOWLEDGE.name: KNOWLEDGE,
     LEARNING_CONTEXT.name: LEARNING_CONTEXT,
+    SELECT_VOICE.name: SELECT_VOICE,
 }
 
 # Used when a task reaches the Manager without matching any handler's words.
