@@ -123,6 +123,29 @@ class TestParseVoiceRequest:
             r = parse_voice_request(text)
             assert r.accent is None, (text, r.accent)
 
+    def test_the_reverse_accent_predicate_shape_is_recognised(self):
+        """Real, observed false positive, fixed and pinned: 'your accent
+        should be Australian' was parsing accent='your' (the
+        adjective-before-'accent' pattern naively captured the
+        possessive). Fixed by rejecting a stopword capture and falling
+        back to the 'accent (is/should be/to be/:) X' shape."""
+        for text in (
+            "your accent should be Australian", "make the accent French",
+            "the accent is British", "accent: Scottish",
+        ):
+            r = parse_voice_request(text)
+            assert r.accent is not None and r.accent != "your", (text, r.accent)
+
+    def test_negated_language_is_never_extracted_as_a_positive_request(self):
+        """Real, observed false positive, fixed and pinned: 'choose a
+        voice, not Italian' was extracting language='italian' - the
+        opposite of what was asked. True negative-preference semantics
+        stays out of scope; the fix is an honest 'nothing usable was
+        stated' rather than the inverted request."""
+        for text in ("choose a voice, not Italian", "never Spanish", "no French accent"):
+            r = parse_voice_request(text)
+            assert r.is_empty(), (text, r)
+
     def test_implicit_regional_adjective_before_a_language_name_is_read_as_accent(self):
         """'Nigerian English voice' names no word 'accent' at all, but
         still clearly asks for a regional variant - requirement 3's own

@@ -114,26 +114,95 @@ def _find_gender(text: str) -> "str | None":
     return None
 
 
+# "an Italian accent" shape - adjective immediately before "accent".
 _ACCENT_ADJECTIVE = re.compile(r"\b([a-z][a-z-]*)\s+accent\b", re.IGNORECASE)
+# The reverse, equally ordinary shape - "your accent should be Italian",
+# "make the accent Australian", "accent: British". Both are read into
+# the same explicit-accent fact; see parse_voice_request's own docstring
+# for why capturing whichever applies (never both at once - if the
+# adjective-before shape already matched, this one is never consulted).
+_ACCENT_PREDICATE = re.compile(
+    r"\baccent\b\s*(?::|(?:should\s+be|shall\s+be|to\s+be|is|be))?\s+([a-z][a-z-]*)\b", re.IGNORECASE
+)
 
 # Words that can immediately precede a language name in ordinary English
 # without describing a region at all - determiners ("a Spanish voice",
-# "an English voice", "the French option") and the small set of ordinary
+# "an English voice", "the French option"), the small set of ordinary
 # verbs a language name is the object of ("speak Italian", "use
-# Spanish", "understand French", "in English"). Excluded from the
-# implicit "<adjective> <language>" reading below so neither shape is
+# Spanish", "understand French", "in English"), and negation ("not
+# Italian", "never Spanish"). Excluded from the implicit "<adjective>
+# <language>" reading below, and from the explicit "<word> accent"
+# capture too (see _explicit_accent below), so none of these shapes is
 # misread as naming an accent ("Use a Spanish voice" as accent="a";
-# "I want you to speak Italian" as accent="speak"- both real, observed
-# false positives, fixed here). Deliberately small: only what ordinary
-# grammar puts directly before a language name, never a stand-in for a
-# real regional-adjective catalog (there is none - any other word is
-# read as a genuine accent qualifier, honestly, even if it turns out not
-# to match anything real later).
+# "I want you to speak Italian" as accent="speak"; "your accent should
+# be Australian" as accent="your"; "not Italian" as accent="not" -
+# four real, observed false positives, all fixed here). Deliberately
+# small: only what ordinary grammar puts directly before a language
+# name, never a stand-in for a real regional-adjective catalog (there is
+# none - any other word is read as a genuine accent qualifier, honestly,
+# even if it turns out not to match anything real later).
 _NON_ACCENT_PRECEDING_WORDS = {
     "a", "an", "the", "this", "that", "some", "any", "one",
     "speak", "speaking", "spoke", "spoken", "use", "using", "understand",
     "know", "learn", "learning", "in", "to", "into", "for", "with",
+    "your", "his", "her", "its", "their", "my", "our",
+    "should", "shall", "will", "would", "must", "can", "could", "may",
+    "is", "be", "was", "were", "been", "being",
 }
+
+# A request cannot ask FOR a language/accent it just named with a
+# negation immediately in front of it ("not Italian", "never Spanish").
+# True negative-preference semantics ("anything but Italian") is
+# deliberately out of scope for this deterministic layer - fixing it
+# further belongs to Tier 2/Brain reasoning if ever needed. What this
+# fixes is a real, observed misparse: without this, "choose a voice, not
+# Italian" was extracting language='italian' - the opposite of what was
+# asked - rather than the honest "nothing usable was actually stated"
+# this now produces.
+_NEGATION_WORDS = {"not", "never", "no"}
+
+
+def _drop_negated_occurrences(text: str, occurrences: "list[tuple[int, str]]") -> "list[tuple[int, str]]":
+    """Removes a language occurrence immediately preceded by a negation
+    word - see ``_NEGATION_WORDS``'s own docstring."""
+    kept: list[tuple[int, str]] = []
+    for position, name in occurrences:
+        preceding = text[:position].rstrip()
+        match = re.search(r"([A-Za-z]+)\s*$", preceding)
+        if match and match.group(1).lower() in _NEGATION_WORDS:
+            continue
+        kept.append((position, name))
+    return kept
+
+
+def _explicit_accent(text: str) -> "tuple[str, int] | tuple[None, None]":
+    """The accent named explicitly, whichever real shape applies:
+    "an X accent" (``_ACCENT_ADJECTIVE``) or "accent (is/should be/to
+    be/:) X" (``_ACCENT_PREDICATE``), tried in that order. A captured
+    word that is itself one of the ordinary function words in
+    ``_NON_ACCENT_PRECEDING_WORDS`` - "your accent should be Australian"
+    naively captures "your" from the first pattern - is rejected rather
+    than accepted, and the other pattern is tried instead; a real, fixed
+    false positive, not a hypothetical. A captured word immediately
+    preceded by a negation ("no French accent") is rejected the same
+    way ``_drop_negated_occurrences`` rejects a negated language - the
+    identical class of misparse, fixed the same way in both places.
+    Returns the word and the character position of the captured group,
+    so the caller can tell it apart from a language occurrence at the
+    same position."""
+    for pattern in (_ACCENT_ADJECTIVE, _ACCENT_PREDICATE):
+        match = pattern.search(text)
+        if match is None:
+            continue
+        word = match.group(1).lower()
+        if word in _NON_ACCENT_PRECEDING_WORDS:
+            continue
+        preceding = text[:match.start(1)].rstrip()
+        negation = re.search(r"([A-Za-z]+)\s*$", preceding)
+        if negation and negation.group(1).lower() in _NEGATION_WORDS:
+            continue
+        return word, match.start(1)
+    return None, None
 
 
 def parse_voice_request(text: str) -> VoiceRequest:
@@ -165,10 +234,9 @@ def parse_voice_request(text: str) -> VoiceRequest:
     """
     gender = _find_gender(text)
 
-    accent_match = _ACCENT_ADJECTIVE.search(text)
-    accent = accent_match.group(1).lower() if accent_match else None
+    accent, accent_position = _explicit_accent(text)
 
-    occurrences = _find_language_occurrences(text)
+    occurrences = _drop_negated_occurrences(text, _find_language_occurrences(text))
     distinct = list(dict.fromkeys(name for _, name in occurrences))
 
     if accent is None:
@@ -217,7 +285,6 @@ def parse_voice_request(text: str) -> VoiceRequest:
     # request - fixed here, per this checkpoint's own explicit
     # correction: accent selection must never imply the same-named
     # language.
-    accent_position = accent_match.start(1)
     remaining = [name for position, name in occurrences if position != accent_position]
     language = remaining[0] if remaining else None
     return VoiceRequest(raw_text=text, language=language, accent=accent, gender=gender)

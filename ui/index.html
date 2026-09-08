@@ -1896,7 +1896,18 @@
       // separate way to open/download the file.
       const link = `<a class="chip on" href="${href}" target="_blank" rel="noopener" title="Download">${esc(label)} [${esc(format)}]</a>`;
       const preview = artifactPreview(x.type, href, label);
-      return `<div style="display:inline-block;vertical-align:top;margin:2px 6px 2px 0">${link}${preview}</div>`;
+      // Real, persisted derivation data (src/services/artifacts/store.py's
+      // own related_artifact_ids - a clip's source video, a composed
+      // video's source narration+image) was already computed and sent by
+      // the backend but never rendered here - shown now the same honest
+      // way Control Center's own `artifacts` command already shows
+      // `derived_from=...`, never fabricated from anything this file
+      // guesses at itself.
+      const related = Array.isArray(x.related_artifact_ids) ? x.related_artifact_ids : [];
+      const derivedFrom = related.length
+        ? `<span class="chip off" title="Derived from: ${esc(related.join(", "))}">derived from ${related.length} artifact${related.length > 1 ? "s" : ""}</span>`
+        : "";
+      return `<div style="display:inline-block;vertical-align:top;margin:2px 6px 2px 0">${link}${preview}${derivedFrom}</div>`;
     }).join("");
   }
 

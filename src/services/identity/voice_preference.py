@@ -234,15 +234,41 @@ def build_voice_autonomous_choice_record(
     )
 
 
+def autonomous_choice_record_ids(agent_key: str, *, recall: "_Recall") -> "tuple[str, ...]":
+    """The real, currently-stored autonomous-choice record ids for this
+    agent, if any - read-only, forgets nothing itself. Exists so a
+    caller can capture what *would* need removing *before* writing a
+    replacement - the correct order for a governed write: nothing prior
+    is lost unless the new write is actually allowed (see
+    ``forget_record_ids`` and the ``select_voice`` capability's own
+    ``_apply_voice_selection``, which was found, live, to forget the
+    prior choice unconditionally *before* checking whether the new one
+    was permitted - a real ordering bug this two-step split exists to
+    close)."""
+    return tuple(
+        record.id for record in recall(kind="user_context", tags={_autonomous_tag(agent_key)}, limit=5)
+    )
+
+
+def forget_record_ids(record_ids: "tuple[str, ...]", *, forget: "_Forget") -> None:
+    """Remove exactly the given record ids - a plain, generic forget-by-id
+    step, deliberately not tag-based: forgetting by tag again here could
+    also remove a replacement record already written under the same tag,
+    which is exactly the bug ``autonomous_choice_record_ids`` +
+    this function, used together in the correct order, avoid."""
+    for record_id in record_ids:
+        forget(record_id)
+
+
 def forget_prior_autonomous_choice(agent_key: str, *, recall: "_Recall", forget: "_Forget") -> None:
     """Remove any previously-recorded autonomous choice for this agent -
     the same forget-then-remember composition ``set_voice_preference``
-    already uses for explicit overrides, exposed here so a capability
-    handler (which writes through the governed ``request.retain`` path,
-    not a raw ``remember``) can still keep this fact singular rather than
-    accumulating one record per re-selection."""
-    for existing in recall(kind="user_context", tags={_autonomous_tag(agent_key)}, limit=5):
-        forget(existing.id)
+    already uses for explicit overrides. Kept for any caller that
+    genuinely wants forget-first semantics (there is none left in this
+    project's own capability handler - see ``autonomous_choice_record_ids``
+    above for why retain-first is the correct order there), so this
+    still exists as the simple, original two-line operation."""
+    forget_record_ids(autonomous_choice_record_ids(agent_key, recall=recall), forget=forget)
 
 
 def autonomous_voice_choice_for(agent_key: str, *, recall: "_Recall | None") -> "AutonomousVoiceChoice | None":

@@ -607,3 +607,8 @@ class TestUIRendersVideoAndAudioArtifacts:
         assert f"artifact/{video_id}.mp4" in rendered
         assert f'<video src="artifact/{video_id}.mp4"' in rendered
         assert "controls" in rendered
+        # Weakness-audit repair: real, persisted related_artifact_ids
+        # (this composed video's own two real sources - narration +
+        # illustration) reaches the actual rendered frontend, not only
+        # the snapshot payload.
+        assert "derived from 2 artifact" in rendered

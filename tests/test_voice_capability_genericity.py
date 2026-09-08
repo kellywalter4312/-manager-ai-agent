@@ -37,7 +37,7 @@ from src.manager.manager_skills import ManagerSkills
 from src.services.identity.identity import AgentIdentity
 from src.services.identity.voice import VoiceProfile
 from src.services.identity.voice_options import VoiceOption
-from src.services.identity.voice_preference import effective_voice_for
+from src.services.identity.voice_preference import autonomous_voice_choice_for, effective_voice_for
 from src.services.memory.ephemeral import EphemeralMemory
 from src.services.memory.policy import PolicyVerdict
 
@@ -112,6 +112,48 @@ class TestSelectVoiceBranchesOnNothingButTheRequestItGiven:
         result = select_voice(self._request("find me a German voice", memory=memory, discover=lambda: options))
         assert not result.succeeded
         assert "german" in result.error.lower()
+
+    def test_a_rejected_write_never_loses_the_prior_autonomous_choice(self):
+        """A real, live-found weakness audit repair: _apply_voice_selection
+        used to forget the prior autonomous choice unconditionally,
+        before confirming request.retain actually allowed the new one -
+        a governance rejection then left the agent with NO choice on
+        record at all, discarding a real, valid prior fact for nothing.
+        Fixed to retain-first, forget-only-on-success."""
+        memory = EphemeralMemory()
+        options = (
+            VoiceOption("v1", "Voice One", "windows", language="english"),
+            VoiceOption("v2", "Voice Two", "windows", language="english"),
+        )
+        reject = {"next": False}
+
+        def retain(record):
+            if reject["next"]:
+                return PolicyVerdict(allowed=False, reason="simulated governance rejection")
+            memory.remember(record)
+            return PolicyVerdict(allowed=True, reason="test fixture allows this write")
+
+        def request(description: str) -> CapabilityRequest:
+            return CapabilityRequest(
+                task=Task(description=description),
+                identity=AgentIdentity(name=_SYNTHETIC_AGENT_KEY, capabilities=frozenset({"voice"})),
+                roster=lambda: (), own_name=_SYNTHETIC_AGENT_KEY, own_capabilities=("voice",),
+                recall=memory.recall, forget=memory.forget, retain=retain,
+                discover_voices=lambda: options,
+            )
+
+        first = select_voice(request("choose your voice"))
+        assert first.succeeded
+        before = autonomous_voice_choice_for(_SYNTHETIC_AGENT_KEY, recall=memory.recall)
+        assert before is not None and before.voice_id == first.payload["voice_id"]
+
+        reject["next"] = True
+        rejected = select_voice(request("choose another"))
+        assert not rejected.succeeded
+
+        after = autonomous_voice_choice_for(_SYNTHETIC_AGENT_KEY, recall=memory.recall)
+        assert after is not None
+        assert after.voice_id == before.voice_id, "the prior choice must survive a rejected write"
 
 
 class TestAFreshGenericManagerSkillsAgentReachesSelectVoiceThroughRealDispatch:

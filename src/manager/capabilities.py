@@ -93,9 +93,10 @@ from src.services.identity.introduction import (
     self_introduction,
 )
 from src.services.identity.voice_preference import (
+    autonomous_choice_record_ids,
     autonomous_voice_choice_for,
     build_voice_autonomous_choice_record,
-    forget_prior_autonomous_choice,
+    forget_record_ids,
     release_voice_preference,
     voice_preference_for,
 )
@@ -4934,6 +4935,16 @@ def _apply_voice_selection(
     later "choose another" can honour the original constraint (or lack
     of one) rather than whatever the prior pick happened to be. See
     ``AutonomousVoiceChoice``'s own docstring.
+
+    **Retain-first, forget-on-success only.** An earlier version of this
+    function forgot the prior autonomous choice unconditionally before
+    writing the new one - a real weakness, found live: a governance
+    rejection (``verdict.allowed is False``) still left the agent with
+    no autonomous choice on record at all, discarding a real, valid
+    prior fact for no reason. The prior record's ids are captured first
+    (read-only), the new record is written, and only once that write is
+    confirmed allowed are the prior ids actually forgotten - so a
+    rejected write leaves the agent's state exactly as it was.
     """
     if selection.option is None:
         return TaskResult.failure(
@@ -4946,7 +4957,7 @@ def _apply_voice_selection(
             "I found a matching voice but have no way to remember the choice right now.",
         )
 
-    forget_prior_autonomous_choice(agent_key, recall=request.recall, forget=request.forget)
+    prior_ids = autonomous_choice_record_ids(agent_key, recall=request.recall)
     verdict = request.retain(
         build_voice_autonomous_choice_record(
             agent_key, selection.option,
@@ -4962,6 +4973,7 @@ def _apply_voice_selection(
         return TaskResult.failure(
             request.task, request.own_name, f"I couldn't save that choice: {verdict.reason}",
         )
+    forget_record_ids(prior_ids, forget=request.forget)
 
     return TaskResult.success(
         request.task, request.own_name,
