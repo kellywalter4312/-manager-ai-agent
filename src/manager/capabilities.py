@@ -2635,10 +2635,21 @@ _MEDIA_COMPOSE_PATTERN = re.compile(
 # "generate a song". Which of the two - or neither - an objective
 # actually needs is decided by the Brain, never here; this only tells
 # the two shapes apart once one has been chosen.
+#
+# General Time/Event Awareness checkpoint: "make" joined the verb group
+# and "animation"/"anime" joined the noun group - not a new capability
+# and not an occasion-gated one, simply widening this same general
+# "generate a new video-shaped asset" recognition to the ordinary words
+# a person uses for that exact ask ("make this anime", "create an
+# animation of this"). Animation/anime creation is and remains a normal,
+# occasion-free request handled by this identical, unchanged capability -
+# see PROACTIVE_EXPERIENCE's own module docstring for why the contextual/
+# proactive visual-experience path is a fully separate mechanism that
+# never routes through here.
 _MEDIA_GENERATE_VIDEO_PATTERN = re.compile(
     r"^(?:please\s+)?(?:can\s+you\s+|could\s+you\s+|would\s+you\s+)?"
     r"(?:help\s+me\s+)?"
-    r"(generate|create|produce)\b.*\b(video|clip)\b",
+    r"(generate|create|produce|make)\b.*\b(video|clip|animation|anime)\b",
     re.IGNORECASE,
 )
 

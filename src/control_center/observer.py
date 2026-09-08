@@ -45,6 +45,7 @@ from src.control_center.views import (
     BrainView,
     CalendarItemView,
     CapabilityView,
+    ExperienceView,
     HeartbeatView,
     HistoryEvent,
     HistoryView,
@@ -59,7 +60,10 @@ from src.control_center.views import (
 from src.manager.capabilities import GENERAL_CAPABILITIES, PERSON_BIRTHDAY_FACT_TYPE
 from src.manager.cognition import assess_cognition, assess_manager
 from src.manager.manager import ManagerAgent
+from src.manager.proactive_experience import evaluate_and_persist_experiences
 from src.services.memory.calendar_items import all_current_calendar_items
+from src.services.memory.day import Calendar
+from src.services.memory.experience_history import all_experiences
 from src.services.memory.personal_context import all_current_personal_context
 from src.services.identity.presence import environment_for, presence_for
 from src.utils.logging import get_logger
@@ -593,6 +597,42 @@ class ControlCenter:
                 when=item.temporal_description,
                 status=item.status,
                 noted_by=item.noted_by,
+            )
+            for item in resolved
+        )
+
+    def experiences(self) -> tuple[ExperienceView, ...]:
+        """The real, current state of every proactive visual experience -
+        pending (selected, not yet reached a live frontend) and history
+        (already delivered) alike, each one real, persisted state, never
+        a decorative example.
+
+        Evaluates the same idempotent, governed step
+        (``evaluate_and_persist_experiences``) a live server's own
+        snapshot read already performs before reading - so a terminal
+        session and a served page never disagree about what is
+        currently due, and calling this twice never re-selects or
+        re-persists anything already decided.
+        """
+        if self._manager.memory is None or self._manager.own_skills is None:
+            return ()
+        today = Calendar.configured(self._runtime.settings.timezone).today()
+        evaluate_and_persist_experiences(
+            self._manager, today=today, calendar_events=self._runtime.calendar_events,
+        )
+        resolved = all_experiences(recall=self._manager.memory.recall, limit=200)
+        return tuple(
+            ExperienceView(
+                record_id=item.record_id,
+                event_type=item.event_type,
+                agent_key=item.agent_key,
+                reaction_id=item.reaction_id,
+                avatar_action=item.avatar_action,
+                environment_action=item.environment_action,
+                overlay=item.overlay,
+                intensity=item.intensity,
+                duration_ms=item.duration_ms,
+                delivered=item.delivered,
             )
             for item in resolved
         )

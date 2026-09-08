@@ -133,6 +133,20 @@ class MemoryCategory(str, Enum):
     # "what does my calendar actually contain" the same, unanswerable
     # question.
     CALENDAR_ITEM = "calendar_item"
+    # General Time/Event Awareness + Proactive Visual Experience
+    # checkpoint: which real, presentable visual/animation experience
+    # was selected for one genuinely due event, and whether it has
+    # actually reached a live frontend yet. Deliberately not folded into
+    # MILESTONE (the event this describes) or PERSONAL_CONTEXT/
+    # CALENDAR_ITEM (what was learned): this category answers a third,
+    # genuinely different question - "what has already been shown for
+    # this occurrence" - so a repeated proactive check never re-selects
+    # or re-presents the identical experience, and a later occurrence of
+    # the same kind of event can honestly avoid repeating the exact same
+    # one. Passes the same admission test every category here already
+    # must: it plainly changes what the Manager selects and presents
+    # next time.
+    EXPERIENCE = "experience"
 
     @property
     def label(self) -> str:
@@ -147,6 +161,7 @@ class MemoryCategory(str, Enum):
             "user_task": "TASK",
             "personal_context": "PERSONAL CONTEXT",
             "calendar_item": "CALENDAR",
+            "experience": "EXPERIENCE",
         }[self.value]
 
     @property
@@ -201,6 +216,13 @@ class MemoryCategory(str, Enum):
                 "recurrence with a title and a scheduled/cancelled/completed "
                 "status - interpreted from what the user taught, never free "
                 "text that merely reads like a schedule."
+            ),
+            "experience": (
+                "The real visual/animation experience selected for one "
+                "genuinely due event, and whether it has actually reached "
+                "a live frontend yet - so a repeated check never re-selects "
+                "or re-presents the same occurrence, and history informs "
+                "later variety."
             ),
         }[self.value]
 

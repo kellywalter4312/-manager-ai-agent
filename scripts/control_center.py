@@ -83,6 +83,7 @@ from src.control_center.render import (  # noqa: E402
     render_history,
     render_overview,
     render_calendar,
+    render_experiences,
     render_personal_context,
     render_system,
     render_turn,
@@ -175,6 +176,8 @@ HELP = """
                            (skills, schedules, ...) - current state, per topic
   calendar                 real, structured calendar items taught in conversation -
                            current state, per item
+  experience               genuinely due events and the real visual/animation
+                           experience selected for each - pending and delivered
   artifacts                every real, persisted artifact (documents/handouts)
   artifacts <id>           one artifact's full version history
   avatar                   every agent's current presence and avatar
@@ -1637,6 +1640,13 @@ def run_command(
         # every other view here: adding/cancelling/rescheduling happens
         # through ordinary conversation, not from this screen.
         return render_calendar(centre.calendar_items(), columns)
+
+    if verb == "experience":
+        # General Time/Event Awareness + Proactive Visual Experience
+        # checkpoint: real, current selection/history state - never
+        # decorative. Read-only: selection happens through the governed
+        # proactive evaluation step, not from this screen.
+        return render_experiences(centre.experiences(), columns)
 
     if verb == "tasks":
         # Phase 5.1: read-only state visibility, the same "genuine

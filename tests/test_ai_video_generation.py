@@ -810,6 +810,54 @@ class TestNoHardcodedVideoWorkflow:
         cap = select_capability(Task(description=text), None, participants=["Alfred"])
         assert cap.name == "media_production"
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Create an anime.",
+            "Make this anime.",
+            "Create an animation of this.",
+            "Generate an animation of a fox running.",
+        ],
+    )
+    def test_direct_animation_and_anime_requests_reach_the_identical_mechanism(self, text):
+        """General Time/Event Awareness checkpoint requirement 4A: animation/
+        anime creation is a normal, occasion-free general capability - the
+        exact phrasings the brief itself gives, routed through the identical
+        media_production mechanism no differently from any other requested
+        video-shaped asset. No new capability, no occasion required."""
+        cap = select_capability(Task(description=text), None, participants=["Alfred"])
+        assert cap.name == "media_production"
+
+    def test_animation_requests_never_require_a_special_occasion(self):
+        """A bare, ordinary animation request must reach the real handler
+        and the real (here: unconfigured) provider boundary through
+        exchange() - never a request for context about *why*, never
+        routed through any proactive/event-contingent capability."""
+        runtime, manager, channel, conversation = real_system()
+        turn = exchange(channel, conversation, "Create an anime of a cat chasing a laser pointer.")
+        assert not turn.succeeded
+        assert "occasion" not in turn.outcome.lower()
+        assert "milestone" not in turn.outcome.lower()
+        assert "no ai video-generation provider is configured" in turn.outcome.lower()
+
+    def test_a_configured_provider_actually_animates_through_exchange(self, tmp_path):
+        from src.providers.media.factory import MediaTools
+
+        runtime, manager, channel, conversation = real_system(media_asset_dir=str(tmp_path))
+        transport = ScriptedTransport()
+        manager.own_skills._tools = ToolSet([
+            MediaProductionTool(
+                NullNarrationProvider(),
+                LocalTitleCardImageProvider(),
+                FFmpegVideoComposer(),
+                RunwayVideoProvider(api_key="k", transport=transport, sleep=lambda s: None),
+                asset_dir=tmp_path,
+            )
+        ])
+        turn = exchange(channel, conversation, "Make this anime.")
+        assert turn.succeeded
+        assert "Video produced" in turn.outcome
+
     def test_compose_and_generate_video_are_genuinely_distinct_operations(self):
         """The two real capabilities this checkpoint's own file
         distinguishes - never the same code path, never one silently

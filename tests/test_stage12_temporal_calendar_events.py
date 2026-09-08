@@ -490,7 +490,14 @@ class TestEventDrivenCelebration:
         }
         assert len(reactions) > 1
 
-    def test_celebration_does_not_modify_brain_or_memory(self, tmp_path):
+    def test_celebration_selection_persists_only_the_real_experience_record(self, tmp_path):
+        """General Time/Event Awareness + Proactive Visual Experience
+        checkpoint: celebration selection now legitimately persists a
+        real, governed EXPERIENCE record - the exact mechanism that
+        makes history-aware non-repetition and restart-survival
+        possible (requirement 10). What this test still guards is that
+        selection writes *only* that one real record and nothing else
+        spurious - never a second, unrelated write."""
         import scripts.heartbeat as hb
         from datetime import datetime, timezone
         from src.services.memory.persistent import PersistentMemory
@@ -511,19 +518,20 @@ class TestEventDrivenCelebration:
             mailbox="memory",
         )
         fixed_now = datetime(2027, 6, 15, 9, 0, tzinfo=timezone.utc)
-        before = len(list(memory_dir.glob("*.json")))
         hb.check_proactive_events(settings, dry_run=False, clock=lambda: fixed_now)
         after_records = PersistentMemory(memory_dir / "manager.json").recall(limit=200)
-        # Only the one seeded birthday fact exists - celebration selection
-        # wrote nothing new to Memory.
-        assert len(after_records) == 1
+        # The one seeded birthday fact, plus exactly one real, governed
+        # experience record for it - nothing else.
+        assert len(after_records) == 2
+        kinds = sorted(r.kind for r in after_records)
+        assert kinds == ["experience", "user_context"]
 
     def test_event_before_celebration_ordering(self):
-        """Structural: celebration selection happens only after the due
+        """Structural: experience selection happens only after the due
         list is computed - never speculatively for something not due."""
         source = inspect.getsource(__import__("scripts.heartbeat", fromlist=["check_proactive_events"]).check_proactive_events)
         due_index = source.index("due = due_proactive_events(")
-        select_index = source.index("provider.select(")
+        select_index = source.index("evaluate_and_persist_experiences(")
         assert due_index < select_index
 
 

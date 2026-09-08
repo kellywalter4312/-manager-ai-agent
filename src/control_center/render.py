@@ -30,6 +30,7 @@ from src.control_center.views import (
     AgentView,
     CalendarItemView,
     ConversationTurn,
+    ExperienceView,
     HistoryView,
     OverviewView,
     PersonalContextTopicView,
@@ -543,4 +544,34 @@ def render_calendar(items: tuple[CalendarItemView, ...], columns: int | None = N
         out.append(f"  {marker} {item.title}")
         if item.when:
             out.append(f"    {item.when}")
+    return "\n".join(out)
+
+
+def render_experiences(items: tuple[ExperienceView, ...], columns: int | None = None) -> str:
+    """The real, current state of every selected proactive visual
+    experience - pending first, then delivered history. Read-only:
+    selection happens through the governed proactive evaluation step,
+    never from this screen."""
+    columns = columns if columns is not None else width()
+    out: list[str] = []
+    out += _heading("experience", columns)
+
+    if not items:
+        out.append("")
+        out.append("  nothing selected yet")
+        return "\n".join(out)
+
+    pending = [i for i in items if not i.delivered]
+    delivered = [i for i in items if i.delivered]
+
+    for label, group in (("pending", pending), ("delivered", delivered)):
+        if not group:
+            continue
+        out.append("")
+        out.append(f"  {label}:")
+        for item in group:
+            out.append(
+                f"    {item.event_type} ({item.agent_key}) - {item.reaction_id} "
+                f"[{item.intensity}, {item.duration_ms}ms]"
+            )
     return "\n".join(out)

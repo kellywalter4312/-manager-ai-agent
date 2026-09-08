@@ -215,6 +215,28 @@ class CalendarItemView:
 
 
 @dataclass(frozen=True)
+class ExperienceView:
+    """One real, selected visual/animation experience's current state -
+    read-only, and genuinely live: this is one ``ExperienceRecord``
+    (experience_history.py's own "latest wins" resolution), never a
+    decorative example. ``delivered`` distinguishes a still-pending
+    experience (selected, not yet reached a live frontend) from one
+    already presented - Control Center's own view into exactly the same
+    real state a served page reads."""
+
+    record_id: str
+    event_type: str
+    agent_key: str
+    reaction_id: str
+    avatar_action: str
+    environment_action: str
+    overlay: str
+    intensity: str
+    duration_ms: int
+    delivered: bool
+
+
+@dataclass(frozen=True)
 class ToolView:
     """A concrete mechanism, and whether it is genuinely present.
 

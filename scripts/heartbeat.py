@@ -42,13 +42,13 @@ from src.heartbeat.reporting import render_proactive_report, write_report  # noq
 from src.heartbeat.runner import HeartbeatRunner, TickStatus  # noqa: E402
 from src.heartbeat.state import StateStore, utc_now  # noqa: E402
 from src.manager.manager import ManagerAgent  # noqa: E402
+from src.manager.proactive_experience import evaluate_and_persist_experiences  # noqa: E402
 from src.manager.proactive_milestones import due_proactive_events  # noqa: E402
 from src.providers.calendar_events_factory import build_calendar_event_provider  # noqa: E402
 from src.services.credentials.account_store_file import (  # noqa: E402
     DEFAULT_ACCOUNTS_PATH,
     load_credential_store,
 )
-from src.services.memory.milestones import resolve_celebration_intensity  # noqa: E402
 from src.services.email.mailbox_factory import build_mailbox  # noqa: E402
 from src.services.email.sample_inbox import sample_inbox  # noqa: E402
 from src.services.identity.soul import load_soul  # noqa: E402
@@ -229,31 +229,24 @@ def check_proactive_events(
     if not fresh:
         return f"proactive events: {len(due)} due today, already reported"
 
-    # Celebration, only for what is genuinely due - the same governed
-    # provider, personality and resolved intensity a live conversation
-    # turn already uses (src/manager/capabilities.py's own
-    # milestone_recognition), never a second selection mechanism.
-    celebrations: dict[str, dict] = {}
-    provider = getattr(manager.own_skills, "_celebration_provider", None)
-    if provider is not None and manager.own_skills is not None:
-        from src.services.identity.personality import personality_for
+    # General Time/Event Awareness + Proactive Visual Experience
+    # checkpoint: the identical governed selection+persistence step a
+    # live server's own snapshot read already performs
+    # (evaluate_and_persist_experiences) - a real, history-aware
+    # CelebrationReaction, persisted through this Manager's own governed
+    # Memory (never a second selection mechanism, never only computed
+    # in-process and discarded) - so whichever entry point runs first,
+    # a later live session finds the identical, already-selected
+    # experience waiting to be presented, rather than this process's
+    # own now-forgotten in-memory choice.
+    experiences = {
+        record.dedup_key: {**record.to_dict(), "enabled": True}
+        for record in evaluate_and_persist_experiences(
+            manager, today=today, calendar_events=calendar_events,
+        )
+    }
 
-        personality = personality_for(manager.own_skills)
-        intensity = resolve_celebration_intensity(manager.memory.recall if manager.memory else None)
-        for event in fresh:
-            occurrence = sum(
-                1 for key in state.opportunities if key.startswith(f"{event.source}:{event.event_type}:")
-            )
-            reaction = provider.select(
-                milestone_type=event.event_type,
-                agent_key=manager.own_skills.name,
-                personality=personality,
-                intensity=intensity,
-                occurrence=occurrence,
-            )
-            celebrations[event.dedup_key] = reaction.to_dict()
-
-    text = render_proactive_report(fresh, now, celebrations=celebrations)
+    text = render_proactive_report(fresh, now, celebrations=experiences)
     path = write_report(text, now, settings.reports_dir, suffix="proactive")
 
     for event in fresh:

@@ -114,6 +114,7 @@ from src.config.settings import Settings  # noqa: E402
 from src.control_center.observer import ControlCenter  # noqa: E402
 from src.control_center.render import render_overview  # noqa: E402
 from src.control_center.snapshot import snapshot  # noqa: E402
+from src.manager.proactive_experience import deliver_experience  # noqa: E402
 from src.services.identity.presence import (  # noqa: E402
     PresenceState,
     set_avatar_preference,
@@ -459,6 +460,46 @@ def route_avatar(agent: object, avatar_id: object, system: LiveSystem) -> tuple[
     )
 
 
+def route_experience(record_id: object, system: LiveSystem) -> tuple[int, bytes, str]:
+    """Decide what to answer for `POST /experience`. No socket involved.
+
+    General Time/Event Awareness + Proactive Visual Experience
+    checkpoint: the one real acknowledgement a served page calls once
+    it has genuinely presented a pending experience - `deliver_experience()`
+    (`src/manager/proactive_experience.py`), the identical governed
+    write path Control Center's own read would otherwise never trigger,
+    since presenting something is an action a *frontend* takes, never a
+    side effect of merely reading a snapshot.
+
+    Marking something delivered that was never genuinely presented
+    would be exactly the "duplicate triggering never actually shown"
+    failure requirement 10 refuses - so this route exists at all only
+    because the caller (the served page's own render step) is the one
+    place that can honestly say the presentation happened.
+    """
+    if not isinstance(record_id, str) or not record_id.strip():
+        return (
+            400,
+            json.dumps({"error": "record_id must not be empty"}).encode("utf-8"),
+            "application/json; charset=utf-8",
+        )
+
+    with system.lock:
+        delivered = deliver_experience(system.manager, record_id.strip())
+
+    if delivered is None:
+        return (
+            404,
+            json.dumps({"error": f"no such pending experience: {record_id!r}"}).encode("utf-8"),
+            "application/json; charset=utf-8",
+        )
+    return (
+        200,
+        json.dumps({"record_id": delivered.record_id, "delivered": delivered.delivered}).encode("utf-8"),
+        "application/json; charset=utf-8",
+    )
+
+
 def route_profile(agent: object, fields: object, system: LiveSystem) -> tuple[int, bytes, str]:
     """Decide what to answer for `POST /profile`. No socket involved.
 
@@ -592,7 +633,7 @@ MANAGEMENT_VERBS = frozenset(
     {
         "status", "history", "actions", "unresolved", "avatar", "environment",
         "profile", "voice", "review", "capabilities", "provider", "connections",
-        "ecosystem", "tasks", "artifacts", "personal", "calendar",
+        "ecosystem", "tasks", "artifacts", "personal", "calendar", "experience",
     }
 )
 
@@ -770,7 +811,7 @@ class SnapshotHandler(BaseHTTPRequestHandler):
         self._respond(status, body, content_type)
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib's naming, not ours to change
-        if self.path not in ("/message", "/avatar", "/profile", "/environment", "/command"):
+        if self.path not in ("/message", "/avatar", "/profile", "/environment", "/command", "/experience"):
             self._respond(404, b"not found", "text/plain; charset=utf-8")
             return
 
@@ -804,6 +845,9 @@ class SnapshotHandler(BaseHTTPRequestHandler):
             status, body, content_type = route_command(
                 command, confirm_token, self.server.system, action_log_path=DEFAULT_ACTION_LOG_PATH
             )
+        elif self.path == "/experience":
+            record_id = payload.get("record_id") if isinstance(payload, dict) else None
+            status, body, content_type = route_experience(record_id, self.server.system)
         else:
             agent = payload.get("agent") if isinstance(payload, dict) else None
             fields = payload.get("fields") if isinstance(payload, dict) else None

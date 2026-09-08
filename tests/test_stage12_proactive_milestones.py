@@ -230,6 +230,96 @@ class TestTheGovernedAccessor:
         assert due_proactive_milestones(manager) == ()
 
 
+class TestCalendarItemIsAFourthGenericSource:
+    """General Time/Event Awareness checkpoint: due_proactive_events now
+    also recognises a genuinely singular, dated calendar item taught
+    through the generalized calendar (calendar_items.py) - never a
+    recurring routine block, which fires every single occurrence and
+    would be exactly the "hardcode what counts as significant" mistake
+    this project's own architecture refuses."""
+
+    def test_a_one_off_item_due_today_is_recognised(self):
+        from src.manager.proactive_milestones import due_proactive_events
+        from src.services.memory.calendar_items import (
+            CalendarItemCandidate,
+            build_calendar_item_record,
+        )
+
+        manager = real_manager()
+        candidate = CalendarItemCandidate(title="a real deadline", start_date=date(2026, 6, 15))
+        manager.memory.remember(build_calendar_item_record(candidate, agent_name="alfred"))
+
+        due = due_proactive_events(manager, today=date(2026, 6, 15))
+        matching = [e for e in due if e.source == "calendar_item"]
+        assert len(matching) == 1
+        assert matching[0].label == "a real deadline"
+
+    def test_a_recurring_item_is_never_recognised_even_on_a_matching_weekday(self):
+        from src.manager.proactive_milestones import due_proactive_events
+        from src.services.memory.calendar_items import (
+            CalendarItemCandidate,
+            Recurrence,
+            build_calendar_item_record,
+        )
+
+        manager = real_manager()
+        today = date(2026, 6, 15)  # a Monday
+        candidate = CalendarItemCandidate(
+            title="a routine weekly block",
+            recurrence=Recurrence(frequency="weekly", days_of_week=(today.weekday(),)),
+        )
+        manager.memory.remember(build_calendar_item_record(candidate, agent_name="alfred"))
+
+        due = due_proactive_events(manager, today=today)
+        assert not [e for e in due if e.source == "calendar_item"]
+
+    def test_a_one_off_item_on_a_different_day_is_not_due(self):
+        from src.manager.proactive_milestones import due_proactive_events
+        from src.services.memory.calendar_items import (
+            CalendarItemCandidate,
+            build_calendar_item_record,
+        )
+
+        manager = real_manager()
+        candidate = CalendarItemCandidate(title="some other day", start_date=date(2026, 6, 20))
+        manager.memory.remember(build_calendar_item_record(candidate, agent_name="alfred"))
+
+        due = due_proactive_events(manager, today=date(2026, 6, 15))
+        assert not [e for e in due if e.source == "calendar_item"]
+
+    def test_a_cancelled_item_is_never_recognised(self):
+        from src.manager.proactive_milestones import due_proactive_events
+        from src.services.memory.calendar_items import (
+            CalendarItemCandidate,
+            STATUS_CANCELLED,
+            build_calendar_item_record,
+        )
+
+        manager = real_manager()
+        candidate = CalendarItemCandidate(
+            title="cancelled thing", start_date=date(2026, 6, 15), status=STATUS_CANCELLED,
+        )
+        manager.memory.remember(build_calendar_item_record(candidate, agent_name="alfred"))
+
+        due = due_proactive_events(manager, today=date(2026, 6, 15))
+        assert not [e for e in due if e.source == "calendar_item"]
+
+    def test_dedup_key_is_stable_per_item_per_day(self):
+        from src.manager.proactive_milestones import due_proactive_events
+        from src.services.memory.calendar_items import (
+            CalendarItemCandidate,
+            build_calendar_item_record,
+        )
+
+        manager = real_manager()
+        candidate = CalendarItemCandidate(title="a real deadline", start_date=date(2026, 6, 15))
+        manager.memory.remember(build_calendar_item_record(candidate, agent_name="alfred"))
+
+        first = due_proactive_events(manager, today=date(2026, 6, 15))
+        second = due_proactive_events(manager, today=date(2026, 6, 15))
+        assert first[0].dedup_key == second[0].dedup_key
+
+
 # ---------------------------------------------------------------------------
 # 9-10. The heartbeat integration - genuine, dated triggering + dedup
 # ---------------------------------------------------------------------------

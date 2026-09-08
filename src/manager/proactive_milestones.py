@@ -36,6 +36,7 @@ from datetime import date
 from typing import TYPE_CHECKING
 
 from src.manager.memory_policy import MemoryCategory
+from src.services.memory.calendar_items import all_current_calendar_items
 from src.services.memory.milestones import due_recurring_dates
 from src.services.memory.temporal_events import due_temporal_transitions
 from src.services.memory.temporal_facts import utc_today
@@ -76,15 +77,29 @@ def due_proactive_milestones(
 @dataclass(frozen=True)
 class ProactiveEvent:
     """One thing genuinely due to be proactively surfaced today, from
-    any of the three existing sources this Stage 12 closure combines -
-    never a fourth source, and never a new concept of its own:
+    any of the four sources this project's own generalized-event
+    architecture combines - never a new concept of its own:
 
-        personal    a governed Memory record (a milestone, a birthday) -
-                    ``due_proactive_milestones`` above, unchanged
-        temporal    a raw calendar transition (new month, new year) -
-                    ``src/services/memory/temporal_events.py``
-        calendar    a named recurring occasion (Christmas, Easter, ...) -
-                    whatever ``CalendarEventProvider`` was configured
+        personal        a governed Memory record (a milestone, a
+                        birthday) - ``due_proactive_milestones`` above,
+                        unchanged
+        temporal        a raw calendar transition (new month, new
+                        year) - ``src/services/memory/temporal_events.py``
+        calendar        a named recurring occasion (Christmas, Easter,
+                        ...) - whatever ``CalendarEventProvider`` was
+                        configured
+        calendar_item   a genuinely singular, dated occasion the user
+                        taught through the generalized calendar
+                        (``src/services/memory/calendar_items.py``) -
+                        General Time/Event Awareness checkpoint. Only a
+                        non-recurring item counts: a routine weekly
+                        block (a class, a standing meeting) firing
+                        "due" every single occurrence would be exactly
+                        the "hardcode what counts as significant"
+                        mistake this project's own architecture
+                        refuses - recurrence *shape* is a real, generic
+                        signal available from the data itself, never a
+                        judgement about the item's subject.
 
     ``dedup_key`` is what a caller applies the existing StateStore
     dedup bucket to (see ``scripts/heartbeat.py``) - stable per source
@@ -95,7 +110,7 @@ class ProactiveEvent:
     event_type: str
     label: str
     dedup_key: str
-    source: str  # "personal" | "temporal" | "calendar"
+    source: str  # "personal" | "temporal" | "calendar" | "calendar_item"
     record: "MemoryRecord | None" = None
 
 
@@ -105,12 +120,13 @@ def due_proactive_events(
     today: date | None = None,
     calendar_events: "CalendarEventProvider | None" = None,
 ) -> tuple[ProactiveEvent, ...]:
-    """Every event genuinely due today, from all three sources, as one
-    uniform list - the aggregation this Stage 12 closure adds, and
-    nothing more: each item below is produced by an existing, unchanged
-    function, normalised into one shape so a single caller (the
-    heartbeat) can dedup, select a celebration reaction and report over
-    all of them identically.
+    """Every event genuinely due today, from all four sources, as one
+    uniform list - the aggregation this Stage 12 closure (and the
+    General Time/Event Awareness checkpoint's own calendar_item
+    addition) adds, and nothing more: each item below is produced by an
+    existing, unchanged function, normalised into one shape so a single
+    caller (the heartbeat, a live server) can dedup, select a real
+    experience and present over all of them identically.
 
     Day/week transitions are deliberately excluded here even though
     ``due_temporal_transitions`` detects them - see that function's own
@@ -154,6 +170,19 @@ def due_proactive_events(
                     label=occasion.label,
                     dedup_key=f"calendar:{occasion.event_type}:{resolved_today.isoformat()}",
                     source="calendar",
+                )
+            )
+
+    if manager.memory is not None:
+        for item in all_current_calendar_items(recall=manager.memory.recall):
+            if item.recurrence.is_recurring or item.start_date != resolved_today:
+                continue
+            events.append(
+                ProactiveEvent(
+                    event_type=item.topic_key or "calendar_item",
+                    label=item.title,
+                    dedup_key=f"calendar_item:{item.item_key}:{resolved_today.isoformat()}",
+                    source="calendar_item",
                 )
             )
 

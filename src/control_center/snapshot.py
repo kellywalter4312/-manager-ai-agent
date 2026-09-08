@@ -375,6 +375,40 @@ def _calendar_items(items: Any) -> list[dict[str, Any]]:
     ]
 
 
+def _experiences(items: Any) -> dict[str, Any]:
+    """General Time/Event Awareness + Proactive Visual Experience
+    checkpoint: the real, current selection/delivery state (see
+    ``ControlCenter.experiences``'s own docstring) - split into
+    ``pending`` (selected, not yet reached a live frontend - what a
+    served page actually presents) and ``history`` (already delivered),
+    never a raw undifferentiated dump and never a decorative example.
+    """
+    pending = [
+        {
+            "record_id": item.record_id,
+            "event_type": item.event_type,
+            "agent_key": item.agent_key,
+            "reaction_id": item.reaction_id,
+            "avatar_action": item.avatar_action,
+            "environment_action": item.environment_action,
+            "overlay": item.overlay,
+            "intensity": item.intensity,
+            "duration_ms": item.duration_ms,
+        }
+        for item in items if not item.delivered
+    ]
+    history = [
+        {
+            "record_id": item.record_id,
+            "event_type": item.event_type,
+            "agent_key": item.agent_key,
+            "reaction_id": item.reaction_id,
+        }
+        for item in items if item.delivered
+    ]
+    return {"pending": pending, "history": history}
+
+
 def snapshot(
     centre: ControlCenter,
     *,
@@ -443,6 +477,14 @@ def snapshot(
         # real, current state the "calendar" terminal command renders,
         # never a UI-only duplicate.
         "calendar_items": _calendar_items(centre.calendar_items()),
+        # General Time/Event Awareness + Proactive Visual Experience
+        # checkpoint: the same real, current selection/delivery state
+        # the "experience" terminal command renders - never a UI-only
+        # duplicate, and never Control-Center-only: this is what a
+        # served page actually presents (see scripts/serve_ui.py's own
+        # POST /experience route for how a real presentation is
+        # acknowledged).
+        "experience": _experiences(centre.experiences()),
         "conversation": _conversation(conversation),
         "speech": _speech(channel),
         "system": {

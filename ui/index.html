@@ -778,6 +778,33 @@
     .room-body .agent3d{height:180px}
   }
   @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+
+  /* ---- proactive visual experience ------------------------------------
+     General Time/Event Awareness + Proactive Visual Experience checkpoint.
+     A real, visible presentation of a genuinely due event's own selected
+     experience - never a Control-Center-only record. Reuses this page's
+     own card/glass language rather than inventing a second visual
+     vocabulary; the three overlay classes (card/banner/badge) and the
+     intensity class are exactly the real values
+     CelebrationReaction/DefaultCelebrationProvider already produce
+     server-side, never a fixed animation catalog invented here. */
+  .experience-toast{position:fixed;left:50%;bottom:28px;z-index:60;
+    transform:translate(-50%,18px);opacity:0;pointer-events:none;
+    transition:transform .38s cubic-bezier(.2,.8,.2,1),opacity .38s ease;
+    background:linear-gradient(180deg,rgba(18,22,28,.92),rgba(10,13,17,.92));
+    border:1px solid var(--edge);border-radius:14px;padding:12px 18px;
+    box-shadow:0 18px 46px rgba(0,0,0,.45),0 0 0 1px rgba(125,216,232,.08) inset;
+    max-width:min(86vw,380px);text-align:center}
+  .experience-toast.show{opacity:1;transform:translate(-50%,0)}
+  .experience-toast .exp-title{font-family:var(--display);font-size:12px;
+    letter-spacing:.08em;text-transform:uppercase;color:var(--ink-1,#eaf2f6)}
+  .experience-toast .exp-detail{font-size:10.5px;font-family:var(--mono);
+    color:var(--ink-4);letter-spacing:.04em;margin-top:4px}
+  .experience-toast.overlay-banner{border-radius:6px;max-width:min(92vw,520px)}
+  .experience-toast.overlay-badge{border-radius:999px;padding:10px 22px}
+  .experience-toast.intensity-full{box-shadow:0 22px 60px rgba(125,216,232,.22),
+    0 0 0 1px rgba(125,216,232,.18) inset}
+  .experience-toast.intensity-subtle{opacity:.94}
 </style>
 
 <canvas id="scene"></canvas>
@@ -1160,7 +1187,7 @@
   // conversation stays exclusively the composer's.
   const MGMT_VERBS = [
     "status", "actions", "capabilities", "connections", "provider", "voice", "ecosystem", "tasks",
-    "artifacts", "personal", "calendar",
+    "artifacts", "personal", "calendar", "experience",
   ];
 
   // The Control Center is an orrery: the orchestrator at the centre of the
@@ -4699,6 +4726,58 @@
     });
   }
 
+  // ---- proactive visual experience: real presentation, not a Control
+  // Center substitute ----------------------------------------------------
+  // General Time/Event Awareness + Proactive Visual Experience checkpoint.
+  // S.experience.pending names every real, backend-selected experience
+  // this page has not yet acknowledged. Presenting one is exactly two real
+  // things: showing it (a visible toast, styled from the experience's own
+  // overlay/intensity - never a fixed animation this file invents) and
+  // telling the backend it was shown (POST /experience), the one real,
+  // governed write that marks it delivered so a later refresh/restart/poll
+  // never re-triggers it. window.__alfredPresentedExperiences guards only
+  // against presenting the SAME record twice within one page's lifetime
+  // while its own ack is in flight - the backend's own delivered flag is
+  // the real, persisted guarantee.
+  function _showExperienceToast(exp){
+    const el = document.createElement("div");
+    el.className = "experience-toast overlay-" + (exp.overlay || "card")
+      + " intensity-" + (exp.intensity || "subtle");
+    el.innerHTML = `<div class="exp-title">${esc(exp.agent_key)}</div>`
+      + `<div class="exp-detail">${esc(exp.avatar_action || "")}`
+      + (exp.environment_action ? ` &middot; ${esc(exp.environment_action)}` : "")
+      + `</div>`;
+    document.body.appendChild(el);
+    const duration = Math.max(600, Math.min(exp.duration_ms || 1500, 6000));
+    requestAnimationFrame(()=> el.classList.add("show"));
+    setTimeout(()=>{
+      el.classList.remove("show");
+      setTimeout(()=> el.remove(), 420);
+    }, duration);
+  }
+
+  async function presentPendingExperiences(){
+    const pending = (S.experience && Array.isArray(S.experience.pending)) ? S.experience.pending : [];
+    if(!pending.length) return;
+    window.__alfredPresentedExperiences = window.__alfredPresentedExperiences || new Set();
+    for(const exp of pending){
+      if(window.__alfredPresentedExperiences.has(exp.record_id)) continue;
+      window.__alfredPresentedExperiences.add(exp.record_id);
+      _showExperienceToast(exp);
+      try{
+        await fetch("experience", {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({record_id: exp.record_id}),
+        });
+      }catch(e){
+        // Offline - the backend's own record stays pending, honestly; a
+        // later successful poll will present and ack it exactly once,
+        // and this page will not present it a second time meanwhile
+        // because the local guard above already remembers it tried.
+      }
+    }
+  }
+
   // ---- live refresh: the same seam, asked again ------------------------
   // A file opened from disk has no clock; a served page does. If this page
   // is being served (not opened from file://), this asks the same
@@ -4719,6 +4798,7 @@
       !== JSON.stringify(fresh.agents.map(a=>a.name));
     S = fresh;
     renderChrome();
+    if(LIVE) presentPendingExperiences();
     const view = stage.querySelector(".view");
     const scrollTop = view ? view.scrollTop : 0;
     // A draft in progress must survive a background poll - only a poll
