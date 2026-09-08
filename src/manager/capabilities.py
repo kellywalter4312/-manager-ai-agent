@@ -51,7 +51,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field, replace as dataclass_replace
-from datetime import date
+from datetime import date, time, timedelta
 from typing import Any, Callable, Mapping, Sequence
 
 from src.agents.base_agent import BaseAgent
@@ -112,6 +112,29 @@ from src.services.identity.voice_selection import (
 )
 from src.services.memory.capture import DEFAULT_PURPOSE as DEFAULT_CAPTURE_PURPOSE
 from src.services.memory.capture import build_recording, capture_intent
+from src.services.memory.calendar_items import (
+    CalendarItemCandidate,
+    Recurrence,
+    STATUS_CANCELLED as CALENDAR_STATUS_CANCELLED,
+    STATUS_SCHEDULED as CALENDAR_STATUS_SCHEDULED,
+    WEEKDAY_NAMES as CALENDAR_WEEKDAY_NAMES,
+    all_current_calendar_items,
+    build_calendar_item_record,
+    calendar_add_intent,
+    calendar_cancel_intent,
+    calendar_reschedule_intent,
+    calendar_retrieve_intent,
+    derive_topic_key as derive_calendar_topic_key,
+    extract_calendar_item,
+    extract_cancel_target as extract_calendar_cancel_target,
+    extract_period_query as extract_calendar_period_query,
+    extract_reschedule as extract_calendar_reschedule,
+    find_conflicts as find_calendar_conflicts,
+    find_time_range as find_calendar_time_range,
+    match_items_by_title as match_calendar_items_by_title,
+    next_occurrences as next_calendar_occurrences,
+    parse_calendar_date,
+)
 from src.services.memory.learning import build_learning_record, learning_intent
 from src.services.memory.memory import MemoryRecord
 from src.services.memory.personal_context import (
@@ -121,6 +144,7 @@ from src.services.memory.personal_context import (
     all_current_personal_context,
     build_personal_context_record,
     extract_personal_context_candidate,
+    normalize_topic_key,
 )
 from src.services.memory.personal_context import (
     personal_context_intent as _personal_context_shape_matches,
@@ -5311,16 +5335,41 @@ def personal_context(request: CapabilityRequest) -> TaskResult:
             request.task, request.own_name, f"I couldn't record that: {verdict.reason}",
         )
 
+    # Personal Organization/Calendar checkpoint: the requirement 5 chain -
+    # "user-provided information -> user-context understanding ->
+    # organizational/calendar interpretation -> structured calendar
+    # state". A schedule-shaped teaching statement ("this is my new IT
+    # schedule: Mon-Fri 9am-3pm") deterministically also names real
+    # calendar structure; when it does, that structure is written too,
+    # linked by the identical topic_key this personal-context record
+    # itself resolved to - never a second, unrelated store, and never
+    # forced onto a statement that plainly names no schedule at all
+    # ("I've learned Python").
+    calendar_note = ""
+    if candidate.status == STATUS_CURRENT and request.retain is not None:
+        topic_key = normalize_topic_key(candidate.topic)
+        calendar_when = request.calendar.today() if request.calendar is not None else None
+        calendar_candidate = extract_calendar_item(text, today=calendar_when)
+        if calendar_candidate is not None:
+            calendar_record = build_calendar_item_record(
+                calendar_candidate, agent_name=request.own_name,
+                topic_key=topic_key, related_personal_context_topic=candidate.topic,
+            )
+            calendar_verdict = request.retain(calendar_record)
+            if calendar_verdict.allowed:
+                calendar_note = " I've also updated your calendar to match."
+
     verb = "noted" if candidate.status == STATUS_CURRENT else "noted that this has ended"
     return TaskResult.success(
         request.task, request.own_name,
-        f"Got it - I've {verb} regarding {candidate.topic}.",
+        f"Got it - I've {verb} regarding {candidate.topic}.{calendar_note}",
         payload={
             "handled_by": "personal_context",
             "topic": candidate.topic,
             "status": candidate.status,
             "category": candidate.category,
             "brain_assisted": brain_assisted,
+            "calendar_linked": bool(calendar_note),
         },
     )
 
@@ -5339,6 +5388,422 @@ PERSONAL_CONTEXT = ManagerCapability(
         "being treated as simultaneously current."
     ),
     claims=personal_context_intent,
+    scoreable=False,
+)
+
+
+# ---------------------------------------------------------------------------
+# Personal Organization / Calendar - real structured state, built on the
+# generalized Personal Context checkpoint above (see calendar_items.py's
+# own module docstring for what genuinely distinguishes the two).
+# ---------------------------------------------------------------------------
+
+# Anchored, imperative-shaped, mirroring _GENERAL_ACTION_PATTERN's and
+# _VOICE_SELECTION_PATTERN's own convention - a genuine ask this
+# project's small deterministic parser cannot handle ("put my study
+# session on the calendar, it's usually around 6pm on weekdays")
+# without also claiming an unrelated remark that merely *mentions* one
+# of these words ("the deadline is either the 5th or the 12th, I'm
+# honestly not sure"). Found live, this checkpoint: a bare marker-word-
+# plus-pronoun test (no imperative shape required) claimed exactly that
+# ambiguous statement, silently taking it from whatever capability
+# genuinely owns clarifying a stated uncertainty.
+_CALENDAR_TIER2_PATTERN = re.compile(
+    r"^(?:please\s+)?(?:can\s+you\s+|could\s+you\s+|would\s+you\s+)?"
+    r"(?:add|put|schedule|book|update|change|move)\b.*\b"
+    r"(?:calendar|schedule|appointment|appointments|event|events|"
+    r"meeting|meetings|deadline|deadlines)\b",
+    re.IGNORECASE,
+)
+
+
+def _calendar_tier2_eligible(text: str) -> bool:
+    working = _strip_vocative(text).strip()
+    return bool(_CALENDAR_TIER2_PATTERN.match(working))
+
+
+def calendar_intent(task: Task, participants: Sequence[str] = ()) -> bool:
+    """Claims a request shaped like an add/cancel/reschedule/retrieve
+    calendar statement - Tier 1's own deterministic shapes, or (Tier 2
+    eligibility only) a self-referential remark carrying one of this
+    domain's markers that Tier 1 did not happen to match.
+
+    Three deferrals, the identical "the more specific capability wins"
+    reasoning every other capability in this file already states one
+    for: an outstanding to-do item is TASK's own explicit territory
+    ("add a task to buy milk on Friday" must never become a calendar
+    entry named "task to buy milk"), another person's recurring date is
+    PERSONAL_RECURRING_EVENTS' own ("my mom's birthday is March 24" is
+    not this capability's concern even though it names a date), and a
+    statement phrased as *teaching* Alfred something about the person
+    ("this is my new IT schedule: Mon-Fri 9am-3pm") is personal_context's
+    own - found live, this checkpoint: without this deferral, "calendar"
+    sorts alphabetically before "personal_context" and would win a
+    request that also happens to name a real weekday/time range,
+    silently skipping the personal-context record (and, with it,
+    requirement 5's own "user-context understanding -> calendar
+    interpretation" chain) entirely. personal_context's own handler
+    creates the matching calendar state itself once it owns the
+    request - see its own body.
+    """
+    text = task.description
+    if (
+        create_task_intent(text) or list_tasks_intent(text)
+        or complete_task_intent(text) or update_task_intent(text)
+    ):
+        return False
+    if relational_birthday_intent(text):
+        return False
+    if _personal_context_shape_matches(text):
+        return False
+    if (
+        calendar_add_intent(text) or calendar_cancel_intent(text)
+        or calendar_reschedule_intent(text) or calendar_retrieve_intent(text)
+    ):
+        return True
+    return _calendar_tier2_eligible(text)
+
+
+def _calendar_period_window(period: str, today: date) -> "tuple[date, date | None]":
+    """The concrete date window a retrieval period phrase names -
+    ``(start, end)``, ``end`` of ``None`` meaning "open-ended" (never
+    actually returned here; every branch below names a real bound or
+    falls to the default 14-day lookahead, so a caller never has to
+    special-case an unbounded window)."""
+    cleaned = period.strip().lower()
+    if not cleaned:
+        return today, today + timedelta(days=14)
+    if cleaned == "today":
+        return today, today
+    if cleaned == "tomorrow":
+        tomorrow = today + timedelta(days=1)
+        return tomorrow, tomorrow
+    if cleaned in ("week", "this week"):
+        return today, today + timedelta(days=7)
+    resolved = parse_calendar_date(cleaned, today=today)
+    if resolved is not None:
+        return resolved, resolved
+    return today, today + timedelta(days=14)
+
+
+def _calendar_add(request: CapabilityRequest, text: str) -> TaskResult:
+    """ADD - Tier 1 deterministic, Tier 2 Brain-assisted only when Tier 1
+    found nothing to parse. Every piece of a Tier 2 answer (date,
+    weekdays, times) is re-validated against real parsing before it is
+    ever written - the Brain names *what* was said, never invents *when*
+    something is, the identical discipline ``personal_context``'s own
+    Tier 2 and ``select_voice``'s own Tier 2 already hold themselves to.
+    """
+    calendar = request.calendar if request.calendar is not None else Calendar.utc()
+    today = calendar.today()
+    candidate = extract_calendar_item(text, today=today)
+    brain_assisted = False
+
+    if candidate is None:
+        if request.converse is None:
+            return TaskResult.failure(
+                request.task, request.own_name,
+                "That sounds like something for your calendar, but I couldn't work "
+                "out the date, time or title, and I have no way to reason about it "
+                "further right now.",
+            )
+        notes = (
+            f"The user said: \"{text}\". This appears to be the user adding "
+            "something to their calendar. Reply with exactly these lines and "
+            "nothing else:\n"
+            "TITLE: <a short name for this item, from the user's own words>\n"
+            f"DATE: <a specific date this refers to, as YYYY-MM-DD (today is "
+            f"{today.isoformat()}), or NONE if this recurs weekly instead of "
+            "naming one date>\n"
+            "WEEKDAYS: <comma-separated weekday names this recurs on every week, "
+            "or NONE for a one-off item>\n"
+            "START_TIME: <a specific time, e.g. 3pm or 15:00, or NONE>\n"
+            "END_TIME: <a specific end time, or NONE>\n"
+            "If this genuinely does not belong on a calendar, reply with TITLE: NONE",
+        )
+        decision = request.converse(request.task, notes)
+        if not decision.is_decided or not decision.reason.strip():
+            return TaskResult.failure(
+                request.task, request.own_name,
+                f"I couldn't reason about what to add, so I would rather say so "
+                f"than guess ({decision.reason}).",
+            )
+        reply = decision.reason
+
+        def _field(name: str, stop: str) -> str:
+            m = re.search(rf"{name}:\s*(.+?)(?:\s*(?:\n|\b{stop}:)|$)", reply, re.IGNORECASE)
+            return m.group(1).strip() if m else ""
+
+        title_raw = _field("TITLE", "DATE")
+        if not title_raw or title_raw.upper().startswith("NONE"):
+            return TaskResult.failure(
+                request.task, request.own_name,
+                "I reasoned about this but couldn't confidently identify something "
+                "to add to your calendar, so I would rather say so than guess.",
+            )
+
+        start_date = None
+        date_raw = _field("DATE", "WEEKDAYS")
+        if date_raw and date_raw.upper() != "NONE":
+            start_date = parse_calendar_date(date_raw, today=today)
+
+        days_of_week: set[int] = set()
+        weekdays_raw = _field("WEEKDAYS", "START_TIME")
+        if weekdays_raw and weekdays_raw.upper() != "NONE":
+            for name in re.split(r",|\band\b", weekdays_raw):
+                key = name.strip().lower()
+                if key in CALENDAR_WEEKDAY_NAMES:
+                    days_of_week.add(CALENDAR_WEEKDAY_NAMES[key])
+
+        start_time_val = end_time_val = None
+        start_raw = _field("START_TIME", "END_TIME")
+        if start_raw and start_raw.upper() != "NONE":
+            found = find_calendar_time_range(start_raw)
+            if found is not None:
+                start_time_val = found[0]
+        end_match = re.search(r"END_TIME:\s*(.+?)\s*$", reply, re.IGNORECASE)
+        end_raw = end_match.group(1).strip() if end_match else ""
+        if end_raw and end_raw.upper() != "NONE":
+            found = find_calendar_time_range(end_raw)
+            if found is not None:
+                end_time_val = found[0]
+
+        if start_date is None and not days_of_week:
+            return TaskResult.failure(
+                request.task, request.own_name,
+                "I reasoned about this but couldn't pin down a real date or "
+                "recurring weekday for it, so I would rather say so than guess.",
+            )
+
+        recurrence = (
+            Recurrence(frequency="weekly", days_of_week=tuple(sorted(days_of_week)))
+            if days_of_week else Recurrence()
+        )
+        candidate = CalendarItemCandidate(
+            title=title_raw[:120],
+            start_date=start_date if not days_of_week else None,
+            start_time=start_time_val, end_time=end_time_val, recurrence=recurrence,
+        )
+        brain_assisted = True
+
+    if request.retain is None:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "I don't have a way to update your calendar right now.",
+        )
+
+    existing = all_current_calendar_items(recall=request.recall) if request.recall else ()
+    conflicts = find_calendar_conflicts(candidate, existing, today=today)
+
+    record = build_calendar_item_record(candidate, agent_name=request.own_name)
+    verdict = request.retain(record)
+    if not verdict.allowed:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            f"I couldn't add that to your calendar: {verdict.reason}",
+        )
+
+    message = f"Added to your calendar: {candidate.title}."
+    if conflicts:
+        names = ", ".join(c.title for c in conflicts)
+        message += f" Note: this overlaps with {names}."
+
+    return TaskResult.success(
+        request.task, request.own_name, message,
+        payload={
+            "handled_by": "calendar", "action": "add",
+            "item_id": record.id, "item_key": record.context["item_key"],
+            "title": candidate.title, "brain_assisted": brain_assisted,
+            "conflicts": [c.item_key for c in conflicts],
+        },
+    )
+
+
+def _calendar_locate_one(
+    request: CapabilityRequest, title: str,
+) -> "CalendarItemRecord | TaskResult":
+    """The single current item ``title`` unambiguously names, or a
+    ready-to-return TaskResult describing why none could be resolved -
+    shared by cancel and reschedule, the identical "zero or many is a
+    real answer, not an error to hide" shape ``complete_task``/
+    ``update_task`` already use via ``match_tasks_by_topic``."""
+    existing = all_current_calendar_items(recall=request.recall)
+    matches = match_calendar_items_by_title(existing, title)
+    if not matches:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            f"I don't have anything matching '{title}' on your calendar.",
+        )
+    if len(matches) > 1:
+        listing = "; ".join(m.title for m in matches)
+        return TaskResult.failure(
+            request.task, request.own_name,
+            f"I found {len(matches)} items matching '{title}' - be more specific: {listing}",
+        )
+    return matches[0]
+
+
+def _calendar_cancel(request: CapabilityRequest, text: str) -> TaskResult:
+    target_title = extract_calendar_cancel_target(text)
+    if not target_title:
+        return TaskResult.failure(request.task, request.own_name, "Cancel what, exactly?")
+    if request.recall is None or request.retain is None:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "I don't have a way to update your calendar right now.",
+        )
+
+    located = _calendar_locate_one(request, target_title)
+    if isinstance(located, TaskResult):
+        return located
+    target = located
+
+    cancelled = CalendarItemCandidate(
+        title=target.title, start_date=target.start_date, start_time=target.start_time,
+        end_time=target.end_time, recurrence=target.recurrence,
+        status=CALENDAR_STATUS_CANCELLED, notes=target.notes,
+    )
+    record = build_calendar_item_record(
+        cancelled, agent_name=request.own_name, topic_key=target.topic_key,
+        series_key=target.series_key, item_key=target.item_key,
+        related_task_id=target.related_task_id,
+        related_personal_context_topic=target.related_personal_context_topic,
+    )
+    verdict = request.retain(record)
+    if not verdict.allowed:
+        return TaskResult.failure(
+            request.task, request.own_name, f"I couldn't cancel that: {verdict.reason}",
+        )
+    return TaskResult.success(
+        request.task, request.own_name, f"Cancelled: {target.title}.",
+        payload={"handled_by": "calendar", "action": "cancel", "item_key": target.item_key},
+    )
+
+
+def _calendar_reschedule(request: CapabilityRequest, text: str) -> TaskResult:
+    calendar = request.calendar if request.calendar is not None else Calendar.utc()
+    today = calendar.today()
+    parsed = extract_calendar_reschedule(text, today=today)
+    if parsed is None:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "Reschedule which item to when, exactly? Try 'move my X to <date/time>'.",
+        )
+    target_title, new_date, new_start, new_end = parsed
+    if request.recall is None or request.retain is None:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "I don't have a way to update your calendar right now.",
+        )
+
+    located = _calendar_locate_one(request, target_title)
+    if isinstance(located, TaskResult):
+        return located
+    target = located
+
+    moved = CalendarItemCandidate(
+        title=target.title,
+        start_date=new_date if new_date is not None else target.start_date,
+        start_time=new_start if new_start is not None else target.start_time,
+        end_time=new_end if new_end is not None else target.end_time,
+        recurrence=target.recurrence, status=CALENDAR_STATUS_SCHEDULED, notes=target.notes,
+    )
+    record = build_calendar_item_record(
+        moved, agent_name=request.own_name, topic_key=target.topic_key,
+        series_key=target.series_key, item_key=target.item_key,
+        related_task_id=target.related_task_id,
+        related_personal_context_topic=target.related_personal_context_topic,
+    )
+    verdict = request.retain(record)
+    if not verdict.allowed:
+        return TaskResult.failure(
+            request.task, request.own_name, f"I couldn't reschedule that: {verdict.reason}",
+        )
+    return TaskResult.success(
+        request.task, request.own_name, f"Rescheduled: {target.title}.",
+        payload={"handled_by": "calendar", "action": "reschedule", "item_key": target.item_key},
+    )
+
+
+def _calendar_retrieve(request: CapabilityRequest, text: str) -> TaskResult:
+    if request.recall is None:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "I don't have a way to check your calendar right now.",
+        )
+    calendar = request.calendar if request.calendar is not None else Calendar.utc()
+    today = calendar.today()
+    current = all_current_calendar_items(recall=request.recall)
+    if not current:
+        return TaskResult.success(
+            request.task, request.own_name, "You have nothing on your calendar.",
+            payload={"handled_by": "calendar", "action": "retrieve", "count": 0},
+        )
+
+    period = extract_calendar_period_query(text)
+    window_start, window_end = _calendar_period_window(period, today)
+    horizon = max(((window_end or window_start) - today).days + 1, 1)
+
+    entries: list[tuple[date, "CalendarItemRecord"]] = []
+    for item in current:
+        for occurrence in next_calendar_occurrences(
+            item, today=window_start, count=30, horizon_days=horizon,
+        ):
+            if window_end is not None and occurrence > window_end:
+                continue
+            entries.append((occurrence, item))
+    entries.sort(key=lambda pair: (pair[0], pair[1].start_time or time.min))
+
+    if not entries:
+        message = (
+            "Nothing scheduled for that period, as far as I know."
+            if period else "You have nothing coming up."
+        )
+        return TaskResult.success(
+            request.task, request.own_name, message,
+            payload={"handled_by": "calendar", "action": "retrieve", "count": 0},
+        )
+
+    lines = [f"{occurrence.isoformat()}: {item.describe()}" for occurrence, item in entries]
+    return TaskResult.success(
+        request.task, request.own_name, "\n".join(lines),
+        payload={"handled_by": "calendar", "action": "retrieve", "count": len(entries)},
+    )
+
+
+def calendar(request: CapabilityRequest) -> TaskResult:
+    """Generalized Personal Organization/Calendar - real structured
+    state, built on the generic mechanism ``personal_context`` already
+    established. Four distinct actions, checked in an order chosen the
+    same way ``select_voice``'s own is: retrieval and cancellation are
+    unambiguous imperative shapes checked first, reschedule next (it
+    also implies "to", ruling out a bare add), add last as the
+    remaining, broadest case.
+    """
+    text = request.task.description
+    if calendar_retrieve_intent(text):
+        return _calendar_retrieve(request, text)
+    if calendar_cancel_intent(text):
+        return _calendar_cancel(request, text)
+    if calendar_reschedule_intent(text):
+        return _calendar_reschedule(request, text)
+    return _calendar_add(request, text)
+
+
+CALENDAR = ManagerCapability(
+    name="calendar",
+    capabilities=frozenset({
+        "calendar", "schedule", "appointment", "appointments", "event", "events",
+        "meeting", "meetings", "deadline", "deadlines",
+    }),
+    handle=calendar,
+    description=(
+        "Adds, cancels, reschedules and retrieves real, structured calendar "
+        "items - dates, times, durations and weekly recurrence - built on the "
+        "generalized personal-context mechanism, never a fixed catalog of "
+        "activities."
+    ),
+    claims=calendar_intent,
     scoreable=False,
 )
 
@@ -5388,6 +5853,8 @@ MANAGER_CAPABILITIES: dict[str, ManagerCapability] = {
     SELECT_VOICE.name: SELECT_VOICE,
     # Generalized user knowledge/personal-context checkpoint.
     PERSONAL_CONTEXT.name: PERSONAL_CONTEXT,
+    # Generalized Personal Organization/Calendar checkpoint.
+    CALENDAR.name: CALENDAR,
 }
 
 # Used when a task reaches the Manager without matching any handler's words.

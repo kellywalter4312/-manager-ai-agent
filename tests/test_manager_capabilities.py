@@ -198,6 +198,11 @@ class TestHandlersAreSelectedThroughTheRegistry:
             # assertion had been failing since. Restored rather than
             # loosened: an exact list is the whole point of the test.
             "about_self",
+            # Generalized Personal Organization/Calendar checkpoint: real,
+            # structured calendar items - dates, times, durations, weekly
+            # recurrence - built on the personal-context mechanism, never
+            # a fixed catalog of activities.
+            "calendar",
             # Video-clipping checkpoint: cutting real clips from an
             # existing video - deterministic given explicit timestamps,
             # Brain-assisted (over given text only, never raw video/

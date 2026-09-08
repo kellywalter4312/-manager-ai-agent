@@ -82,6 +82,7 @@ from src.control_center.render import (  # noqa: E402
     render_agent,
     render_history,
     render_overview,
+    render_calendar,
     render_personal_context,
     render_system,
     render_turn,
@@ -172,6 +173,8 @@ HELP = """
   unresolved               personal facts Alfred knows only as uncertainty
   personal                 self-declared personal context taught in conversation
                            (skills, schedules, ...) - current state, per topic
+  calendar                 real, structured calendar items taught in conversation -
+                           current state, per item
   artifacts                every real, persisted artifact (documents/handouts)
   artifacts <id>           one artifact's full version history
   avatar                   every agent's current presence and avatar
@@ -1627,6 +1630,13 @@ def run_command(
         # like every other view here: teaching happens through ordinary
         # conversation, not from this screen.
         return render_personal_context(centre.personal_context(), columns)
+
+    if verb == "calendar":
+        # Generalized Personal Organization/Calendar checkpoint: real,
+        # current calendar state - never decorative. Read-only, like
+        # every other view here: adding/cancelling/rescheduling happens
+        # through ordinary conversation, not from this screen.
+        return render_calendar(centre.calendar_items(), columns)
 
     if verb == "tasks":
         # Phase 5.1: read-only state visibility, the same "genuine

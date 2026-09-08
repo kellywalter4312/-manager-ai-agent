@@ -296,6 +296,7 @@ class TestThisIsNotASecondRouter:
         claiming = sorted(c.name for c in MANAGER_CAPABILITIES.values() if c.claims)
         assert claiming == [
             "about_self",
+            "calendar",
             "clip_video",
             "communication", "complete_task", "connected_action", "correct_memory",
             "create_artifact",

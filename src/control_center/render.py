@@ -28,6 +28,7 @@ import shutil
 
 from src.control_center.views import (
     AgentView,
+    CalendarItemView,
     ConversationTurn,
     HistoryView,
     OverviewView,
@@ -517,4 +518,29 @@ def render_personal_context(
         marker = "[ended]" if topic.status == "discontinued" else "[current]"
         out.append(f"  {marker} {topic.topic} ({topic.category})")
         out.append(f"    {topic.content}")
+    return "\n".join(out)
+
+
+def render_calendar(items: tuple[CalendarItemView, ...], columns: int | None = None) -> str:
+    """The real, current state of every calendar item - one line per
+    item, always its latest write. Read-only: adding/cancelling/
+    rescheduling happens through ordinary conversation, never from this
+    screen."""
+    columns = columns if columns is not None else width()
+    out: list[str] = []
+    out += _heading("calendar", columns)
+
+    if not items:
+        out.append("")
+        out.append("  nothing on the calendar yet")
+        return "\n".join(out)
+
+    for item in items:
+        out.append("")
+        marker = {"scheduled": "[current]", "cancelled": "[cancelled]", "completed": "[done]"}.get(
+            item.status, f"[{item.status}]"
+        )
+        out.append(f"  {marker} {item.title}")
+        if item.when:
+            out.append(f"    {item.when}")
     return "\n".join(out)

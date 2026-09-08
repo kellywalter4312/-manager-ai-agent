@@ -356,6 +356,25 @@ def _personal_context(topics: Any) -> list[dict[str, Any]]:
     ]
 
 
+def _calendar_items(items: Any) -> list[dict[str, Any]]:
+    """Generalized Personal Organization/Calendar checkpoint: the real,
+    current calendar state (see ``ControlCenter.calendar_items``'s own
+    docstring) - one entry per real-world item, always its latest write,
+    never a raw history dump and never a decorative example."""
+    return [
+        {
+            "record_id": item.record_id,
+            "item_key": item.item_key,
+            "topic_key": item.topic_key,
+            "title": item.title,
+            "when": item.when,
+            "status": item.status,
+            "noted_by": item.noted_by,
+        }
+        for item in items
+    ]
+
+
 def snapshot(
     centre: ControlCenter,
     *,
@@ -420,6 +439,10 @@ def snapshot(
         # real, current per-topic state - the same data the "personal"
         # terminal command renders, never a UI-only duplicate.
         "personal_context": _personal_context(centre.personal_context()),
+        # Generalized Personal Organization/Calendar checkpoint: the same
+        # real, current state the "calendar" terminal command renders,
+        # never a UI-only duplicate.
+        "calendar_items": _calendar_items(centre.calendar_items()),
         "conversation": _conversation(conversation),
         "speech": _speech(channel),
         "system": {

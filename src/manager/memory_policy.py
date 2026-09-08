@@ -115,6 +115,24 @@ class MemoryCategory(str, Enum):
     # open to skills, schedules and any future kind of personal fact
     # without ever adding a new MemoryCategory for each one.
     PERSONAL_CONTEXT = "personal_context"
+    # Personal Organization/Calendar checkpoint: a real, structured
+    # calendar item - a date/time/recurrence with a title and a status
+    # (scheduled/cancelled/completed), never free text that merely reads
+    # like a schedule. Deliberately not folded into PERSONAL_CONTEXT: that
+    # category holds a person's own topic-keyed *statement* ("this is my
+    # new IT schedule: Mon-Fri 9-3") - one record per statement, resolved
+    # by "latest wins". A calendar item is what that statement, once
+    # interpreted, actually *means* as structured state - genuinely
+    # different data (real date/time/duration/recurrence fields, not
+    # prose) with its own, two-level lifecycle (an individual item's own
+    # updates, and a whole taught schedule's own supersession) - see
+    # src/services/memory/calendar_items.py. The two categories are
+    # related (a calendar item may carry the topic_key/record id of the
+    # personal-context statement it was derived from) but never merged:
+    # collapsing them would make "what did I say about my schedule" and
+    # "what does my calendar actually contain" the same, unanswerable
+    # question.
+    CALENDAR_ITEM = "calendar_item"
 
     @property
     def label(self) -> str:
@@ -128,6 +146,7 @@ class MemoryCategory(str, Enum):
             "learning": "LEARNING CONTEXT",
             "user_task": "TASK",
             "personal_context": "PERSONAL CONTEXT",
+            "calendar_item": "CALENDAR",
         }[self.value]
 
     @property
@@ -176,6 +195,12 @@ class MemoryCategory(str, Enum):
                 "context - grouped by topic so a newer statement about the "
                 "same topic supersedes an older one rather than both being "
                 "treated as simultaneously current."
+            ),
+            "calendar_item": (
+                "A real, structured calendar item - a date/time/duration/"
+                "recurrence with a title and a scheduled/cancelled/completed "
+                "status - interpreted from what the user taught, never free "
+                "text that merely reads like a schedule."
             ),
         }[self.value]
 

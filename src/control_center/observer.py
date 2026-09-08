@@ -43,6 +43,7 @@ from src.events.narrator import compose
 from src.control_center.views import (
     AgentView,
     BrainView,
+    CalendarItemView,
     CapabilityView,
     HeartbeatView,
     HistoryEvent,
@@ -58,6 +59,7 @@ from src.control_center.views import (
 from src.manager.capabilities import GENERAL_CAPABILITIES, PERSON_BIRTHDAY_FACT_TYPE
 from src.manager.cognition import assess_cognition, assess_manager
 from src.manager.manager import ManagerAgent
+from src.services.memory.calendar_items import all_current_calendar_items
 from src.services.memory.personal_context import all_current_personal_context
 from src.services.identity.presence import environment_for, presence_for
 from src.utils.logging import get_logger
@@ -562,6 +564,33 @@ class ControlCenter:
                 topic=item.topic,
                 content=item.content,
                 category=item.category,
+                status=item.status,
+                noted_by=item.noted_by,
+            )
+            for item in resolved
+        )
+
+    def calendar_items(self) -> tuple[CalendarItemView, ...]:
+        """The real, current state of every calendar item - one entry
+        per real-world item, always its latest write
+        (calendar_items.py's own two-level "latest wins" resolution),
+        never a raw history dump and never a decorative example.
+        Read-only: adding/cancelling/rescheduling happens through the
+        ordinary conversational path (the ``calendar`` capability in
+        ``src/manager/capabilities.py``); this only presents what is
+        already, genuinely stored.
+        """
+        memory = self._manager.memory
+        if memory is None:
+            return ()
+        resolved = all_current_calendar_items(recall=memory.recall, limit=200)
+        return tuple(
+            CalendarItemView(
+                record_id=item.record_id,
+                item_key=item.item_key,
+                topic_key=item.topic_key,
+                title=item.title,
+                when=item.temporal_description,
                 status=item.status,
                 noted_by=item.noted_by,
             )

@@ -197,6 +197,24 @@ class PersonalContextTopicView:
 
 
 @dataclass(frozen=True)
+class CalendarItemView:
+    """One real, structured calendar item's current state - read-only,
+    and genuinely live: this is one ``CalendarItemRecord``
+    (calendar_items.py's own two-level "latest wins" resolution), never
+    a decorative example. ``when`` is a plain, pre-rendered description
+    (a date, or "every Monday, Wednesday") - the renderer's job is
+    layout, not calendar arithmetic."""
+
+    record_id: str
+    item_key: str
+    topic_key: str
+    title: str
+    when: str
+    status: str
+    noted_by: str
+
+
+@dataclass(frozen=True)
 class ToolView:
     """A concrete mechanism, and whether it is genuinely present.
 
