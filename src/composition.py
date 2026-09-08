@@ -83,6 +83,8 @@ from src.providers.communication import CommunicationProvider
 from src.providers.communication_factory import build_communication_provider
 from src.providers.connection import Connection
 from src.providers.connection_factory import build_connection
+from src.providers.documents.factory import build_document_rendering
+from src.providers.documents.pdf import DocumentRenderer
 from src.providers.factory import build_provider
 from src.services.credentials.account import CredentialStore, ProviderAccount
 from src.providers.knowledge import KnowledgeSourceProvider
@@ -95,6 +97,7 @@ from src.registry.agent_registry import AgentRegistry
 from src.services.email.mailbox import Mailbox
 from src.services.identity.identity import AgentIdentity, load_identity
 from src.services.identity.presence import PresenceRegistry
+from src.services.artifacts.store import ArtifactStore
 from src.services.memory.day import Calendar
 from src.services.memory.factory import (
     EMAIL_AGENT,
@@ -263,6 +266,26 @@ class Runtime:
     # state and the Control Center that reads it are looking at the
     # same signal, the way Runtime already shares one avatar_provider.
     presence_registry: PresenceRegistry
+
+    # Multimodal workspace/artifact checkpoint: the one authoritative,
+    # persistent record of every real artifact this installation has
+    # produced - one shared instance, the identical role
+    # presence_registry above already plays: the tool that writes a real
+    # artifact and the Control Center that reads it back are looking at
+    # the same object, never two independently-loaded copies.
+    # Agent-independent and type-independent by construction (see
+    # src/services/artifacts/store.py's own docstring).
+    artifacts: ArtifactStore
+
+    # Multimodal workspace/artifact checkpoint: which real engine an
+    # artifact's document content is exported to a real file format
+    # with, selected by name exactly as every provider above already is.
+    # A genuinely separate concern from `media` (that axis produces
+    # narration/image/video; this one exports structured document
+    # content) and from `artifacts` above (identity/persistence vs.
+    # rendering - the same split MediaProductionTool already keeps
+    # between a provider's own output and the write).
+    document_renderer: DocumentRenderer
 
     # ------------------------------------------------------------------
     # Named accessors for the one specialist this project ships.
@@ -483,6 +506,21 @@ def build_runtime(
         # per-run runtime state, the same non-configurable role
         # AgentRegistry() already plays a few lines below).
         presence_registry=PresenceRegistry(),
+        # Multimodal workspace/artifact checkpoint: loaded fresh from
+        # settings.artifacts_dir - a real, side-effect-free read (this
+        # module's own docstring's "no file is written" invariant holds:
+        # loading is not writing), the identical "no side effect worth
+        # fearing" reasoning every other construction here already
+        # follows. Genuine writes only ever happen later, when a real
+        # ArtifactProductionTool call actually creates or revises one.
+        artifacts=ArtifactStore(settings.artifacts_dir),
+        # Selected by name from settings.document_rendering, the
+        # identical pattern celebration/avatar_provider above already
+        # use - "simple_pdf" (real, local, zero external risk) is what
+        # an unconfigured installation gets, the same choice those two
+        # already make for the identical reason (see that setting's own
+        # docstring).
+        document_renderer=build_document_rendering(settings),
     )
     logger.info("runtime ready: %s", runtime.describe())
     return runtime

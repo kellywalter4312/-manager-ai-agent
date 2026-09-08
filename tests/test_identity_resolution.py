@@ -286,8 +286,11 @@ class TestThisIsNotASecondRouter:
         X.mp4 from 1:20-1:45", "find the best moments and clip them") by
         its own marker-plus-evidence shape rather than the ordinary word
         "clip" ("that was quite a clip show"), the video-clipping
-        checkpoint - and every other request is still settled by word
-        overlap."""
+        checkpoint; and recognising an explicit ask to create or revise a
+        real, persistent handout ("make me a handout", "revise the
+        handout") by its own marker shape, the multimodal
+        workspace/artifact checkpoint - and every other request is still
+        settled by word overlap."""
         from src.manager.capabilities import MANAGER_CAPABILITIES
 
         claiming = sorted(c.name for c in MANAGER_CAPABILITIES.values() if c.claims)
@@ -295,12 +298,13 @@ class TestThisIsNotASecondRouter:
             "about_self",
             "clip_video",
             "communication", "complete_task", "connected_action", "correct_memory",
+            "create_artifact",
             "create_task", "current_datetime", "forget",
             "general_assistance", "generate_document", "image_analysis",
             "knowledge", "learning_context", "list_tasks", "live_information",
             "media_production",
             "milestone_recognition", "participant_invitation", "personal_recurring_events",
-            "recall_memory", "record_this", "small_talk", "temporal_derivation", "update_task",
+            "recall_memory", "record_this", "revise_artifact", "small_talk", "temporal_derivation", "update_task",
         ]
 
 

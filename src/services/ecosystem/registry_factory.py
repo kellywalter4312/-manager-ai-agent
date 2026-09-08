@@ -32,6 +32,7 @@ from src.providers.communication_factory import (
     build_communication_provider,
 )
 from src.providers.connection_factory import available_connection_providers, build_connection
+from src.providers.documents.factory import available_document_rendering_backends, build_document_rendering
 from src.providers.environment_factory import available_environment_providers, build_environment_provider
 from src.providers.factory import available_providers, build_provider
 from src.providers.knowledge_factory import available_knowledge_providers, build_knowledge_provider
@@ -281,6 +282,24 @@ def build_ecosystem_registry(settings: Settings) -> EcosystemRegistry:
                 replace(settings, calendar_event_provider=key)
             ),
             requires_credential=lambda key: False,
+        )
+    )
+
+    registry.register(
+        GenericCategoryAdapter(
+            "document_rendering_provider",
+            list_backends=available_document_rendering_backends,
+            active_key=lambda: settings.document_rendering,
+            build=lambda key, credential: build_document_rendering(
+                replace(settings, document_rendering=key)
+            ),
+            # Neither backend needs a credential - "simple_pdf" is real,
+            # local, deterministic rendering with zero external risk, the
+            # identical reasoning celebration_provider/calendar_event_provider
+            # above already state for their own real, credential-free
+            # implementations.
+            requires_credential=lambda key: False,
+            dependents=("the artifact_production tool's document-artifact PDF export",),
         )
     )
 

@@ -1968,6 +1968,300 @@ GENERATE_DOCUMENT = ManagerCapability(
 
 
 # ---------------------------------------------------------------------------
+# Multimodal workspace/artifact checkpoint: a real, persistent, versioned
+# document artifact ("handout") - genuinely different from
+# generate_document above, which writes one flat, disposable text file
+# with no identity and no version chain. A handout has a stable
+# artifact_id, real multi-page structure, a real PDF export where a
+# rendering engine is configured, and can be reopened and revised
+# through that same identity - see src/services/artifacts/store.py's
+# own docstring for the full architecture.
+#
+# "handout" is used as the routing noun rather than "document"/"report"
+# specifically so this never collides with generate_document's own,
+# already-shipped markers above - two real, independent document
+# capabilities, not one capability's ambiguous second meaning. Neither
+# marker set is about any particular topic: the AI-history handout this
+# checkpoint's own brief uses as an example is nowhere in this code -
+# any subject reaches the identical handler.
+# ---------------------------------------------------------------------------
+
+_HANDOUT_MARKERS: tuple[str, ...] = (
+    "make a handout", "make me a handout", "create a handout", "prepare a handout",
+    "write a handout", "produce a handout", "build a handout",
+)
+
+_REVISE_HANDOUT_MARKERS: tuple[str, ...] = (
+    "revise the handout", "revise that handout", "update the handout",
+    "update that handout", "edit the handout", "edit that handout",
+    "revise the document", "update the document",
+)
+
+# "artifact <id>" (or "artifact: <id>") - an explicit reference, the
+# identical "a path/range named in the text is the evidence" convention
+# find_video_path/parse_clip_specs already establish for video clipping,
+# applied here to an artifact's own id instead of a filesystem path.
+_ARTIFACT_ID_PATTERN = re.compile(r"\bartifact[:\s]+([0-9a-f]{6,32})\b", re.IGNORECASE)
+
+# How the Brain's own answer (or a person's own typed request) must be
+# shaped for _parse_document_content to read it back as a real,
+# structured DocumentContent. Deliberately NOT line-oriented, even
+# though it reads that way below: ``BrainDecision.reason`` (and
+# ``ObjectiveVerdict.next_step``) collapse all whitespace - including
+# every newline - to single spaces (see ``BrainDecision.__post_init__``),
+# so a real answer reaches this parser as one flattened line regardless
+# of how the model actually formatted it. The colon between a section's
+# heading and its body is what survives that flattening and is what
+# ``_parse_document_content`` actually keys on; the newlines below are
+# only there to make the instruction itself readable to a real model.
+_DOCUMENT_FORMAT_INSTRUCTION = (
+    "Respond in EXACTLY this format and nothing else - no other commentary "
+    "before or after it:\n"
+    "TITLE: <a concise, real title>\n"
+    "SECTION: <first heading>: <that section's real body text, one or more sentences>\n"
+    "SECTION: <second heading>: <that section's real body text>\n"
+    "(repeat SECTION entries as needed - at least two sections total, each "
+    "with its own heading, a colon, then its body)"
+)
+
+_TITLE_PATTERN = re.compile(r"TITLE:\s*(.*?)\s*(?=SECTION:|$)", re.IGNORECASE | re.DOTALL)
+_SECTION_PATTERN = re.compile(r"SECTION:\s*(.*?)\s*(?=SECTION:|$)", re.IGNORECASE | re.DOTALL)
+
+
+def _parse_document_content(text: str) -> "DocumentContent | None":
+    """A real ``DocumentContent`` from ``text``, when it already contains
+    at least one ``TITLE:``/``SECTION:`` block in ``_DOCUMENT_FORMAT_INSTRUCTION``'s
+    own shape - the identical role ``parse_clip_specs`` plays for video
+    clipping: a single, shared parser used both on a person's own typed
+    request (the deterministic path, no Brain needed) and on the Brain's
+    own structured answer (the Brain-assisted path, where the text
+    reaching here is always a single flattened line - see this module's
+    own ``_DOCUMENT_FORMAT_INSTRUCTION`` for why), so a "the request
+    already carries real evidence" check and "here is what the Brain
+    proposed" both go through one real implementation regardless of
+    which shape the text actually arrived in.
+
+    None when no real title or no real section was found - honest
+    absence, never a guess at structure that was never actually there.
+    """
+    from src.services.artifacts.models import DocumentContent, DocumentSection
+
+    title_match = _TITLE_PATTERN.search(text)
+    title = title_match.group(1).strip() if title_match else ""
+
+    sections: list[DocumentSection] = []
+    for chunk in _SECTION_PATTERN.findall(text):
+        heading, _, body = chunk.partition(":")
+        heading, body = heading.strip(), body.strip()
+        if not heading or not body:
+            continue
+        try:
+            sections.append(DocumentSection(heading=heading, body=body))
+        except ValueError:
+            continue
+
+    if not title or not sections:
+        return None
+    try:
+        return DocumentContent(title=title, sections=tuple(sections))
+    except ValueError:
+        return None
+
+
+def create_artifact_intent(task: Task, participants: Sequence[str] = ()) -> bool:
+    return _marker_present(task.description, _HANDOUT_MARKERS)
+
+
+def create_artifact(request: CapabilityRequest) -> TaskResult:
+    """Create a real, persistent, versioned document artifact - a
+    "handout" - deterministically when the request already carries real,
+    structured content (Half-Brain safe, no LLM needed), Brain-assisted
+    when it instead names an objective the Brain must organize into that
+    same structure.
+
+    Two ways real, structured evidence reaches this handler, tried in
+    order - the identical priority ``clip_video`` already holds itself
+    to between explicit timestamps and Brain-derived ones:
+
+    1. The request itself already contains a real ``TITLE:``/``SECTION:``
+       block (see ``_parse_document_content``) - used directly, no Brain
+       call at all.
+    2. Otherwise, the Brain is asked to organize the objective (plus
+       whatever real evidence a multi-step objective pursuit already
+       carried into this very request's own description - see
+       ``src/manager/objective_loop.py``) into that same structure.
+       Never fabricates research or findings that were never actually
+       gathered: the Brain reasons only over what this request and the
+       recent conversation genuinely contain.
+
+    Persistence and PDF export are entirely ``artifact_production``'s
+    own job (see that tool's docstring) - this handler never touches a
+    file directly.
+    """
+    if not request.tools.permits("artifact_production"):
+        equipped = ", ".join(request.tools.names()) or "none"
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "I can put together a handout, but the underlying "
+            f"'artifact_production' capability is not installed, so I cannot "
+            f"save it as a real artifact yet. Currently equipped: {equipped}.",
+        )
+
+    text = request.task.description
+    content = _parse_document_content(text)
+
+    if content is None:
+        if request.converse is None:
+            return TaskResult.failure(
+                request.task, request.own_name,
+                "I don't have a way to organize this into a handout yet - no "
+                "language model is configured for me right now. Give me the "
+                f"content already structured instead:\n{_DOCUMENT_FORMAT_INSTRUCTION}",
+            )
+        notes = (_DOCUMENT_FORMAT_INSTRUCTION,) + _recent_conversation_notes(request)
+        decision = request.converse(request.task, notes)
+        if not decision.is_decided:
+            return TaskResult.failure(
+                request.task, request.own_name,
+                f"I couldn't organize that into a handout ({decision.reason or 'no usable answer'}).",
+            )
+        content = _parse_document_content(decision.reason)
+        if content is None:
+            return TaskResult.failure(
+                request.task, request.own_name,
+                "I couldn't organize that into a real, structured handout from "
+                "what has actually been established so far.",
+            )
+
+    outcome = request.tools.invoke(
+        "artifact_production", {"operation": "create_document", "content": content.to_json()}
+    )
+    if not outcome.ok:
+        return TaskResult.failure(
+            request.task, request.own_name, f"I composed the handout but couldn't save it: {outcome.error}",
+        )
+
+    return TaskResult.success(
+        request.task, request.own_name, outcome.output,
+        payload={"handled_by": "create_artifact"},
+    )
+
+
+CREATE_ARTIFACT = ManagerCapability(
+    name="create_artifact",
+    capabilities=frozenset({"handout", "artifact"}),
+    handle=create_artifact,
+    description=(
+        "Creates a real, persistent, versioned document artifact (a handout) - "
+        "structured content given directly needs no Brain; organizing an "
+        "objective into that structure does."
+    ),
+    claims=create_artifact_intent,
+    scoreable=False,
+)
+
+
+def revise_artifact_intent(task: Task, participants: Sequence[str] = ()) -> bool:
+    return _marker_present(task.description, _REVISE_HANDOUT_MARKERS)
+
+
+def revise_artifact(request: CapabilityRequest) -> TaskResult:
+    """Revise an existing document artifact - the same artifact identity,
+    one real version further along, never a new, disconnected file.
+
+    Resolves which artifact by an explicit ``artifact <id>`` reference in
+    the request when given, otherwise the most recently created/revised
+    document this agent itself owns (``artifact_production``'s own
+    ``find_latest`` operation) - real, deterministic evidence, never a
+    guess among several equally-plausible candidates.
+    """
+    if not request.tools.permits("artifact_production"):
+        equipped = ", ".join(request.tools.names()) or "none"
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "I can revise a handout, but the underlying 'artifact_production' "
+            f"capability is not installed. Currently equipped: {equipped}.",
+        )
+
+    text = request.task.description
+    match = _ARTIFACT_ID_PATTERN.search(text)
+    if match:
+        artifact_id = match.group(1)
+    else:
+        lookup = request.tools.invoke(
+            "artifact_production", {"operation": "find_latest", "content": "document"}
+        )
+        if not lookup.ok:
+            return TaskResult.failure(
+                request.task, request.own_name,
+                "I don't have an existing handout to revise yet - create one "
+                "first, or reference it explicitly with 'artifact <id>'.",
+            )
+        artifact_id = lookup.output.strip()
+
+    current = request.tools.invoke("artifact_production", {"operation": "get", "content": artifact_id})
+    if not current.ok:
+        return TaskResult.failure(
+            request.task, request.own_name, f"I couldn't find that handout to revise: {current.error}",
+        )
+
+    new_content = _parse_document_content(text)
+    if new_content is None:
+        if request.converse is None:
+            return TaskResult.failure(
+                request.task, request.own_name,
+                "I don't have a way to compose the revision yet - no language "
+                "model is configured for me right now. Give me the complete "
+                f"updated content already structured instead:\n{_DOCUMENT_FORMAT_INSTRUCTION}",
+            )
+        notes = (
+            f"The handout's current content is:\n{current.output}\n\n"
+            "The person asked for a revision. Apply their requested change and "
+            "respond with the COMPLETE updated document. "
+            + _DOCUMENT_FORMAT_INSTRUCTION,
+        ) + _recent_conversation_notes(request)
+        decision = request.converse(request.task, notes)
+        if not decision.is_decided:
+            return TaskResult.failure(
+                request.task, request.own_name,
+                f"I couldn't compose that revision ({decision.reason or 'no usable answer'}).",
+            )
+        new_content = _parse_document_content(decision.reason)
+        if new_content is None:
+            return TaskResult.failure(
+                request.task, request.own_name,
+                "I couldn't organize that revision into a real, structured handout.",
+            )
+
+    outcome = request.tools.invoke(
+        "artifact_production",
+        {"operation": "revise_document", "content": f"{artifact_id}\n{new_content.to_json()}"},
+    )
+    if not outcome.ok:
+        return TaskResult.failure(
+            request.task, request.own_name, f"I composed the revision but couldn't save it: {outcome.error}",
+        )
+
+    return TaskResult.success(
+        request.task, request.own_name, outcome.output,
+        payload={"handled_by": "revise_artifact"},
+    )
+
+
+REVISE_ARTIFACT = ManagerCapability(
+    name="revise_artifact",
+    capabilities=frozenset({"handout", "artifact"}),
+    handle=revise_artifact,
+    description=(
+        "Revises an existing document artifact under the same identity, "
+        "producing a new real version rather than a disconnected new file."
+    ),
+    claims=revise_artifact_intent,
+    scoreable=False,
+)
+
+
+# ---------------------------------------------------------------------------
 # Creative media production - real narration, image and video assets,
 # one operation per call, dynamically sequenced by the objective loop
 # rather than by any workflow fixed here.
@@ -4287,6 +4581,8 @@ MANAGER_CAPABILITIES: dict[str, ManagerCapability] = {
     LIVE_INFORMATION.name: LIVE_INFORMATION,
     IMAGE_ANALYSIS.name: IMAGE_ANALYSIS,
     GENERATE_DOCUMENT.name: GENERATE_DOCUMENT,
+    CREATE_ARTIFACT.name: CREATE_ARTIFACT,
+    REVISE_ARTIFACT.name: REVISE_ARTIFACT,
     MEDIA_PRODUCTION.name: MEDIA_PRODUCTION,
     CLIP_VIDEO.name: CLIP_VIDEO,
     RECORD_THIS.name: RECORD_THIS,

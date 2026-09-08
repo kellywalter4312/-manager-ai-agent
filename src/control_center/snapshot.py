@@ -267,6 +267,32 @@ def _speech(channel: Any) -> dict[str, Any]:
     }
 
 
+def _artifacts(store: Any) -> list[dict[str, Any]]:
+    """Every real, persisted artifact's latest version, newest first -
+    read from the identical, authoritative ArtifactStore
+    ArtifactProductionTool itself writes through (see
+    ``src/composition.py``'s own ``Runtime.artifacts`` docstring), never
+    a second, UI-only copy. ``owner_agent`` lets any interface (one
+    agent's own private line, or a future specialist's) filter to its
+    own without this module drawing that line itself - the identical "report what
+    exists, decide nothing about presentation" boundary every other
+    function in this module already holds to.
+    """
+    return [
+        {
+            "artifact_id": artifact.artifact_id,
+            "type": artifact.type,
+            "owner_agent": artifact.owner_agent,
+            "version": artifact.latest.version,
+            "status": artifact.latest.status,
+            "title": artifact.latest.title,
+            "created_at": _moment(artifact.latest.created_at),
+            "renditions": dict(artifact.latest.renditions),
+        }
+        for artifact in sorted(store.all(), key=lambda a: a.latest.created_at, reverse=True)
+    ]
+
+
 def snapshot(
     centre: ControlCenter,
     *,
@@ -305,6 +331,10 @@ def snapshot(
         # above for the same reason - the provider's own choices, not
         # any one agent's fact.
         "environment_catalog": [p.to_dict() for p in centre.runtime.environment_provider.catalog()],
+        # Multimodal workspace/artifact checkpoint: every real, persisted
+        # artifact - the one authoritative record (see this module's own
+        # _artifacts docstring), never a fabricated or UI-only listing.
+        "artifacts": _artifacts(centre.runtime.artifacts),
         "conversation": _conversation(conversation),
         "speech": _speech(channel),
         "system": {

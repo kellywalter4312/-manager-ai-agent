@@ -87,6 +87,7 @@ _PROVIDER_CATEGORIES: tuple[str, ...] = (
     "live_info_provider",
     "celebration_provider",
     "calendar_event_provider",
+    "document_rendering_provider",
 )
 # Additive, no single "active" slot across the axis - Gmail today, any
 # future service tomorrow (see 52.27's own `connections` command, which

@@ -1160,6 +1160,7 @@
   // conversation stays exclusively the composer's.
   const MGMT_VERBS = [
     "status", "actions", "capabilities", "connections", "provider", "voice", "ecosystem", "tasks",
+    "artifacts",
   ];
 
   // The Control Center is an orrery: the orchestrator at the centre of the
@@ -1832,9 +1833,30 @@
             ((a.interface && a.interface.implemented) || []).map(f => `<span class="chip on">${esc(f)}</span>`).join("") +
             ((a.interface && a.interface.planned) || []).map(f => `<span class="chip off">${esc(f)}</span>`).join("")
             || "conversation"}</div></div>
+        <div class="pair wide"><div class="k">Artifacts</div>
+          <div class="v">${artifactsOf(a.name)}</div></div>
       </div>
     </div>`;
   };
+
+  // Workspace/artifact checkpoint: the real, persisted
+  // artifacts this agent has produced - read straight off S.artifacts
+  // (the same /snapshot.json field every restart/poll re-reads from the
+  // one authoritative ArtifactStore), never invented here. A document
+  // with a real "pdf" rendition links straight to the real file
+  // /artifact/<id>.pdf actually serves; one without still shows its
+  // real structured content exists, honestly, with no link to fabricate.
+  function artifactsOf(agentName){
+    const mine = (S.artifacts || []).filter(x => x.owner_agent === agentName);
+    if(!mine.length) return "none yet";
+    return mine.map(x => {
+      const pdf = x.renditions && x.renditions.pdf;
+      const label = `${x.title} (v${x.version}, ${x.status})`;
+      return pdf
+        ? `<a class="chip on" href="artifact/${esc(x.artifact_id)}.pdf" target="_blank" rel="noopener">${esc(label)}</a>`
+        : `<span class="chip off">${esc(label)}</span>`;
+    }).join("");
+  }
 
   // The surfaces, in two tiers. The first two are the product: one agent
   // in private, and the room where several are present at once. Everything

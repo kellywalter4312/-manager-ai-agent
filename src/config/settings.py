@@ -295,6 +295,28 @@ class Settings:
     # directory.
     documents_dir: str = "data/documents/generated"
 
+    # Multimodal workspace/artifact checkpoint: where the one
+    # authoritative ArtifactStore (src/services/artifacts/store.py)
+    # keeps its index and every artifact's real content/rendition
+    # files - a genuinely separate concern from documents_dir above,
+    # which is generate_document's own flat, disposable, non-versioned
+    # text notes. An artifact has a stable identity and a real version
+    # chain; a document_generation file does not.
+    artifacts_dir: str = "data/artifacts"
+
+    # Multimodal workspace/artifact checkpoint: which real engine
+    # ArtifactProductionTool renders a document artifact's PDF export
+    # with, selected by name exactly as `media` above already is.
+    #   null        no engine, artifact creation still succeeds (the
+    #               structured content is the artifact's real,
+    #               canonical form) but no "pdf" rendition is produced
+    #   simple_pdf  a real, local, deterministic renderer with zero
+    #               external risk - see src/providers/documents/pdf.py
+    #               for why this is the default rather than an opt-in
+    #               "null", the same reasoning celebration_provider's
+    #               own default already follows
+    document_rendering: str = "simple_pdf"
+
     # Paths to credential files - NOT the credentials themselves. Both live
     # under data/, which is gitignored. Storing a path here means a secret
     # never enters configuration, logs, or a crash report.
@@ -364,6 +386,11 @@ class Settings:
         if not whisper_model:
             raise ValueError("Settings.whisper_model must not be empty")
         object.__setattr__(self, "whisper_model", whisper_model)
+
+        document_rendering = self.document_rendering.strip().lower()
+        if not document_rendering:
+            raise ValueError("Settings.document_rendering must not be empty")
+        object.__setattr__(self, "document_rendering", document_rendering)
 
         communication_provider = self.communication_provider.strip().lower()
         if not communication_provider:

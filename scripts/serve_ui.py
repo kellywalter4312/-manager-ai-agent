@@ -247,7 +247,38 @@ def route(path: str, system: LiveSystem) -> tuple[int, bytes, str]:
     if path in VENDOR_ASSETS:
         filename, content_type = VENDOR_ASSETS[path]
         return 200, (VENDOR_DIR / filename).read_bytes(), content_type
+    if path.startswith("/artifact/"):
+        return _route_artifact_file(path, system)
     return 404, b"not found", "text/plain; charset=utf-8"
+
+
+def _route_artifact_file(path: str, system: LiveSystem) -> tuple[int, bytes, str]:
+    """Serve one real, already-rendered artifact file - ``/artifact/<id>.pdf``
+    for the latest version's PDF rendition. Reads the identical,
+    authoritative ArtifactStore ``/snapshot.json`` itself reads
+    (``system.runtime.artifacts``) - never a second lookup, and never a
+    fabricated response: a missing artifact or a version with no "pdf"
+    rendition (no rendering engine configured) is an honest 404, not an
+    empty or placeholder file.
+    """
+    remainder = path[len("/artifact/") :]
+    if not remainder.endswith(".pdf"):
+        return 404, b"not found", "text/plain; charset=utf-8"
+    artifact_id = remainder[: -len(".pdf")]
+
+    artifact = system.runtime.artifacts.get(artifact_id)
+    if artifact is None:
+        return 404, b"no artifact with that id", "text/plain; charset=utf-8"
+
+    pdf_path = artifact.latest.renditions.get("pdf")
+    if not pdf_path:
+        return 404, b"this artifact has no PDF rendition", "text/plain; charset=utf-8"
+
+    file_path = Path(pdf_path)
+    if not file_path.is_file():
+        return 404, b"the rendered file is missing on disk", "text/plain; charset=utf-8"
+
+    return 200, file_path.read_bytes(), "application/pdf"
 
 
 def route_message(
@@ -546,7 +577,7 @@ MANAGEMENT_VERBS = frozenset(
     {
         "status", "history", "actions", "unresolved", "avatar", "environment",
         "profile", "voice", "review", "capabilities", "provider", "connections",
-        "ecosystem", "tasks",
+        "ecosystem", "tasks", "artifacts",
     }
 )
 

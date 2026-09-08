@@ -214,6 +214,11 @@ class TestHandlersAreSelectedThroughTheRegistry:
             # "that's wrong, ...", "correction: ...", "update what you
             # remembered about X to Y" - never inferred from similarity.
             "correct_memory",
+            # Multimodal workspace/artifact checkpoint: a real, persistent,
+            # versioned document artifact ("handout") - deterministic given
+            # already-structured content, Brain-assisted when organizing an
+            # objective into that structure instead.
+            "create_artifact",
             "create_task",
             "current_datetime",
             "forget",
@@ -244,6 +249,10 @@ class TestHandlersAreSelectedThroughTheRegistry:
             "personal_recurring_events",
             "recall_memory",
             "record_this",
+            # Multimodal workspace/artifact checkpoint: revises an
+            # existing document artifact under the same identity, a new
+            # real version rather than a disconnected new file.
+            "revise_artifact",
             "roster_report",
             "small_talk",
             "temporal_derivation",

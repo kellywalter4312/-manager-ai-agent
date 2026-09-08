@@ -427,11 +427,17 @@ class TestControlCenterCapabilityMatrix:
         # Avatar/Environment/Memory are genuinely, honestly READY even
         # with no Brain and no vendor configured at all - each is a
         # real, deterministic, no-credential, no-network capability
-        # (the "default" providers), never a false positive.
-        for row in ("Avatar", "Environment", "Memory"):
+        # (the "default" providers), never a false positive. Multimodal
+        # workspace/artifact checkpoint: Artifact Workspace is genuinely
+        # READY too (Half-Brain safe given already-structured content -
+        # readiness reflects the tool grant alone, not brain.is_full_brain),
+        # and so is Document Rendering (PDF) - "simple_pdf" is real,
+        # local, zero-credential, and the default, the same reasoning
+        # Avatar/Environment's own "default" providers already establish.
+        for row in ("Avatar", "Environment", "Memory", "Artifact Workspace (handouts)", "Document Rendering (PDF)"):
             line = next(l for l in report.splitlines() if row in l)
             assert "READY" in line, line
-        assert report.count("READY") == 3
+        assert report.count("READY") == 5
 
     def test_image_analysis_becomes_ready_only_with_a_real_vision_capable_provider(self):
         runtime, manager, channel, conversation = real_system(

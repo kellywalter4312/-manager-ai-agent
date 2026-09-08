@@ -64,6 +64,7 @@ from src.agents.tools.knowledge import KnowledgeLookupTool  # noqa: E402
 from src.agents.tools.live_information import LiveInformationTool  # noqa: E402
 from src.agents.tools.web_search import WebSearchTool  # noqa: E402
 from src.agents.tools.document_generation import DocumentGenerationTool  # noqa: E402
+from src.agents.tools.artifact_production import ArtifactProductionTool  # noqa: E402
 from src.agents.tools.media_production import MediaProductionTool  # noqa: E402
 from src.agents.tools.toolset import ToolSet  # noqa: E402
 from src.channels.channel import Channel  # noqa: E402
@@ -165,6 +166,8 @@ HELP = """
                            recorded across restarts (see 'Memory' step
                            in a talk trail for when one is recorded)
   unresolved               personal facts Alfred knows only as uncertainty
+  artifacts                every real, persisted artifact (documents/handouts)
+  artifacts <id>           one artifact's full version history
   avatar                   every agent's current presence and avatar
   avatar <agent>           one agent's avatar, and what else it could be
   avatar <agent> <choice>  choose that agent's avatar - never a new agent
@@ -427,6 +430,22 @@ def build(settings: Settings):
             # settings.documents_dir unchanged when nothing was ever
             # evolved, so an unconfigured installation behaves identically.
             DocumentGenerationTool(output_dir=Path(config.get(TOOL_DOCUMENT_GENERATION, settings.documents_dir))),
+            # Multimodal workspace/artifact checkpoint: real, persistent,
+            # versioned document artifacts - genuinely different from
+            # DocumentGenerationTool above (one flat, disposable file, no
+            # identity, no version chain). Backed by runtime.artifacts
+            # (the same store the Control Center's own `artifacts`
+            # command reads - one authoritative record, never a second
+            # copy) and runtime.document_renderer (real PDF export by
+            # default; "null" only if MANAGER_DOCUMENT_RENDERING was
+            # deliberately set to it). owner_agent is this Manager's own
+            # declared name, never hardcoded - the identical name-driven
+            # ownership every other per-agent construction here already
+            # uses, so a future specialist's own instance of this exact
+            # class needs no code change, only its own name.
+            ArtifactProductionTool(
+                runtime.artifacts, runtime.document_renderer, owner_agent=runtime.identity.name,
+            ),
             # Files/Documents completion: real visual reasoning reaches
             # Alfred through the Brain's own analyze_image question
             # (bound below via ManagerSkills, exactly like converse) -
@@ -556,6 +575,18 @@ def render_capabilities(centre: "ControlCenter") -> str:
         "Document Generation", ready=brain.is_full_brain and permits("document_generation"),
         detail=f"document_generation tool={'granted' if permits('document_generation') else 'not granted'}, brain={brain.mode.label}",
     ))
+    # Multimodal workspace/artifact checkpoint: a real, persistent,
+    # versioned artifact - genuinely READY with no Brain at all when
+    # given already-structured content (Half-Brain safe), so this row's
+    # readiness reflects the tool grant alone, never brain.is_full_brain.
+    lines.append(_capability_row(
+        "Artifact Workspace (handouts)", ready=permits("artifact_production"),
+        detail=(
+            f"artifact_production tool={'granted' if permits('artifact_production') else 'not granted'}, "
+            f"{len(runtime.artifacts.all())} artifact(s) persisted, "
+            f"pdf export={runtime.document_renderer.name}"
+        ),
+    ))
 
     # Whole-System Reality Audit: the matrix above (Phase 3's own scope)
     # widened to the rest of the real system, per this audit's own
@@ -590,6 +621,16 @@ def render_capabilities(centre: "ControlCenter") -> str:
             "no transcription provider configured - clip_video can only reason over "
             "explicit timestamps or a supplied transcript; see 'provider "
             "video_understanding_provider'"
+        ),
+    ))
+    lines.append(_capability_row(
+        "Document Rendering (PDF)", ready=runtime.document_renderer.name != "null",
+        detail=(
+            f"engine={runtime.document_renderer.name}"
+            if runtime.document_renderer.name != "null" else
+            "no rendering engine configured - artifacts still persist their real "
+            "structured content, with no PDF rendition; see 'provider "
+            "document_rendering_provider'"
         ),
     ))
     lines.append(_capability_row(
@@ -1577,6 +1618,49 @@ def run_command(
         lines.extend(f"  {describe_task(record)}" for record in records)
         if not include_complete:
             lines.append(f"  (type 'tasks {view.name} all' to include completed tasks)")
+        return "\n".join(lines)
+
+    if verb == "artifacts":
+        # Multimodal workspace/artifact checkpoint: read-only visibility
+        # over the identical, authoritative ArtifactStore
+        # ArtifactProductionTool itself writes through
+        # (centre.runtime.artifacts) - never a second copy, never a
+        # fabricated listing. The real write surface is conversational
+        # ("make me a handout", "revise the handout", reached through
+        # 'talk'), the same "administrative configuration vs. ordinary
+        # personal content" boundary the 'tasks' command above already
+        # draws for the identical reason.
+        artifact_id = rest.strip()
+        artifacts = centre.runtime.artifacts.all()
+
+        if not artifact_id:
+            if not artifacts:
+                return "no artifacts persisted yet"
+            lines = ["ARTIFACTS"]
+            for artifact in sorted(artifacts, key=lambda a: a.latest.created_at, reverse=True):
+                latest = artifact.latest
+                renditions = ", ".join(sorted(latest.renditions)) or "none"
+                lines.append(
+                    f"  {artifact.artifact_id} [{artifact.type}] v{latest.version} "
+                    f"owner={artifact.owner_agent} status={latest.status} "
+                    f"title={latest.title!r} renditions={renditions}"
+                )
+            lines.append("  (type 'artifacts <id>' for one artifact's full version history)")
+            return "\n".join(lines)
+
+        artifact = centre.runtime.artifacts.get(artifact_id)
+        if artifact is None:
+            return f"no artifact found with id '{artifact_id}'"
+        lines = [
+            f"ARTIFACT {artifact.artifact_id} [{artifact.type}] owner={artifact.owner_agent}"
+        ]
+        for version in artifact.versions:
+            renditions = ", ".join(f"{fmt}={path}" for fmt, path in sorted(version.renditions.items())) or "none"
+            lines.append(
+                f"  v{version.version} status={version.status} title={version.title!r} "
+                f"created={version.created_at.isoformat()} content={version.content_path} "
+                f"renditions={renditions}"
+            )
         return "\n".join(lines)
 
     if verb == "avatar":
