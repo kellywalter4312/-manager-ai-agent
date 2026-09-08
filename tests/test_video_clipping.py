@@ -235,15 +235,22 @@ class TestMediaProductionToolClipOperation:
 
 
 def real_manager(*, asset_dir: Path, **overrides):
-    """The real production build() path, with media_asset_dir isolated
-    to a real, disposable tmp_path - never the real data/media/assets
-    directory tests/conftest.py's own guard() already refuses writes
-    into."""
+    """The real production build() path, with media_asset_dir *and*
+    artifacts_dir isolated to a real, disposable tmp_path - never the
+    real data/media/assets or data/artifacts directories
+    tests/conftest.py's own guard() already refuses writes into.
+    Ecosystem artifact/workspace checkpoint: MediaProductionTool now
+    also registers a real Artifact for every real production, so
+    artifacts_dir needs the identical isolation media_asset_dir already
+    had."""
     import scripts.control_center as cc
     from src.config.settings import Settings
 
     runtime, manager, channel, conversation = cc.build(
-        Settings.from_env(env={}, memory="ephemeral", media_asset_dir=str(asset_dir), **overrides)
+        Settings.from_env(
+            env={}, memory="ephemeral", media_asset_dir=str(asset_dir),
+            artifacts_dir=str(asset_dir.parent / "artifacts"), **overrides,
+        )
     )
     return runtime, manager, channel, conversation
 

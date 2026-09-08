@@ -403,14 +403,18 @@ class TestArtifactProductionTool:
 
     def test_create_document_with_null_renderer_still_creates_real_content(self, tmp_path):
         """Rendering failure never blocks the artifact's own real,
-        canonical content from being created."""
+        canonical content from being created - and, since a document
+        always gets a real plain-text rendition regardless of whether a
+        PDF engine is configured, it stays genuinely deliverable even
+        with none."""
         tool, store = self._tool(tmp_path, renderer=NullDocumentRenderer())
         output = tool.run(operation="create_document", content=_doc().to_json())
         assert "Artifact created" in output
-        assert "no rendition produced" in output
+        assert "txt=" in output
         artifact = store.all()[0]
         assert artifact.latest.status == "ready"
-        assert artifact.latest.renditions == {}
+        assert set(artifact.latest.renditions) == {"txt"}
+        assert "A Real Test Document" in Path(artifact.latest.renditions["txt"]).read_text(encoding="utf-8")
 
     def test_create_document_rejects_malformed_content(self, tmp_path):
         tool, _ = self._tool(tmp_path)
@@ -513,7 +517,9 @@ class TestArtifactProductionTool:
         tool_b = ArtifactProductionTool(store, NullDocumentRenderer(), NullImageProvider(), owner_agent="Alfred")
         new_doc = DocumentContent(title="No PDF This Time", sections=(DocumentSection("X", "Y"),))
         tool_b.run(operation="revise_document", content=f"{artifact_id}\n{new_doc.to_json()}")
-        assert store.get(artifact_id).latest.renditions == {}
+        # No PDF engine this time, but the real plain-text rendition
+        # always exists regardless - the document stays deliverable.
+        assert set(store.get(artifact_id).latest.renditions) == {"txt"}
 
 
 # ---------------------------------------------------------------------------
@@ -649,11 +655,12 @@ class TestArtifactProductionToolImages:
         types = {a.type for a in store.all()}
         assert types == {"document", "image"}
         # The document still has no PDF (NullDocumentRenderer in this
-        # tool's own construction) while the image genuinely rendered -
+        # tool's own construction, though it still has its own always-
+        # real plain-text rendition) while the image genuinely rendered -
         # each provider's own real/null state is independent of the other.
         doc_artifact = next(a for a in store.all() if a.type == "document")
         image_artifact = next(a for a in store.all() if a.type == "image")
-        assert doc_artifact.latest.renditions == {}
+        assert set(doc_artifact.latest.renditions) == {"txt"}
         assert "png" in image_artifact.latest.renditions
 
 
@@ -1248,10 +1255,15 @@ class TestFullSystemIntegration:
         assert "delivery=download" in detail
 
     def test_control_center_shows_no_delivery_when_no_rendition_exists(self, tmp_path):
+        """A document always gets a real plain-text rendition regardless
+        of document_rendering, so it can no longer demonstrate "nothing
+        deliverable yet" - an image/diagram with no illustrator
+        configured genuinely can, since image generation has no
+        deterministic local fallback the way document text export does."""
         import scripts.control_center as cc
 
-        runtime, manager, channel, conversation = _built(tmp_path, document_rendering="null")
-        manager.handle_task(Task(description=HANDOUT_TEXT))
+        runtime, manager, channel, conversation = _built(tmp_path, media="null")
+        manager.handle_task(Task(description="make a diagram of a real test subject for this scenario"))
         centre = cc.ControlCenter(runtime, manager)
 
         listing = cc.run_command(centre, "artifacts", 100, channel, conversation)
@@ -1263,7 +1275,7 @@ class TestFullSystemIntegration:
         runtime, manager, channel, conversation = _built(tmp_path)
         centre = cc.ControlCenter(runtime, manager)
         out = cc.run_command(centre, "capabilities", 100, channel, conversation)
-        assert "Artifact Workspace (documents, images/diagrams)" in out
+        assert "Artifact Workspace (documents, images/diagrams, audio, video)" in out
         assert "Document Rendering (PDF)" in out
 
     def test_snapshot_exposes_the_same_authoritative_artifacts(self, tmp_path):
@@ -1284,12 +1296,59 @@ class TestFullSystemIntegration:
         assert entry["delivery"] == ["download"]
         assert entry["artifact_id"] == runtime.artifacts.all()[0].artifact_id
 
-    def test_snapshot_shows_no_delivery_when_no_rendition_exists(self, tmp_path):
+    def test_a_document_always_has_a_real_text_rendition_alongside_pdf(self, tmp_path):
+        """A format is a rendition, not the definition of the artifact -
+        proven here with a real, working second rendition (plain text),
+        always present regardless of whether a PDF engine is
+        configured, so a document stays genuinely deliverable either
+        way."""
         import scripts.control_center as cc
         from src.control_center.snapshot import snapshot
 
-        runtime, manager, channel, conversation = _built(tmp_path, document_rendering="null")
+        runtime, manager, channel, conversation = _built(tmp_path)
         manager.handle_task(Task(description=HANDOUT_TEXT))
+        centre = cc.ControlCenter(runtime, manager)
+
+        data = snapshot(centre, conversation=conversation, channel=channel)
+        entry = data["artifacts"][0]
+        assert set(entry["renditions"]) == {"pdf", "txt"}
+        assert entry["primary_rendition"] == "pdf"
+
+        txt_path = Path(entry["renditions"]["txt"])
+        assert txt_path.is_file()
+        assert "The History of Volcanoes" in txt_path.read_text(encoding="utf-8")
+
+    def test_related_artifact_ids_are_exposed_and_empty_for_a_standalone_document(self, tmp_path):
+        import scripts.control_center as cc
+        from src.control_center.snapshot import snapshot
+
+        runtime, manager, channel, conversation = _built(tmp_path)
+        manager.handle_task(Task(description=HANDOUT_TEXT))
+        centre = cc.ControlCenter(runtime, manager)
+
+        data = snapshot(centre, conversation=conversation, channel=channel)
+        assert data["artifacts"][0]["related_artifact_ids"] == []
+
+    def test_control_center_detail_shows_derived_from(self, tmp_path):
+        import scripts.control_center as cc
+
+        runtime, manager, channel, conversation = _built(tmp_path)
+        manager.handle_task(Task(description=HANDOUT_TEXT))
+        centre = cc.ControlCenter(runtime, manager)
+        artifact_id = runtime.artifacts.all()[0].artifact_id
+
+        detail = cc.run_command(centre, f"artifacts {artifact_id}", 100, channel, conversation)
+        assert "derived_from=none" in detail
+
+    def test_snapshot_shows_no_delivery_when_no_rendition_exists(self, tmp_path):
+        """See test_control_center_shows_no_delivery_when_no_rendition_exists's
+        own docstring for why an image, not a document, demonstrates
+        this now."""
+        import scripts.control_center as cc
+        from src.control_center.snapshot import snapshot
+
+        runtime, manager, channel, conversation = _built(tmp_path, media="null")
+        manager.handle_task(Task(description="make a diagram of a real test subject for this scenario"))
         centre = cc.ControlCenter(runtime, manager)
 
         data = snapshot(centre, conversation=conversation, channel=channel)
@@ -1705,7 +1764,10 @@ class TestUIRendersTheRealArtifact:
     def test_an_artifact_with_no_delivery_method_renders_no_link(self, tmp_path):
         """The frontend must show the backend's own real "nothing to
         deliver yet" state honestly - no download link, no fabricated
-        href pointing at a file that does not exist."""
+        href pointing at a file that does not exist. A document always
+        gets a real text rendition regardless of document_rendering, so
+        an image/diagram with no illustrator configured is what
+        genuinely demonstrates "nothing deliverable yet" now."""
         import re
         import subprocess
 
@@ -1719,11 +1781,10 @@ class TestUIRendersTheRealArtifact:
 
         runtime, manager, channel, conversation = cc.build(
             Settings.from_env(
-                env={}, memory="ephemeral", artifacts_dir=str(tmp_path / "artifacts"),
-                document_rendering="null",
+                env={}, memory="ephemeral", artifacts_dir=str(tmp_path / "artifacts"), media="null",
             )
         )
-        manager.handle_task(Task(description=HANDOUT_TEXT))
+        manager.handle_task(Task(description="make a diagram of a real test subject for no-delivery rendering"))
         artifact_id = runtime.artifacts.all()[0].artifact_id
         assert runtime.artifacts.get(artifact_id).latest.renditions == {}
         centre = cc.ControlCenter(runtime, manager)
@@ -1749,7 +1810,6 @@ class TestUIRendersTheRealArtifact:
 
         rendered = out["views"]["boot"]
         assert f"artifact/{artifact_id}." not in rendered
-        assert "The History of Volcanoes" in rendered
 
 
 # A trimmed copy of the real vm-based harness

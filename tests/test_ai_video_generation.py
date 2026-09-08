@@ -901,7 +901,9 @@ class TestNoHardcodedVideoWorkflow:
                     return Completion(text='{"status":"complete","final_answer":"done via local illustration instead"}', provider="test")
                 return Completion(text="(a natural reply)", provider="test")
 
-        runtime, manager, channel, conversation = real_system(media="local", media_asset_dir=str(tmp_path))
+        runtime, manager, channel, conversation = real_system(
+            media="local", media_asset_dir=str(tmp_path), artifacts_dir=str(tmp_path / "artifacts")
+        )
         brain = LLMManagerBrain(Provider(), personality=runtime.identity.personality)
         manager.brain = brain
         manager.own_skills._converse = brain.converse

@@ -257,7 +257,10 @@ def route(path: str, system: LiveSystem) -> tuple[int, bytes, str]:
 # code change per artifact type: a future rendition extension this
 # dict does not yet name still serves, just as an ordinary octet
 # stream, rather than being refused.
-_RENDITION_CONTENT_TYPES = {"pdf": "application/pdf", "png": "image/png", "jpg": "image/jpeg"}
+_RENDITION_CONTENT_TYPES = {
+    "pdf": "application/pdf", "png": "image/png", "jpg": "image/jpeg",
+    "mp4": "video/mp4", "wav": "audio/wav", "txt": "text/plain; charset=utf-8",
+}
 
 
 def _route_artifact_file(path: str, system: LiveSystem) -> tuple[int, bytes, str]:

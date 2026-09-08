@@ -65,12 +65,20 @@ class ArtifactVersion:
     renditions: Mapping[str, str] = field(default_factory=dict)
     metadata: Mapping[str, str] = field(default_factory=dict)
     error: str = ""
+    # The real, minimal composition/derivation seam: which other real
+    # artifacts (by id) this version was produced from - a clip's own
+    # source video, say. Never a claim this store interprets or acts
+    # on; a real relationship recorded by whichever caller actually knew
+    # it (see src/services/artifacts/registration.py), honestly empty
+    # when a version was not derived from anything already tracked.
+    related_artifact_ids: "tuple[str, ...]" = ()
 
     def __post_init__(self) -> None:
         if self.version < 1:
             raise ArtifactError("an ArtifactVersion's version must be at least 1")
         if self.status not in ("ready", "failed"):
             raise ArtifactError(f"unknown artifact status {self.status!r}")
+        object.__setattr__(self, "related_artifact_ids", tuple(self.related_artifact_ids))
 
     def to_dict(self) -> dict:
         return {
@@ -82,6 +90,7 @@ class ArtifactVersion:
             "renditions": dict(self.renditions),
             "metadata": dict(self.metadata),
             "error": self.error,
+            "related_artifact_ids": list(self.related_artifact_ids),
         }
 
     @classmethod
@@ -95,6 +104,7 @@ class ArtifactVersion:
             renditions=dict(data.get("renditions") or {}),
             metadata=dict(data.get("metadata") or {}),
             error=str(data.get("error", "")),
+            related_artifact_ids=tuple(data.get("related_artifact_ids") or ()),
         )
 
 
@@ -179,6 +189,7 @@ class ArtifactStore:
         metadata: Mapping[str, str] = (),
         status: str = "ready",
         error: str = "",
+        related_artifact_ids: "tuple[str, ...]" = (),
     ) -> Artifact:
         """Register a brand-new artifact at version 1. ``artifact_id`` is
         caller-supplied, never invented here - the identical "names come
@@ -203,6 +214,7 @@ class ArtifactStore:
             renditions=dict(renditions),
             metadata=dict(metadata),
             error=error,
+            related_artifact_ids=related_artifact_ids,
         )
         artifact = Artifact(
             artifact_id=artifact_id, type=type.strip(), owner_agent=owner_agent, versions=(version,)
@@ -221,6 +233,7 @@ class ArtifactStore:
         metadata: Mapping[str, str] = (),
         status: str = "ready",
         error: str = "",
+        related_artifact_ids: "tuple[str, ...]" = (),
     ) -> Artifact:
         """Add a new version to an artifact that already exists - the
         same identity, one version further along. Raises ``ArtifactError``
@@ -240,6 +253,7 @@ class ArtifactStore:
             renditions=dict(renditions),
             metadata=dict(metadata),
             error=error,
+            related_artifact_ids=related_artifact_ids,
         )
         revised = Artifact(
             artifact_id=existing.artifact_id,
@@ -250,6 +264,21 @@ class ArtifactStore:
         self._artifacts[existing.artifact_id] = revised
         self._save()
         return revised
+
+    def find_by_rendition_path(self, path: str) -> "Artifact | None":
+        """The artifact whose latest version's own rendition is the
+        real file at ``path`` - a real, if simple, reverse lookup used
+        to link a derived artifact (a clip, say) back to the tracked
+        source it actually came from, when that source happens to be a
+        tracked artifact itself. None when the path names no tracked
+        rendition - honestly: not every source a capability works from
+        is itself an artifact (a raw upload never registered as one,
+        say), and this never guesses otherwise."""
+        normalized = str(path)
+        for artifact in self._artifacts.values():
+            if normalized in artifact.latest.renditions.values():
+                return artifact
+        return None
 
     def get(self, artifact_id: str) -> "Artifact | None":
         return self._artifacts.get(str(artifact_id).strip())

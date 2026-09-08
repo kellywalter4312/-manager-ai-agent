@@ -1851,6 +1851,23 @@
   // renders as a real inline thumbnail, the actual served file, never a
   // placeholder icon; one with no rendition yet still shows its real
   // content exists, honestly, with no link to fabricate.
+  // One small, extensible mapping from artifact type -> a real, inline
+  // preview of it - the one workspace/presentation architecture every
+  // artifact type shares, never a separate interface per type. A type
+  // this does not yet know how to preview renders no preview at all
+  // (honestly - never a fabricated placeholder); the chip/link above it
+  // still lets it be opened/downloaded either way. A future type (code,
+  // say) adds one more case here, never a second presentation surface.
+  function artifactPreview(type, href, label){
+    if(type === "image")
+      return `<img src="${href}" alt="${esc(label)}" style="display:block;max-width:140px;max-height:100px;border-radius:6px;margin-top:4px">`;
+    if(type === "video")
+      return `<video src="${href}" controls preload="metadata" style="display:block;max-width:220px;max-height:140px;border-radius:6px;margin-top:4px"></video>`;
+    if(type === "audio")
+      return `<audio src="${href}" controls preload="metadata" style="display:block;margin-top:4px"></audio>`;
+    return "";
+  }
+
   function artifactsOf(agentName){
     const mine = (S.artifacts || []).filter(x => x.owner_agent === agentName);
     if(!mine.length) return "none yet";
@@ -1865,13 +1882,21 @@
       // its own guess at the identical question.
       const canDownload = Array.isArray(x.delivery) && x.delivery.includes("download");
       if(!canDownload || !formats.length) return `<span class="chip off">${esc(label)}</span>`;
-      const format = formats[0];
+      // Which rendition to link/preview when more than one exists is
+      // also the backend's own real, fixed preference
+      // (src/control_center/snapshot.py's own _preferred_rendition_format) -
+      // never this file re-guessing from whatever order a dict's own
+      // keys happen to iterate in.
+      const format = x.primary_rendition || formats[0];
       const href = `artifact/${esc(x.artifact_id)}.${esc(format)}`;
-      const preview = x.type === "image"
-        ? `<img src="${href}" alt="${esc(label)}" style="display:block;max-width:140px;max-height:100px;border-radius:6px;margin-top:4px">`
-        : "";
-      return `<a class="chip on" href="${href}" target="_blank" rel="noopener" title="Download"
-        style="display:inline-block">${esc(label)} [${esc(format)}]${preview}</a>`;
+      // The player/image preview sits OUTSIDE the <a> (never nested
+      // inside an anchor) so its own real controls - play, seek,
+      // volume - work as themselves rather than also triggering
+      // navigation, while the chip alongside it remains the real,
+      // separate way to open/download the file.
+      const link = `<a class="chip on" href="${href}" target="_blank" rel="noopener" title="Download">${esc(label)} [${esc(format)}]</a>`;
+      const preview = artifactPreview(x.type, href, label);
+      return `<div style="display:inline-block;vertical-align:top;margin:2px 6px 2px 0">${link}${preview}</div>`;
     }).join("");
   }
 

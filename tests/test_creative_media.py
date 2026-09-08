@@ -395,7 +395,9 @@ class TestProductionWiring:
         assert "no narration engine is configured" in turn.outcome.lower()
 
     def test_the_local_backend_is_genuinely_wired_and_works_through_exchange(self, tmp_path):
-        runtime, manager, channel, conversation = real_system(media="local", media_asset_dir=str(tmp_path))
+        runtime, manager, channel, conversation = real_system(
+            media="local", media_asset_dir=str(tmp_path), artifacts_dir=str(tmp_path / "artifacts")
+        )
         # Video-clipping checkpoint: "local" now also wires a real
         # FFmpegVideoClipper (see MediaTools.clipper's own docstring for
         # why clipping needs no vendor/credential axis of its own).
@@ -414,7 +416,9 @@ class TestProductionWiring:
     def test_changing_the_llm_provider_never_touches_the_media_backend(self, tmp_path):
         """Independence, Section 6: Alfred's LLM provider and the media
         stack are two entirely separate axes of configuration."""
-        runtime, manager, channel, conversation = real_system(media="local", media_asset_dir=str(tmp_path))
+        runtime, manager, channel, conversation = real_system(
+            media="local", media_asset_dir=str(tmp_path), artifacts_dir=str(tmp_path / "artifacts")
+        )
         original_media = runtime.media
         for label in ("vendor-a", "vendor-b"):
             manager.brain = LLMManagerBrain(_FakeConverseProvider(label), personality=runtime.identity.personality)
@@ -450,7 +454,9 @@ class TestDynamicCreativeMediaObjective:
         real file paths it was never told in advance) exactly as it
         already does for every other kind of objective this project has
         proven general."""
-        runtime, manager, channel, conversation = real_system(media="local", media_asset_dir=str(tmp_path))
+        runtime, manager, channel, conversation = real_system(
+            media="local", media_asset_dir=str(tmp_path), artifacts_dir=str(tmp_path / "artifacts")
+        )
 
         class Provider(LLMProvider):
             def __init__(self):
@@ -523,7 +529,9 @@ class TestDynamicCreativeMediaObjective:
         """Section 14's own requirement, reproduced with a second,
         genuinely unrelated topic through the identical mechanism -
         never a second, topic-specific code path."""
-        runtime, manager, channel, conversation = real_system(media="local", media_asset_dir=str(tmp_path))
+        runtime, manager, channel, conversation = real_system(
+            media="local", media_asset_dir=str(tmp_path), artifacts_dir=str(tmp_path / "artifacts")
+        )
 
         class Provider(LLMProvider):
             def __init__(self):

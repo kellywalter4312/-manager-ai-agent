@@ -245,7 +245,9 @@ class TestEnvironmentHttpRoute:
 
 class TestHalfBrainAcrossOldAndNewCapabilities:
     def test_deterministic_capabilities_still_work_with_no_brain_configured(self, tmp_path):
-        runtime, manager, channel, conversation = real_system(media="local", media_asset_dir=str(tmp_path))
+        runtime, manager, channel, conversation = real_system(
+            media="local", media_asset_dir=str(tmp_path), artifacts_dir=str(tmp_path / "artifacts")
+        )
         turn = exchange(channel, conversation, "my mom's birthday is March 24")
         assert turn.succeeded
 

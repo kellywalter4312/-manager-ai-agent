@@ -48,6 +48,9 @@ from src.providers.media.transcription import NullTranscriptionProvider, Transcr
 from src.providers.media.video import FFmpegVideoComposer, VideoComposer, VideoScene, extract_audio_wav
 from src.providers.media.video_clipping import ClipSpec, NullVideoClipper, VideoClipper
 from src.providers.media.video_generation import NullVideoGenerationProvider, VideoGenerationProvider
+from src.services.artifacts.models import AudioContent, ImageContent, VideoContent
+from src.services.artifacts.registration import register_new_artifact
+from src.services.artifacts.store import ArtifactStore
 
 # Where real, produced assets are written so a later step (in the same or
 # a later objective-loop iteration) can reference them by path - the
@@ -112,7 +115,23 @@ class MediaProductionTool(Tool):
     an AI video-generation provider, a video clipper and a
     speech-transcription provider behind the ordinary ``Tool`` contract -
     one tool, six operations, each a genuine, real production or
-    understanding step."""
+    understanding step.
+
+    **Multimodal workspace/artifact checkpoint.** When constructed with
+    both ``artifacts`` and ``owner_agent``, every real narration, image,
+    composed video, AI-generated video and video clip this tool actually
+    produces is also registered as a real, persistent, versioned
+    ``Artifact`` (``src/services/artifacts/store.py``) - the identical
+    store ``ArtifactProductionTool``'s own document/image artifacts
+    already live in, never a second one. Omitted (the default, for
+    every existing construction that predates this), this tool behaves
+    exactly as it always has: real files, written to ``asset_dir``,
+    with no artifact record - honest, additive, and never required.
+    Registration failure is never allowed to undo or hide a real
+    production that already succeeded; the tool's own real output
+    (evidence a later objective-loop step needs) is always returned
+    regardless of whether a record was also kept.
+    """
 
     def __init__(
         self,
@@ -125,6 +144,8 @@ class MediaProductionTool(Tool):
         *,
         voice_id: str = "am_eric",
         asset_dir: Path | None = None,
+        artifacts: "ArtifactStore | None" = None,
+        owner_agent: str = "",
     ) -> None:
         self._narrator = narrator
         self._illustrator = illustrator
@@ -142,6 +163,8 @@ class MediaProductionTool(Tool):
         self._transcriber = transcriber or NullTranscriptionProvider()
         self._voice_id = voice_id
         self._asset_dir = asset_dir or DEFAULT_ASSET_DIR
+        self._artifacts = artifacts
+        self._owner_agent = owner_agent
 
     @property
     def spec(self) -> ToolSpec:
@@ -201,12 +224,49 @@ class MediaProductionTool(Tool):
             path.write_bytes(data)
         return path
 
+    def _register(
+        self,
+        *,
+        type: str,
+        title: str,
+        content_bytes: bytes,
+        rendition_format: str,
+        rendition_path: str,
+        related_artifact_ids: "tuple[str, ...]" = (),
+    ) -> None:
+        """Record a real production as a real artifact, when this tool
+        was actually given somewhere to record one - see this class's
+        own docstring. ``rendition_path`` is the real file ``_write``
+        already produced under ``asset_dir`` - referenced here, never
+        copied again, so a real video/audio file is never duplicated on
+        disk merely to also have an artifact record. A real production
+        that already succeeded is never undone by this failing or being
+        skipped; this is always additive evidence, never the
+        operation's own success condition.
+        """
+        if self._artifacts is None or not self._owner_agent:
+            return
+        register_new_artifact(
+            self._artifacts,
+            type=type,
+            owner_agent=self._owner_agent,
+            title=title[:80] or type,
+            content_bytes=content_bytes,
+            rendition_format=rendition_format,
+            rendition_path=rendition_path,
+            related_artifact_ids=related_artifact_ids,
+        )
+
     def _narrate(self, text: str) -> str:
         text = text.strip()
         if not text:
             raise ValueError("narration text must not be empty")
         asset = self._narrator.synthesize(text, self._voice_id)
         path = self._write(".wav", asset.audio)
+        self._register(
+            type="audio", title=text, content_bytes=AudioContent(description=text).to_json().encode("utf-8"),
+            rendition_format="wav", rendition_path=path.as_posix(),
+        )
         return (
             f"Narration produced: {path.as_posix()} "
             f"({asset.duration_seconds:.2f}s, voice={asset.voice_id})"
@@ -218,6 +278,11 @@ class MediaProductionTool(Tool):
             raise ValueError("an image description must not be empty")
         asset = self._illustrator.generate(description)
         path = self._write(".png", asset.data)
+        self._register(
+            type="image", title=description,
+            content_bytes=ImageContent(prompt=description).to_json().encode("utf-8"),
+            rendition_format="png", rendition_path=path.as_posix(),
+        )
         return f"Image produced: {path.as_posix()} ({asset.width}x{asset.height})"
 
     def _generate_video(self, content: str) -> str:
@@ -240,6 +305,17 @@ class MediaProductionTool(Tool):
         asset = self._video_generator.generate(prompt, seed_image=seed_image)
         path = self._write(".mp4", asset.data)
         seeded = f", seeded from {seed_paths[0].as_posix()}" if seed_image is not None else ""
+        description = f"AI-generated (provider={asset.provider}, model={asset.model}): {prompt or 'image-to-video'}"
+        related = ()
+        if seed_image is not None and self._artifacts is not None:
+            seed_artifact = self._artifacts.find_by_rendition_path(seed_paths[0].as_posix())
+            if seed_artifact is not None:
+                related = (seed_artifact.artifact_id,)
+        self._register(
+            type="video", title=prompt or "AI-generated video",
+            content_bytes=VideoContent(description=description).to_json().encode("utf-8"),
+            rendition_format="mp4", rendition_path=path.as_posix(), related_artifact_ids=related,
+        )
         return (
             f"Video produced: {path.as_posix()} "
             f"({asset.duration_seconds:.2f}s, provider={asset.provider}, model={asset.model}{seeded})"
@@ -276,9 +352,30 @@ class MediaProductionTool(Tool):
         source_bytes = source_path.read_bytes()
         clipped = self._clipper.clip_many(source_bytes, specs)
 
+        # A clip is a genuinely new, derived artifact - never a new
+        # version of the source (the source is explicitly untouched) -
+        # linked back to it only when the source itself happens to
+        # already be a tracked artifact (see ArtifactStore.own
+        # find_by_rendition_path's own docstring for why this is
+        # honestly best-effort, not guaranteed).
+        source_artifact_id = None
+        if self._artifacts is not None:
+            found = self._artifacts.find_by_rendition_path(source_path.as_posix())
+            source_artifact_id = found.artifact_id if found is not None else None
+
         lines = [f"{len(clipped)} clip(s) produced from {source_path.as_posix()}:"]
         for item in clipped:
             output_path = self._write(".mp4", item.video.data)
+            description = (
+                f"clip of {source_path.as_posix()} from "
+                f"{item.spec.start_seconds:.2f}s to {item.spec.end_seconds:.2f}s"
+            )
+            self._register(
+                type="video", title=description,
+                content_bytes=VideoContent(description=description).to_json().encode("utf-8"),
+                rendition_format="mp4", rendition_path=output_path.as_posix(),
+                related_artifact_ids=(source_artifact_id,) if source_artifact_id else (),
+            )
             lines.append(
                 f"  {output_path.as_posix()} "
                 f"({item.spec.start_seconds:.2f}s-{item.spec.end_seconds:.2f}s, "
@@ -344,6 +441,19 @@ class MediaProductionTool(Tool):
 
         video = self._composer.compose(scenes)
         output_path = self._write(".mp4", video.data)
+
+        related: list[str] = []
+        if self._artifacts is not None:
+            for asset_path in images + audios:
+                found = self._artifacts.find_by_rendition_path(asset_path.as_posix())
+                if found is not None and found.artifact_id not in related:
+                    related.append(found.artifact_id)
+        description = f"composed from {len(scenes)} scene(s): {', '.join(p.as_posix() for p in asset_paths)}"
+        self._register(
+            type="video", title=f"composed video ({len(scenes)} scene(s))",
+            content_bytes=VideoContent(description=description).to_json().encode("utf-8"),
+            rendition_format="mp4", rendition_path=output_path.as_posix(), related_artifact_ids=tuple(related),
+        )
         return (
             f"Video produced: {output_path.as_posix()} "
             f"({video.duration_seconds:.2f}s, {len(scenes)} scene(s))"

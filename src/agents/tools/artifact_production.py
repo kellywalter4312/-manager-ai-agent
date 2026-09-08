@@ -124,19 +124,31 @@ class ArtifactProductionTool(Tool):
     # ------------------------------------------------------------------
 
     def _render_document(self, doc: DocumentContent, version_dir: Path) -> tuple[dict, str]:
-        """Real PDF bytes when a rendering engine is configured, an
-        honest empty rendition set (never a fabricated one) otherwise -
-        rendering failure never blocks the document's own content from
-        being created, since the structured content is the artifact's
-        real, canonical form regardless of which export formats are
-        currently available for it."""
+        """A real plain-text rendition, always - deterministic, needs no
+        external engine, and is exactly what keeps a document artifact
+        genuinely deliverable even with no PDF renderer configured
+        (``document_rendering=null``): the structured content is the
+        artifact's real, canonical form regardless of which export
+        formats are available, so it must always have at least one real
+        way out. A real PDF rendition is added alongside it whenever a
+        rendering engine is configured - never instead of the text one,
+        the same "a format is a rendition, never the whole definition of
+        the artifact" principle this checkpoint's own multi-rendition
+        support exists to prove.
+        """
+        renditions: dict[str, str] = {}
+        txt_path = version_dir / "document.txt"
+        txt_path.write_text(doc.as_plain_text(), encoding="utf-8")
+        renditions["txt"] = txt_path.as_posix()
+
         try:
             pdf_bytes = self._renderer.render(doc)
         except DocumentRenderError as exc:
-            return {}, str(exc)
+            return renditions, str(exc)
         pdf_path = version_dir / "document.pdf"
         pdf_path.write_bytes(pdf_bytes)
-        return {"pdf": pdf_path.as_posix()}, ""
+        renditions["pdf"] = pdf_path.as_posix()
+        return renditions, ""
 
     def _create_document(self, content: str) -> str:
         doc = DocumentContent.from_json(content)

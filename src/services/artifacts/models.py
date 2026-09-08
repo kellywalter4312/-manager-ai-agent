@@ -1,8 +1,11 @@
 """The concrete artifact *content* schemas this project's artifact system
 actually uses: ``DocumentContent`` (a real, multi-page-capable document,
-a title and one or more genuinely structured sections) and
-``ImageContent`` (a real image/diagram, a text description that
-produced it) - never one undifferentiated blob of text.
+a title and one or more genuinely structured sections), ``ImageContent``
+(a real image/diagram, a text description that produced it),
+``AudioContent`` (a real narration, the real text that was spoken), and
+``VideoContent`` (a real video, an honest description of how it was
+produced - generated, composed, or clipped) - never one undifferentiated
+blob of text.
 
 Deliberately specific per type. ``ArtifactStore`` (see ``store.py``)
 holds no opinion about what any artifact's content actually contains -
@@ -126,3 +129,65 @@ class ImageContent:
         if not isinstance(payload, dict):
             raise ValueError("image content JSON must be an object")
         return cls(prompt=str(payload.get("prompt", "")))
+
+
+@dataclass(frozen=True)
+class AudioContent:
+    """A real audio artifact's canonical content: the real text that was
+    narrated - never the rendered sound itself, which is a rendition
+    (``ArtifactVersion.renditions``), the identical content-vs-rendition
+    split every other artifact type here already establishes."""
+
+    description: str
+
+    def __post_init__(self) -> None:
+        if not self.description.strip():
+            raise ValueError("an audio artifact needs real description text")
+
+    def to_json(self) -> str:
+        return json.dumps({"description": self.description})
+
+    @classmethod
+    def from_json(cls, data: str) -> "AudioContent":
+        try:
+            payload = json.loads(data)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"not valid audio content JSON: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("audio content JSON must be an object")
+        return cls(description=str(payload.get("description", "")))
+
+
+@dataclass(frozen=True)
+class VideoContent:
+    """A real video artifact's canonical content: a real, honest
+    description of how it was produced - a prompt it was AI-generated
+    from, which real scenes it was composed from, or which real source
+    and time range it was clipped from - never the rendered video
+    itself, which is a rendition. Deliberately one free-text field
+    rather than a structured "recipe": video's own real production
+    mechanisms (``VideoGenerationProvider``, ``VideoComposer``,
+    ``VideoClipper``) already do the genuine work and already produce
+    their own real evidence text (see
+    ``src/agents/tools/media_production.py``); this only ever records
+    it, never re-derives or interprets it.
+    """
+
+    description: str
+
+    def __post_init__(self) -> None:
+        if not self.description.strip():
+            raise ValueError("a video artifact needs real description text")
+
+    def to_json(self) -> str:
+        return json.dumps({"description": self.description})
+
+    @classmethod
+    def from_json(cls, data: str) -> "VideoContent":
+        try:
+            payload = json.loads(data)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"not valid video content JSON: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("video content JSON must be an object")
+        return cls(description=str(payload.get("description", "")))

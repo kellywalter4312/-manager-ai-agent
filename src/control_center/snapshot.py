@@ -32,7 +32,7 @@ thing on the other side sees JSON either way.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Mapping
 
 from src.control_center.manifest import upgrade_manifest
 from src.control_center.observer import ControlCenter
@@ -268,6 +268,24 @@ def _speech(channel: Any) -> dict[str, Any]:
     }
 
 
+# A real, fixed preference among an artifact's own renditions when it
+# has more than one - a finished export over a plain-text fallback, a
+# video over a still image - never simply "whichever key a dict
+# happened to store first". Presentation's own decision (which one is
+# shown/linked primarily), kept distinct from delivery.py's own
+# question ("is anything deliverable at all").
+_RENDITION_PREFERENCE = ("pdf", "mp4", "png", "jpg", "wav", "txt")
+
+
+def _preferred_rendition_format(renditions: Mapping[str, str]) -> "str | None":
+    for fmt in _RENDITION_PREFERENCE:
+        if fmt in renditions:
+            return fmt
+    # A real, future rendition format this preference list does not yet
+    # rank - still shown, never dropped merely because it is unranked.
+    return next(iter(renditions), None)
+
+
 def _artifacts(store: Any) -> list[dict[str, Any]]:
     """Every real, persisted artifact's latest version, newest first -
     read from the identical, authoritative ArtifactStore
@@ -289,6 +307,13 @@ def _artifacts(store: Any) -> list[dict[str, Any]]:
             "title": artifact.latest.title,
             "created_at": _moment(artifact.latest.created_at),
             "renditions": dict(artifact.latest.renditions),
+            "primary_rendition": _preferred_rendition_format(artifact.latest.renditions),
+            # The real composition/derivation seam
+            # (store.py::ArtifactVersion.related_artifact_ids) - which
+            # other real, tracked artifacts this version was produced
+            # from (a clip's own source video, say). Empty when nothing
+            # tracked was used, honestly.
+            "related_artifact_ids": list(artifact.latest.related_artifact_ids),
             # The fourth, distinct concern src/services/artifacts/delivery.py's
             # own docstring names - computed fresh here, never persisted
             # alongside the version it describes, so an interface never

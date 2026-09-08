@@ -421,6 +421,17 @@ def build(settings: Settings):
                 runtime.media.clipper,
                 runtime.media.transcriber,
                 asset_dir=Path(settings.media_asset_dir),
+                # Ecosystem artifact/workspace checkpoint: every real
+                # narration/image/composed-video/AI-generated-video/clip
+                # this tool actually produces is now also a real,
+                # persistent, versioned Artifact in the identical
+                # runtime.artifacts store ArtifactProductionTool's own
+                # document/image artifacts already live in - never a
+                # second store, never Alfred-specific machinery (any
+                # future specialist's own MediaProductionTool instance
+                # gets this identically, by its own owner_agent name).
+                artifacts=runtime.artifacts,
+                owner_agent=runtime.identity.name,
             ),
             # Phase 3: real, saved text documents ("create a report from
             # these findings") - a governed write boundary, the identical
@@ -589,10 +600,13 @@ def render_capabilities(centre: "ControlCenter") -> str:
     # given already-structured content (Half-Brain safe), so this row's
     # readiness reflects the tool grant alone, never brain.is_full_brain.
     lines.append(_capability_row(
-        "Artifact Workspace (documents, images/diagrams)", ready=permits("artifact_production"),
+        "Artifact Workspace (documents, images/diagrams, audio, video)",
+        ready=permits("artifact_production") or permits("media_production"),
         detail=(
-            f"artifact_production tool={'granted' if permits('artifact_production') else 'not granted'}, "
-            f"{len(runtime.artifacts.all())} artifact(s) persisted, "
+            f"artifact_production tool={'granted' if permits('artifact_production') else 'not granted'} "
+            f"(documents/images), media_production tool={'granted' if permits('media_production') else 'not granted'} "
+            f"(narration/images/video also become real artifacts here - see MediaProductionTool's own "
+            f"artifacts= wiring), {len(runtime.artifacts.all())} artifact(s) persisted, "
             f"pdf export={runtime.document_renderer.name}, "
             f"image/diagram export={runtime.media.illustrator.name}"
         ),
@@ -1668,10 +1682,11 @@ def run_command(
         for version in artifact.versions:
             renditions = ", ".join(f"{fmt}={path}" for fmt, path in sorted(version.renditions.items())) or "none"
             delivery = ", ".join(available_delivery_methods(version)) or "none yet"
+            related = ", ".join(version.related_artifact_ids) or "none"
             lines.append(
                 f"  v{version.version} status={version.status} title={version.title!r} "
                 f"created={version.created_at.isoformat()} content={version.content_path} "
-                f"renditions={renditions} delivery={delivery}"
+                f"renditions={renditions} delivery={delivery} derived_from={related}"
             )
         return "\n".join(lines)
 
