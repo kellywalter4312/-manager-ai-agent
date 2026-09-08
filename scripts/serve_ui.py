@@ -252,33 +252,45 @@ def route(path: str, system: LiveSystem) -> tuple[int, bytes, str]:
     return 404, b"not found", "text/plain; charset=utf-8"
 
 
+# Every rendition format an artifact could plausibly have produced so
+# far, mapped to its real MIME type - never a closed catalog forcing a
+# code change per artifact type: a future rendition extension this
+# dict does not yet name still serves, just as an ordinary octet
+# stream, rather than being refused.
+_RENDITION_CONTENT_TYPES = {"pdf": "application/pdf", "png": "image/png", "jpg": "image/jpeg"}
+
+
 def _route_artifact_file(path: str, system: LiveSystem) -> tuple[int, bytes, str]:
-    """Serve one real, already-rendered artifact file - ``/artifact/<id>.pdf``
-    for the latest version's PDF rendition. Reads the identical,
-    authoritative ArtifactStore ``/snapshot.json`` itself reads
-    (``system.runtime.artifacts``) - never a second lookup, and never a
-    fabricated response: a missing artifact or a version with no "pdf"
-    rendition (no rendering engine configured) is an honest 404, not an
+    """Serve one real, already-produced artifact rendition file -
+    ``/artifact/<id>.<format>`` for the latest version's rendition in
+    that format (a document's "pdf", an image/diagram's "png", or any
+    future format a future artifact type produces - this route does not
+    hardcode which). Reads the identical, authoritative ArtifactStore
+    ``/snapshot.json`` itself reads (``system.runtime.artifacts``) -
+    never a second lookup, and never a fabricated response: a missing
+    artifact or a version with no rendition in the requested format (no
+    rendering/generation engine configured) is an honest 404, not an
     empty or placeholder file.
     """
     remainder = path[len("/artifact/") :]
-    if not remainder.endswith(".pdf"):
+    artifact_id, sep, extension = remainder.rpartition(".")
+    if not sep:
         return 404, b"not found", "text/plain; charset=utf-8"
-    artifact_id = remainder[: -len(".pdf")]
 
     artifact = system.runtime.artifacts.get(artifact_id)
     if artifact is None:
         return 404, b"no artifact with that id", "text/plain; charset=utf-8"
 
-    pdf_path = artifact.latest.renditions.get("pdf")
-    if not pdf_path:
-        return 404, b"this artifact has no PDF rendition", "text/plain; charset=utf-8"
+    rendition_path = artifact.latest.renditions.get(extension)
+    if not rendition_path:
+        return 404, f"this artifact has no {extension!r} rendition".encode(), "text/plain; charset=utf-8"
 
-    file_path = Path(pdf_path)
+    file_path = Path(rendition_path)
     if not file_path.is_file():
         return 404, b"the rendered file is missing on disk", "text/plain; charset=utf-8"
 
-    return 200, file_path.read_bytes(), "application/pdf"
+    content_type = _RENDITION_CONTENT_TYPES.get(extension, "application/octet-stream")
+    return 200, file_path.read_bytes(), content_type
 
 
 def route_message(

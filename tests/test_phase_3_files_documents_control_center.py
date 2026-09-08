@@ -434,7 +434,7 @@ class TestControlCenterCapabilityMatrix:
         # and so is Document Rendering (PDF) - "simple_pdf" is real,
         # local, zero-credential, and the default, the same reasoning
         # Avatar/Environment's own "default" providers already establish.
-        for row in ("Avatar", "Environment", "Memory", "Artifact Workspace (handouts)", "Document Rendering (PDF)"):
+        for row in ("Avatar", "Environment", "Memory", "Artifact Workspace (documents, images/diagrams)", "Document Rendering (PDF)"):
             line = next(l for l in report.splitlines() if row in l)
             assert "READY" in line, line
         assert report.count("READY") == 5

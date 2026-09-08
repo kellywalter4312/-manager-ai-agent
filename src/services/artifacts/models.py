@@ -1,14 +1,16 @@
-"""The one concrete artifact *content* schema this checkpoint's vertical
-slice actually uses: a real, multi-page-capable document ("handout") -
-a title and one or more genuinely structured sections, never one
-undifferentiated blob of text.
+"""The concrete artifact *content* schemas this project's artifact system
+actually uses: ``DocumentContent`` (a real, multi-page-capable document,
+a title and one or more genuinely structured sections) and
+``ImageContent`` (a real image/diagram, a text description that
+produced it) - never one undifferentiated blob of text.
 
-Deliberately specific to documents. ``ArtifactStore`` (see ``store.py``)
+Deliberately specific per type. ``ArtifactStore`` (see ``store.py``)
 holds no opinion about what any artifact's content actually contains -
-a future artifact type (image, video, diagram, ...) gets its own content
-schema, read and written by its own tool/renderer, without touching this
-module or the store at all. That separation is what keeps the artifact
-*system* reusable rather than shaped around documents alone.
+a future artifact type (video, audio, code, ...) gets its own content
+schema, read and written by its own tool/renderer, without touching
+this module's existing classes or the store at all. That separation is
+what keeps the artifact *system* reusable rather than shaped around any
+one type alone.
 """
 
 from __future__ import annotations
@@ -91,3 +93,36 @@ class DocumentContent:
             parts.append(section.body)
             parts.append("")
         return "\n".join(parts).strip()
+
+
+@dataclass(frozen=True)
+class ImageContent:
+    """A real image/diagram artifact's canonical content: the text
+    description that produced it - never the rendered picture itself,
+    which is a rendition (see ``store.py::ArtifactVersion.renditions``),
+    the identical content-vs-rendition split ``DocumentContent``/PDF
+    already establishes. Deliberately generic: a "diagram" is simply an
+    image whose prompt describes a diagram - a human body, a skeleton,
+    a map, a technical illustration, or any other real visual subject a
+    configured ``ImageProvider`` (``src/providers/media/image.py``) can
+    produce, never a closed catalog of supported subjects.
+    """
+
+    prompt: str
+
+    def __post_init__(self) -> None:
+        if not self.prompt.strip():
+            raise ValueError("an image artifact needs a real prompt")
+
+    def to_json(self) -> str:
+        return json.dumps({"prompt": self.prompt})
+
+    @classmethod
+    def from_json(cls, data: str) -> "ImageContent":
+        try:
+            payload = json.loads(data)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"not valid image content JSON: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("image content JSON must be an object")
+        return cls(prompt=str(payload.get("prompt", "")))

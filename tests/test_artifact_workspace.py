@@ -24,14 +24,20 @@ from src.agents.tools.toolset import ToolSet
 from src.core.contracts import Task
 from src.manager.capabilities import (
     CREATE_ARTIFACT,
+    CREATE_DIAGRAM,
     MANAGER_CAPABILITIES,
     REVISE_ARTIFACT,
+    REVISE_DIAGRAM,
     CapabilityRequest,
     _parse_document_content,
     create_artifact,
     create_artifact_intent,
+    create_diagram,
+    create_diagram_intent,
     revise_artifact,
     revise_artifact_intent,
+    revise_diagram,
+    revise_diagram_intent,
     select_capability,
 )
 from src.providers.documents.factory import (
@@ -44,7 +50,8 @@ from src.providers.documents.pdf import (
     SimplePDFRenderer,
     wrap_text,
 )
-from src.services.artifacts.models import DocumentContent, DocumentSection
+from src.providers.media.image import ImageError, LocalTitleCardImageProvider, NullImageProvider
+from src.services.artifacts.models import DocumentContent, DocumentSection, ImageContent
 from src.services.artifacts.store import ArtifactError, ArtifactStore
 from src.services.identity.identity import AgentIdentity
 
@@ -95,6 +102,23 @@ class TestDocumentModels:
         assert "My Title" in text
         assert "Origins" in text
         assert "It started long ago." in text
+
+
+class TestImageContentModel:
+    def test_needs_a_real_prompt(self):
+        with pytest.raises(ValueError, match="prompt"):
+            ImageContent(prompt="   ")
+
+    def test_json_round_trip_preserves_the_prompt(self):
+        img = ImageContent(prompt="a labeled diagram of the human skeletal system")
+        restored = ImageContent.from_json(img.to_json())
+        assert restored.prompt == img.prompt
+
+    def test_from_json_rejects_malformed_input(self):
+        with pytest.raises(ValueError):
+            ImageContent.from_json("not json at all")
+        with pytest.raises(ValueError):
+            ImageContent.from_json("[]")
 
 
 # ---------------------------------------------------------------------------
@@ -306,9 +330,15 @@ class TestDocumentRenderingFactory:
 
 
 class TestArtifactProductionTool:
-    def _tool(self, tmp_path, renderer=None, owner_agent="Alfred"):
+    def _tool(self, tmp_path, renderer=None, illustrator=None, owner_agent="Alfred"):
         store = ArtifactStore(tmp_path / "artifacts")
-        return ArtifactProductionTool(store, renderer or SimplePDFRenderer(), owner_agent=owner_agent), store
+        return (
+            ArtifactProductionTool(
+                store, renderer or SimplePDFRenderer(), illustrator or NullImageProvider(),
+                owner_agent=owner_agent,
+            ),
+            store,
+        )
 
     def test_create_document_produces_a_real_artifact_and_pdf(self, tmp_path):
         tool, store = self._tool(tmp_path)
@@ -329,7 +359,7 @@ class TestArtifactProductionTool:
         tool, store = self._tool(tmp_path, renderer=NullDocumentRenderer())
         output = tool.run(operation="create_document", content=_doc().to_json())
         assert "Artifact created" in output
-        assert "no PDF produced" in output
+        assert "no rendition produced" in output
         artifact = store.all()[0]
         assert artifact.latest.status == "ready"
         assert artifact.latest.renditions == {}
@@ -401,21 +431,21 @@ class TestArtifactProductionTool:
 
     def test_an_agent_cannot_read_another_agents_artifact_by_guessing_its_id(self, tmp_path):
         store = ArtifactStore(tmp_path / "artifacts")
-        alfred_tool = ArtifactProductionTool(store, SimplePDFRenderer(), owner_agent="Alfred")
+        alfred_tool = ArtifactProductionTool(store, SimplePDFRenderer(), NullImageProvider(), owner_agent="Alfred")
         alfred_tool.run(operation="create_document", content=_doc().to_json())
         artifact_id = store.all()[0].artifact_id
 
-        arthur_tool = ArtifactProductionTool(store, SimplePDFRenderer(), owner_agent="Arthur")
+        arthur_tool = ArtifactProductionTool(store, SimplePDFRenderer(), NullImageProvider(), owner_agent="Arthur")
         with pytest.raises(ArtifactError, match="no artifact found"):
             arthur_tool.run(operation="get", content=artifact_id)
 
     def test_an_agent_cannot_revise_another_agents_artifact_by_guessing_its_id(self, tmp_path):
         store = ArtifactStore(tmp_path / "artifacts")
-        alfred_tool = ArtifactProductionTool(store, SimplePDFRenderer(), owner_agent="Alfred")
+        alfred_tool = ArtifactProductionTool(store, SimplePDFRenderer(), NullImageProvider(), owner_agent="Alfred")
         alfred_tool.run(operation="create_document", content=_doc().to_json())
         artifact_id = store.all()[0].artifact_id
 
-        arthur_tool = ArtifactProductionTool(store, SimplePDFRenderer(), owner_agent="Arthur")
+        arthur_tool = ArtifactProductionTool(store, SimplePDFRenderer(), NullImageProvider(), owner_agent="Arthur")
         new_doc = DocumentContent(title="Hijacked", sections=(DocumentSection("X", "Y"),))
         with pytest.raises(ArtifactError, match="no artifact found"):
             arthur_tool.run(operation="revise_document", content=f"{artifact_id}\n{new_doc.to_json()}")
@@ -427,15 +457,156 @@ class TestArtifactProductionTool:
         whichever DocumentRenderer this tool was built with - never
         coupled to one implementation."""
         store = ArtifactStore(tmp_path / "artifacts")
-        tool_a = ArtifactProductionTool(store, SimplePDFRenderer(), owner_agent="Alfred")
+        tool_a = ArtifactProductionTool(store, SimplePDFRenderer(), NullImageProvider(), owner_agent="Alfred")
         tool_a.run(operation="create_document", content=_doc().to_json())
         artifact_id = store.all()[0].artifact_id
         assert "pdf" in store.get(artifact_id).latest.renditions
 
-        tool_b = ArtifactProductionTool(store, NullDocumentRenderer(), owner_agent="Alfred")
+        tool_b = ArtifactProductionTool(store, NullDocumentRenderer(), NullImageProvider(), owner_agent="Alfred")
         new_doc = DocumentContent(title="No PDF This Time", sections=(DocumentSection("X", "Y"),))
         tool_b.run(operation="revise_document", content=f"{artifact_id}\n{new_doc.to_json()}")
         assert store.get(artifact_id).latest.renditions == {}
+
+
+# ---------------------------------------------------------------------------
+# ArtifactProductionTool - image/diagram operations. The identical
+# create/revise/get/find_latest shape as documents, a different real
+# provider (ImageProvider, not DocumentRenderer) backing the actual
+# rendition - proof the artifact system is genuinely type-extensible
+# rather than redesigned around PDFs.
+# ---------------------------------------------------------------------------
+
+
+def _real_image_bytes_are_decodable(path) -> tuple[int, int]:
+    from PIL import Image
+
+    with Image.open(path) as decoded:
+        decoded.load()
+        return decoded.size
+
+
+class TestArtifactProductionToolImages:
+    def _tool(self, tmp_path, illustrator=None, owner_agent="Alfred"):
+        store = ArtifactStore(tmp_path / "artifacts")
+        tool = ArtifactProductionTool(
+            store, NullDocumentRenderer(), illustrator or LocalTitleCardImageProvider(),
+            owner_agent=owner_agent,
+        )
+        return tool, store
+
+    def test_create_image_produces_a_real_artifact_and_png(self, tmp_path):
+        tool, store = self._tool(tmp_path)
+        content = ImageContent(prompt="a labeled diagram of the water cycle").to_json()
+        output = tool.run(operation="create_image", content=content)
+        assert "Artifact created" in output
+        assert "png=" in output
+
+        artifacts = store.all()
+        assert len(artifacts) == 1
+        assert artifacts[0].type == "image"
+        png_path = artifacts[0].latest.renditions["png"]
+        width, height = _real_image_bytes_are_decodable(png_path)
+        assert width > 0 and height > 0
+
+    def test_create_image_with_null_illustrator_still_creates_real_content(self, tmp_path):
+        """Generation failure never blocks the artifact's own real,
+        canonical content (the prompt) from being created - the
+        identical honesty PDF rendering failure already gets."""
+        tool, store = self._tool(tmp_path, illustrator=NullImageProvider())
+        output = tool.run(operation="create_image", content=ImageContent(prompt="a map of europe").to_json())
+        assert "Artifact created" in output
+        assert "no rendition produced" in output
+        artifact = store.all()[0]
+        assert artifact.latest.status == "ready"
+        assert artifact.latest.renditions == {}
+
+    def test_create_image_rejects_malformed_content(self, tmp_path):
+        tool, _ = self._tool(tmp_path)
+        with pytest.raises(ValueError):
+            tool.run(operation="create_image", content="not json")
+
+    def test_revise_image_adds_a_real_new_version(self, tmp_path):
+        tool, store = self._tool(tmp_path)
+        tool.run(operation="create_image", content=ImageContent(prompt="a diagram of a plant cell").to_json())
+        artifact_id = store.all()[0].artifact_id
+
+        output = tool.run(
+            operation="revise_image",
+            content=f"{artifact_id}\n{ImageContent(prompt='a revised diagram of a plant cell with labels').to_json()}",
+        )
+        assert "Artifact revised" in output
+        artifact = store.get(artifact_id)
+        assert artifact.latest.version == 2
+        assert "labels" in artifact.latest.title
+
+    def test_revise_image_of_a_nonexistent_artifact_is_refused(self, tmp_path):
+        tool, _ = self._tool(tmp_path)
+        with pytest.raises(ArtifactError):
+            tool.run(operation="revise_image", content=f"ghost\n{ImageContent(prompt='x').to_json()}")
+
+    def test_a_document_artifact_cannot_be_revised_as_an_image(self, tmp_path):
+        """Type safety: revise_image must refuse an id that names a
+        document artifact rather than silently reinterpreting it."""
+        store = ArtifactStore(tmp_path / "artifacts")
+        tool = ArtifactProductionTool(
+            store, SimplePDFRenderer(), LocalTitleCardImageProvider(), owner_agent="Alfred"
+        )
+        tool.run(operation="create_document", content=_doc().to_json())
+        artifact_id = store.all()[0].artifact_id
+        with pytest.raises(ArtifactError, match="not 'image'"):
+            tool.run(operation="revise_image", content=f"{artifact_id}\n{ImageContent(prompt='x').to_json()}")
+
+    def test_get_returns_the_prompt_for_an_image_artifact(self, tmp_path):
+        tool, store = self._tool(tmp_path)
+        tool.run(operation="create_image", content=ImageContent(prompt="a diagram of the solar system").to_json())
+        artifact_id = store.all()[0].artifact_id
+        text = tool.run(operation="get", content=artifact_id)
+        assert text == "a diagram of the solar system"
+
+    def test_find_latest_scoped_to_image_type(self, tmp_path):
+        tool, store = self._tool(tmp_path)
+        tool.run(operation="create_image", content=ImageContent(prompt="a map").to_json())
+        artifact_id = store.all()[0].artifact_id
+        assert tool.run(operation="find_latest", content="image") == artifact_id
+
+    def test_agent_independence_a_different_owner_name_works_identically(self, tmp_path):
+        tool, store = self._tool(tmp_path, owner_agent="Arthur")
+        tool.run(operation="create_image", content=ImageContent(prompt="a diagram").to_json())
+        assert store.all()[0].owner_agent == "Arthur"
+
+    def test_an_agent_cannot_revise_another_agents_image_by_guessing_its_id(self, tmp_path):
+        store = ArtifactStore(tmp_path / "artifacts")
+        alfred_tool = ArtifactProductionTool(
+            store, NullDocumentRenderer(), LocalTitleCardImageProvider(), owner_agent="Alfred"
+        )
+        alfred_tool.run(operation="create_image", content=ImageContent(prompt="a diagram").to_json())
+        artifact_id = store.all()[0].artifact_id
+
+        arthur_tool = ArtifactProductionTool(
+            store, NullDocumentRenderer(), LocalTitleCardImageProvider(), owner_agent="Arthur"
+        )
+        with pytest.raises(ArtifactError, match="no artifact found"):
+            arthur_tool.run(
+                operation="revise_image", content=f"{artifact_id}\n{ImageContent(prompt='hijacked').to_json()}"
+            )
+
+    def test_provider_independence_image_generation_swaps_cleanly(self, tmp_path):
+        """The document renderer and the image provider are entirely
+        independent collaborators - swapping one never touches the
+        other, and neither ever depends on which (if any) LLM vendor is
+        configured."""
+        tool, store = self._tool(tmp_path, illustrator=LocalTitleCardImageProvider())
+        tool.run(operation="create_document", content=_doc().to_json())
+        tool.run(operation="create_image", content=ImageContent(prompt="a diagram").to_json())
+        types = {a.type for a in store.all()}
+        assert types == {"document", "image"}
+        # The document still has no PDF (NullDocumentRenderer in this
+        # tool's own construction) while the image genuinely rendered -
+        # each provider's own real/null state is independent of the other.
+        doc_artifact = next(a for a in store.all() if a.type == "document")
+        image_artifact = next(a for a in store.all() if a.type == "image")
+        assert doc_artifact.latest.renditions == {}
+        assert "png" in image_artifact.latest.renditions
 
 
 # ---------------------------------------------------------------------------
@@ -572,10 +743,194 @@ class TestCapabilityRoutingAndBoundaries:
         assert "artifact_production" in result.error
 
 
+class TestDiagramCapabilityRoutingAndBoundaries:
+    def test_create_diagram_is_registered(self):
+        assert "create_diagram" in MANAGER_CAPABILITIES
+        assert MANAGER_CAPABILITIES["create_diagram"] is CREATE_DIAGRAM
+
+    def test_revise_diagram_is_registered(self):
+        assert "revise_diagram" in MANAGER_CAPABILITIES
+        assert MANAGER_CAPABILITIES["revise_diagram"] is REVISE_DIAGRAM
+
+    def test_neither_is_scoreable(self):
+        assert CREATE_DIAGRAM.scoreable is False
+        assert REVISE_DIAGRAM.scoreable is False
+
+    @pytest.mark.parametrize(
+        "phrase",
+        [
+            "make a diagram of the human body showing the skeleton",
+            "create a diagram of the major internal organs",
+            "draw a map of the solar system",
+            "make me a diagram of a technical circuit board",
+            "create a diagram explaining how a car engine works",
+        ],
+    )
+    def test_no_hardcoded_example_every_subject_routes_identically(self, phrase):
+        """The routing predicate names no subject anywhere in this
+        code - human body, skeleton, organs, maps, circuits and engines
+        all reach the identical handler through the identical marker
+        shape."""
+        chosen = select_capability(Task(description=phrase), MANAGER_CAPABILITIES)
+        assert chosen is CREATE_DIAGRAM
+
+    def test_create_artifact_and_create_diagram_never_collide(self):
+        assert select_capability(
+            Task(description="make me a handout"), MANAGER_CAPABILITIES
+        ) is CREATE_ARTIFACT
+        assert select_capability(
+            Task(description="make me a diagram"), MANAGER_CAPABILITIES
+        ) is CREATE_DIAGRAM
+
+    def test_an_incidental_mention_of_diagram_alone_does_not_falsely_claim(self):
+        assert not create_diagram_intent(Task(description="that diagram in the textbook was confusing"))
+
+    def test_revise_markers_route_to_revise_diagram(self):
+        chosen = select_capability(
+            Task(description="revise the diagram to add labels"), MANAGER_CAPABILITIES
+        )
+        assert chosen is REVISE_DIAGRAM
+
+    def test_tool_not_installed_is_refused_honestly(self):
+        request = _request(tools=ToolSet(), description="make a diagram of the water cycle")
+        result = create_diagram(request)
+        assert not result.succeeded
+        assert "artifact_production" in result.error
+
+    def test_revise_tool_not_installed_is_refused_honestly(self):
+        request = _request(tools=ToolSet(), description="revise the diagram")
+        result = revise_diagram(request)
+        assert not result.succeeded
+        assert "artifact_production" in result.error
+
+
+class TestCreateDiagramHalfBrainSafe:
+    def test_a_real_description_needs_no_brain(self, tmp_path):
+        store = ArtifactStore(tmp_path)
+        tool = ArtifactProductionTool(
+            store, NullDocumentRenderer(), LocalTitleCardImageProvider(), owner_agent="Alfred"
+        )
+        request = _request(
+            tools=ToolSet([tool]), converse=None,
+            description="make a diagram of the water cycle showing evaporation and precipitation",
+        )
+        result = create_diagram(request)
+        assert result.succeeded, result.error
+        assert result.payload.get("handled_by") == "create_diagram"
+        assert len(store.all()) == 1
+        assert store.all()[0].type == "image"
+
+    def test_a_bare_ask_with_no_brain_is_refused_not_guessed(self, tmp_path):
+        store = ArtifactStore(tmp_path)
+        tool = ArtifactProductionTool(
+            store, NullDocumentRenderer(), LocalTitleCardImageProvider(), owner_agent="Alfred"
+        )
+        request = _request(tools=ToolSet([tool]), converse=None, description="make a diagram")
+        result = create_diagram(request)
+        assert not result.succeeded
+        assert "no language model" in result.error
+        assert store.all() == ()
+
+
+class TestCreateDiagramBrainAssisted:
+    def test_the_brain_elaborates_a_bare_ask_into_a_real_prompt(self, tmp_path):
+        store = ArtifactStore(tmp_path)
+        tool = ArtifactProductionTool(
+            store, NullDocumentRenderer(), LocalTitleCardImageProvider(), owner_agent="Alfred"
+        )
+        seen = []
+
+        def converse(task, notes):
+            seen.append(notes)
+            return _FakeDecision("a detailed, labeled diagram of the water cycle")
+
+        request = _request(tools=ToolSet([tool]), converse=converse, description="make a diagram")
+        result = create_diagram(request)
+        assert result.succeeded, result.error
+        assert seen, "the Brain must genuinely have been consulted"
+        artifact = store.all()[0]
+        assert "water cycle" in artifact.latest.title
+
+    def test_an_undecided_brain_is_an_honest_failure(self, tmp_path):
+        store = ArtifactStore(tmp_path)
+        tool = ArtifactProductionTool(
+            store, NullDocumentRenderer(), LocalTitleCardImageProvider(), owner_agent="Alfred"
+        )
+        request = _request(
+            tools=ToolSet([tool]), converse=lambda task, notes: _FakeDecision("", is_decided=False),
+            description="make a diagram",
+        )
+        result = create_diagram(request)
+        assert not result.succeeded
+        assert store.all() == ()
+
+
+class TestReviseDiagramCapability:
+    def _seeded_store(self, tmp_path):
+        store = ArtifactStore(tmp_path)
+        tool = ArtifactProductionTool(
+            store, NullDocumentRenderer(), LocalTitleCardImageProvider(), owner_agent="Alfred"
+        )
+        tool.run(operation="create_image", content=ImageContent(prompt="a diagram of a plant cell").to_json())
+        return store, tool
+
+    def test_revise_by_explicit_artifact_id_deterministically(self, tmp_path):
+        store, tool = self._seeded_store(tmp_path)
+        artifact_id = store.all()[0].artifact_id
+        request = _request(
+            tools=ToolSet([tool]), converse=None,
+            description=f"revise the diagram artifact {artifact_id} to add labels for the nucleus and mitochondria",
+        )
+        result = revise_diagram(request)
+        assert result.succeeded, result.error
+        assert store.get(artifact_id).latest.version == 2
+
+    def test_the_artifact_id_reference_never_leaks_into_the_new_prompt(self, tmp_path):
+        """A real bug found during live verification: the explicit
+        'artifact <id>' reference used to resolve *which* artifact must
+        never bleed into *what it should now show*."""
+        store, tool = self._seeded_store(tmp_path)
+        artifact_id = store.all()[0].artifact_id
+        request = _request(
+            tools=ToolSet([tool]), converse=None,
+            description=f"revise the diagram artifact {artifact_id} to add labels for the nucleus and mitochondria",
+        )
+        result = revise_diagram(request)
+        assert result.succeeded, result.error
+        new_title = store.get(artifact_id).latest.title
+        assert artifact_id not in new_title
+        assert "artifact" not in new_title.lower()
+        assert "nucleus" in new_title
+
+    def test_revise_falls_back_to_the_most_recent_diagram(self, tmp_path):
+        store, tool = self._seeded_store(tmp_path)
+        artifact_id = store.all()[0].artifact_id
+        request = _request(
+            tools=ToolSet([tool]), converse=None,
+            description="update the diagram to add labels for the nucleus and mitochondria",
+        )
+        result = revise_diagram(request)
+        assert result.succeeded, result.error
+        assert store.get(artifact_id).latest.version == 2
+
+    def test_revise_with_nothing_to_revise_is_refused_honestly(self, tmp_path):
+        store = ArtifactStore(tmp_path)
+        tool = ArtifactProductionTool(
+            store, NullDocumentRenderer(), LocalTitleCardImageProvider(), owner_agent="Alfred"
+        )
+        request = _request(
+            tools=ToolSet([tool]), converse=None,
+            description="revise the diagram to add labels for the nucleus",
+        )
+        result = revise_diagram(request)
+        assert not result.succeeded
+        assert "don't have an existing diagram" in result.error
+
+
 class TestCreateArtifactHalfBrainSafe:
     def test_explicit_structure_needs_no_brain(self, tmp_path):
         store = ArtifactStore(tmp_path)
-        tool = ArtifactProductionTool(store, SimplePDFRenderer(), owner_agent="Alfred")
+        tool = ArtifactProductionTool(store, SimplePDFRenderer(), NullImageProvider(), owner_agent="Alfred")
         request = _request(
             tools=ToolSet([tool]), converse=None,
             description=(
@@ -592,7 +947,7 @@ class TestCreateArtifactHalfBrainSafe:
 
     def test_no_structure_and_no_brain_is_refused_not_guessed(self, tmp_path):
         store = ArtifactStore(tmp_path)
-        tool = ArtifactProductionTool(store, SimplePDFRenderer(), owner_agent="Alfred")
+        tool = ArtifactProductionTool(store, SimplePDFRenderer(), NullImageProvider(), owner_agent="Alfred")
         request = _request(tools=ToolSet([tool]), converse=None, description="make me a handout about volcanoes")
         result = create_artifact(request)
         assert not result.succeeded
@@ -603,7 +958,7 @@ class TestCreateArtifactHalfBrainSafe:
 class TestCreateArtifactBrainAssisted:
     def test_the_brain_organizes_an_objective_into_a_real_artifact(self, tmp_path):
         store = ArtifactStore(tmp_path)
-        tool = ArtifactProductionTool(store, SimplePDFRenderer(), owner_agent="Alfred")
+        tool = ArtifactProductionTool(store, SimplePDFRenderer(), NullImageProvider(), owner_agent="Alfred")
         decision = _FakeDecision(
             "TITLE: The History of Volcanoes "
             "SECTION: Formation: Volcanoes form where magma reaches the surface. "
@@ -626,7 +981,7 @@ class TestCreateArtifactBrainAssisted:
 
     def test_an_undecided_brain_is_an_honest_failure(self, tmp_path):
         store = ArtifactStore(tmp_path)
-        tool = ArtifactProductionTool(store, SimplePDFRenderer(), owner_agent="Alfred")
+        tool = ArtifactProductionTool(store, SimplePDFRenderer(), NullImageProvider(), owner_agent="Alfred")
         request = _request(
             tools=ToolSet([tool]),
             converse=lambda task, notes: _FakeDecision("", is_decided=False),
@@ -638,7 +993,7 @@ class TestCreateArtifactBrainAssisted:
 
     def test_an_unparseable_brain_answer_is_an_honest_failure_never_a_guess(self, tmp_path):
         store = ArtifactStore(tmp_path)
-        tool = ArtifactProductionTool(store, SimplePDFRenderer(), owner_agent="Alfred")
+        tool = ArtifactProductionTool(store, SimplePDFRenderer(), NullImageProvider(), owner_agent="Alfred")
         request = _request(
             tools=ToolSet([tool]),
             converse=lambda task, notes: _FakeDecision("I'm not sure what to write here."),
@@ -655,7 +1010,7 @@ class TestCreateArtifactBrainAssisted:
         own description is what the Brain reasons over - never invented
         here."""
         store = ArtifactStore(tmp_path)
-        tool = ArtifactProductionTool(store, SimplePDFRenderer(), owner_agent="Alfred")
+        tool = ArtifactProductionTool(store, SimplePDFRenderer(), NullImageProvider(), owner_agent="Alfred")
         captured_prompt_notes = []
 
         def converse(task, notes):
@@ -676,7 +1031,7 @@ class TestCreateArtifactBrainAssisted:
 class TestReviseArtifactCapability:
     def _seeded_store(self, tmp_path):
         store = ArtifactStore(tmp_path)
-        tool = ArtifactProductionTool(store, SimplePDFRenderer(), owner_agent="Alfred")
+        tool = ArtifactProductionTool(store, SimplePDFRenderer(), NullImageProvider(), owner_agent="Alfred")
         tool.run(operation="create_document", content=_doc().to_json())
         return store, tool
 
@@ -709,7 +1064,7 @@ class TestReviseArtifactCapability:
 
     def test_revise_with_nothing_to_revise_is_refused_honestly(self, tmp_path):
         store = ArtifactStore(tmp_path)
-        tool = ArtifactProductionTool(store, SimplePDFRenderer(), owner_agent="Alfred")
+        tool = ArtifactProductionTool(store, SimplePDFRenderer(), NullImageProvider(), owner_agent="Alfred")
         request = _request(
             tools=ToolSet([tool]), converse=None,
             description="revise the handout\nTITLE: T\nSECTION: S: body\n",
@@ -848,7 +1203,7 @@ class TestFullSystemIntegration:
         runtime, manager, channel, conversation = _built(tmp_path)
         centre = cc.ControlCenter(runtime, manager)
         out = cc.run_command(centre, "capabilities", 100, channel, conversation)
-        assert "Artifact Workspace (handouts)" in out
+        assert "Artifact Workspace (documents, images/diagrams)" in out
         assert "Document Rendering (PDF)" in out
 
     def test_snapshot_exposes_the_same_authoritative_artifacts(self, tmp_path):
@@ -908,6 +1263,134 @@ class TestFullSystemIntegration:
         )
         status, body, content_type = su.route(f"/artifact/{artifact_id}.pdf", system)
         assert status == 404
+
+
+DIAGRAM_TEXT = "make a diagram of the water cycle showing evaporation, condensation, and precipitation"
+
+
+class TestFullSystemIntegrationDiagrams:
+    """The identical real Manager/runtime/Control Center/HTTP path
+    TestFullSystemIntegration already proves for documents, proven again
+    for the image/diagram artifact type - the same ArtifactStore, the
+    same Control Center commands, the same snapshot field, the same
+    /artifact/<id>.<format> route, a genuinely different real rendition
+    format (png, not pdf)."""
+
+    def test_a_real_conversation_turn_produces_a_real_persisted_image_artifact(self, tmp_path):
+        runtime, manager, channel, conversation = _built(tmp_path, media="local")
+        assert manager.brain.__class__.__name__ == "NullBrain"
+        assert runtime.media.illustrator.name == "local-title-card"
+
+        result = manager.handle_task(Task(description=DIAGRAM_TEXT))
+        assert result.succeeded, result.error
+
+        artifacts = runtime.artifacts.all()
+        assert len(artifacts) == 1
+        artifact = artifacts[0]
+        assert artifact.type == "image"
+        assert artifact.owner_agent == runtime.identity.name
+
+        from PIL import Image
+
+        with Image.open(artifact.latest.renditions["png"]) as img:
+            img.load()
+            assert img.size[0] > 0 and img.size[1] > 0
+
+    def test_persistence_across_a_genuine_restart(self, tmp_path):
+        runtime, manager, *_ = _built(tmp_path, media="local")
+        result = manager.handle_task(Task(description=DIAGRAM_TEXT))
+        assert result.succeeded, result.error
+        artifact_id = runtime.artifacts.all()[0].artifact_id
+
+        runtime2, *_ = _built(tmp_path, media="local")
+        artifact = runtime2.artifacts.get(artifact_id)
+        assert artifact is not None
+        assert artifact.type == "image"
+        assert Path(artifact.latest.renditions["png"]).is_file()
+
+    def test_revision_preserves_identity_across_versions_and_restart(self, tmp_path):
+        runtime, manager, *_ = _built(tmp_path, media="local")
+        r1 = manager.handle_task(Task(description=DIAGRAM_TEXT))
+        assert r1.succeeded, r1.error
+        artifact_id = runtime.artifacts.all()[0].artifact_id
+
+        r2 = manager.handle_task(
+            Task(description=f"revise the diagram artifact {artifact_id} to add clearly labeled arrows")
+        )
+        assert r2.succeeded, r2.error
+
+        runtime2, *_ = _built(tmp_path, media="local")
+        artifact = runtime2.artifacts.get(artifact_id)
+        assert artifact.latest.version == 2
+        assert len(artifact.versions) == 2
+
+    def test_control_center_reads_the_authoritative_state(self, tmp_path):
+        import scripts.control_center as cc
+
+        runtime, manager, channel, conversation = _built(tmp_path, media="local")
+        manager.handle_task(Task(description=DIAGRAM_TEXT))
+        centre = cc.ControlCenter(runtime, manager)
+
+        listing = cc.run_command(centre, "artifacts", 100, channel, conversation)
+        assert "image" in listing
+        assert "renditions=png" in listing
+
+    def test_snapshot_exposes_the_same_authoritative_image_artifact(self, tmp_path):
+        import scripts.control_center as cc
+        from src.control_center.snapshot import snapshot
+
+        runtime, manager, channel, conversation = _built(tmp_path, media="local")
+        manager.handle_task(Task(description=DIAGRAM_TEXT))
+        centre = cc.ControlCenter(runtime, manager)
+
+        data = snapshot(centre, conversation=conversation, channel=channel)
+        entry = data["artifacts"][0]
+        assert entry["type"] == "image"
+        assert "png" in entry["renditions"]
+
+    def test_a_real_artifact_png_is_served_over_the_real_route(self, tmp_path):
+        import scripts.serve_ui as su
+
+        runtime, manager, channel, conversation = _built(tmp_path, media="local")
+        manager.handle_task(Task(description=DIAGRAM_TEXT))
+        artifact_id = runtime.artifacts.all()[0].artifact_id
+
+        system = su.LiveSystem(
+            runtime=runtime, manager=manager, channel=channel, conversation=conversation,
+            centre=su.ControlCenter(runtime, manager), lock=__import__("threading").Lock(),
+        )
+        status, body, content_type = su.route(f"/artifact/{artifact_id}.png", system)
+        assert status == 200
+        assert content_type == "image/png"
+        assert body[:8] == b"\x89PNG\r\n\x1a\n"
+
+    def test_an_image_with_no_illustrator_configured_is_a_real_404_not_empty_bytes(self, tmp_path):
+        import scripts.serve_ui as su
+
+        runtime, manager, channel, conversation = _built(tmp_path, media="null")
+        manager.handle_task(Task(description=DIAGRAM_TEXT))
+        artifact_id = runtime.artifacts.all()[0].artifact_id
+
+        system = su.LiveSystem(
+            runtime=runtime, manager=manager, channel=channel, conversation=conversation,
+            centre=su.ControlCenter(runtime, manager), lock=__import__("threading").Lock(),
+        )
+        status, body, content_type = su.route(f"/artifact/{artifact_id}.png", system)
+        assert status == 404
+
+    def test_documents_and_diagrams_coexist_as_independent_artifacts(self, tmp_path):
+        """The same store, the same tool, two genuinely independent
+        artifact types - proof this is one broad system, not two
+        parallel ones."""
+        runtime, manager, *_ = _built(tmp_path, media="local")
+        r1 = manager.handle_task(Task(description=HANDOUT_TEXT))
+        r2 = manager.handle_task(Task(description=DIAGRAM_TEXT))
+        assert r1.succeeded and r2.succeeded
+
+        artifacts = runtime.artifacts.all()
+        assert len(artifacts) == 2
+        types = {a.type for a in artifacts}
+        assert types == {"document", "image"}
 
 
 class TestMultiStepIntelligenceIntegration:
@@ -976,6 +1459,65 @@ class TestMultiStepIntelligenceIntegration:
         )
         assert "Pompeii" in text
 
+    def test_a_two_step_objective_reaches_create_diagram_and_produces_a_real_png(self, tmp_path):
+        from src.manager.llm_brain import LLMManagerBrain
+        from src.manager.objective_loop import pursue_objective
+        from src.providers.base import Completion, LLMProvider
+
+        runtime, manager, *_ = _built(tmp_path, media="local")
+
+        class ScriptedProvider(LLMProvider):
+            def __init__(self):
+                self.calls = []
+
+            @property
+            def name(self):
+                return "scripted"
+
+            def complete(self, prompt, *, system=None):
+                self.calls.append(prompt)
+                n = len(self.calls)
+                if n == 1:
+                    return Completion(
+                        text="Water evaporates, forms clouds, and falls back as precipitation.",
+                        provider="scripted",
+                    )
+                if n == 2:
+                    return Completion(
+                        text=json.dumps(
+                            {"status": "continue", "next_step": "make a diagram of the water cycle"}
+                        ),
+                        provider="scripted",
+                    )
+                if n == 3:
+                    return Completion(
+                        text="a clearly labeled diagram of the water cycle showing evaporation and precipitation",
+                        provider="scripted",
+                    )
+                return Completion(
+                    text=json.dumps({"status": "complete", "final_answer": "Created a diagram."}),
+                    provider="scripted",
+                )
+
+        provider = ScriptedProvider()
+        manager.brain = LLMManagerBrain(provider, personality=runtime.identity.personality)
+        manager.own_skills._converse = manager.brain.converse
+
+        outcome = pursue_objective(manager, Task(description="How does the water cycle work?"))
+
+        assert outcome.status.value == "completed"
+        assert len(outcome.steps) == 2
+        assert outcome.steps[1].result.payload.get("handled_by") == "create_diagram"
+
+        artifacts = runtime.artifacts.all()
+        assert len(artifacts) == 1
+        assert artifacts[0].type == "image"
+        from PIL import Image
+
+        with Image.open(artifacts[0].latest.renditions["png"]) as img:
+            img.load()
+            assert img.size[0] > 0
+
 
 # ---------------------------------------------------------------------------
 # Memory boundary: creating/revising an artifact must never silently
@@ -1042,6 +1584,51 @@ class TestUIRendersTheRealArtifact:
         rendered = out["views"]["boot"]
         assert f"artifact/{artifact_id}.pdf" in rendered
         assert "The History of Volcanoes" in rendered
+
+    def test_the_real_frontend_script_renders_a_real_image_artifact_as_an_inline_preview(self, tmp_path):
+        import re
+        import subprocess
+
+        node = self._node()
+        if node is None:
+            pytest.skip("no node runtime available in this environment")
+
+        import scripts.control_center as cc
+        from src.config.settings import Settings
+        from src.control_center.snapshot import snapshot as build_snapshot
+
+        runtime, manager, channel, conversation = cc.build(
+            Settings.from_env(
+                env={}, memory="ephemeral", artifacts_dir=str(tmp_path / "artifacts"), media="local",
+            )
+        )
+        manager.handle_task(Task(description=DIAGRAM_TEXT))
+        artifact_id = runtime.artifacts.all()[0].artifact_id
+        centre = cc.ControlCenter(runtime, manager)
+        data = build_snapshot(centre, conversation=conversation, channel=channel)
+
+        repo_root = Path(__file__).resolve().parent.parent
+        shell = (repo_root / "ui" / "index.html").read_text(encoding="utf-8")
+        script_match = re.search(r"<script>(.*)</script>", shell, re.S)
+        assert script_match is not None
+        (tmp_path / "ui_script.js").write_text(script_match.group(1), encoding="utf-8")
+        (tmp_path / "snapshot.json").write_text(json.dumps(data), encoding="utf-8")
+        harness = tmp_path / "harness.js"
+        harness.write_text(_UI_NODE_HARNESS, encoding="utf-8")
+
+        result = subprocess.run(
+            [node, str(harness), str(tmp_path / "ui_script.js"), str(tmp_path / "snapshot.json"), "agent"],
+            capture_output=True, text=True,
+        )
+        assert result.stdout.strip(), result.stderr
+        out = json.loads(result.stdout.strip().splitlines()[-1])
+        assert out.get("ok"), out.get("error")
+
+        rendered = out["views"]["boot"]
+        assert f"artifact/{artifact_id}.png" in rendered
+        # A genuine inline <img> preview, not merely a download link - the
+        # real served file is what the src attribute points at.
+        assert f'<img src="artifact/{artifact_id}.png"' in rendered
 
 
 # A trimmed copy of the real vm-based harness
@@ -1182,6 +1769,16 @@ class TestArtifactsDoNotBecomeMemoryRecords:
         before = len(manager.memory.recall(limit=1000))
 
         result = manager.handle_task(Task(description=HANDOUT_TEXT))
+        assert result.succeeded, result.error
+
+        after = len(manager.memory.recall(limit=1000))
+        assert after == before, "creating an artifact must not, by itself, retain a memory record"
+
+    def test_creating_a_diagram_writes_no_memory_record(self, tmp_path):
+        runtime, manager, *_ = _built(tmp_path, media="local")
+        before = len(manager.memory.recall(limit=1000))
+
+        result = manager.handle_task(Task(description=DIAGRAM_TEXT))
         assert result.succeeded, result.error
 
         after = len(manager.memory.recall(limit=1000))

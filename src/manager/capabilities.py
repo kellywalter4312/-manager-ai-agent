@@ -2262,6 +2262,247 @@ REVISE_ARTIFACT = ManagerCapability(
 
 
 # ---------------------------------------------------------------------------
+# Multimodal workspace/artifact checkpoint, image/diagram half: a real,
+# persistent, versioned image artifact - a diagram, a map, an
+# illustration, or any other real visual an ImageProvider can produce.
+# Genuinely the same artifact system as create_artifact/revise_artifact
+# above (identical ArtifactStore, identical version-chain identity,
+# identical ownership rules) with a different concrete content type
+# (ImageContent instead of DocumentContent) and a different production
+# step (the configured ImageProvider instead of a DocumentRenderer) -
+# never a second, parallel artifact mechanism.
+#
+# "diagram"/"map"/"visual" are used as the routing nouns, deliberately
+# never any one subject: nowhere in this code is "skeleton", "organ",
+# "anatomy", or any other example subject named. Whatever the person
+# actually asks the image to show is carried through as the real prompt
+# text, exactly as it is for any other capability that reasons over
+# given text.
+# ---------------------------------------------------------------------------
+
+_DIAGRAM_MARKERS: tuple[str, ...] = (
+    "make a diagram", "create a diagram", "draw a diagram", "prepare a diagram",
+    "make me a diagram", "create me a diagram", "build a diagram", "draw me a diagram",
+    "make a visual diagram", "create a visual diagram",
+    "draw a map", "create a map", "make a map", "draw me a map",
+)
+
+_REVISE_DIAGRAM_MARKERS: tuple[str, ...] = (
+    "revise the diagram", "revise that diagram", "update the diagram", "update that diagram",
+    "redraw the diagram", "redraw that diagram", "revise the map", "update the map",
+)
+
+# How much of a person's own remaining request, once the trigger phrase
+# itself is removed, counts as "already a real description" rather than
+# a bare command with nothing else in it - deliberately much lower than
+# _CLIP_TRANSCRIPT_MIN_CHARS/handout's own threshold: an image prompt
+# needs far less real text to be genuinely usable than a multi-section
+# document does.
+_DIAGRAM_PROMPT_MIN_CHARS = 12
+
+
+def create_diagram_intent(task: Task, participants: Sequence[str] = ()) -> bool:
+    return _marker_present(task.description, _DIAGRAM_MARKERS)
+
+
+def create_diagram(request: CapabilityRequest) -> TaskResult:
+    """Create a real, persistent, versioned image/diagram artifact -
+    deterministically when the request already names what the image
+    should show (Half-Brain safe, no LLM needed), Brain-assisted when it
+    names only the bare ask ("make me a diagram") with nothing else to
+    go on.
+
+    The identical two-tier evidence order ``create_artifact`` already
+    holds itself to: real, already-given text first; the Brain only
+    when there genuinely is none. Never invents a subject - a vague
+    request with no Brain configured is refused honestly rather than
+    guessed.
+    """
+    if not request.tools.permits("artifact_production"):
+        equipped = ", ".join(request.tools.names()) or "none"
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "I can put together a diagram, but the underlying "
+            f"'artifact_production' capability is not installed, so I cannot "
+            f"save it as a real artifact yet. Currently equipped: {equipped}.",
+        )
+
+    remainder = _after_marker(request.task.description, _DIAGRAM_MARKERS)
+    if len(remainder) >= _DIAGRAM_PROMPT_MIN_CHARS:
+        prompt = remainder
+    else:
+        if request.converse is None:
+            return TaskResult.failure(
+                request.task, request.own_name,
+                "I don't have a way to turn that into a real image description "
+                "yet - no language model is configured for me right now. Tell "
+                "me specifically what the diagram/image should show.",
+            )
+        decision = request.converse(
+            request.task,
+            (
+                "The person asked for a diagram/image/visual but gave little "
+                "detail. Propose one single, concrete, descriptive prompt "
+                "suitable for an image-generation model that captures what "
+                "they most likely want, and respond with ONLY that prompt "
+                "text - no other commentary.",
+            ),
+        )
+        if not decision.is_decided or not decision.reason.strip():
+            return TaskResult.failure(
+                request.task, request.own_name,
+                f"I couldn't come up with a concrete enough description for that "
+                f"image ({decision.reason or 'no usable answer'}).",
+            )
+        prompt = decision.reason
+
+    from src.services.artifacts.models import ImageContent
+
+    try:
+        content = ImageContent(prompt=prompt)
+    except ValueError as exc:
+        return TaskResult.failure(request.task, request.own_name, str(exc))
+
+    outcome = request.tools.invoke(
+        "artifact_production", {"operation": "create_image", "content": content.to_json()}
+    )
+    if not outcome.ok:
+        return TaskResult.failure(
+            request.task, request.own_name, f"I couldn't save that image as a real artifact: {outcome.error}",
+        )
+
+    return TaskResult.success(
+        request.task, request.own_name, outcome.output,
+        payload={"handled_by": "create_diagram"},
+    )
+
+
+CREATE_DIAGRAM = ManagerCapability(
+    name="create_diagram",
+    capabilities=frozenset({"diagram", "visual", "map"}),
+    handle=create_diagram,
+    description=(
+        "Creates a real, persistent, versioned image/diagram artifact from a "
+        "description - a diagram, a map, an illustration, or any other real "
+        "visual subject, never a fixed catalog of examples."
+    ),
+    claims=create_diagram_intent,
+    scoreable=False,
+)
+
+
+def revise_diagram_intent(task: Task, participants: Sequence[str] = ()) -> bool:
+    return _marker_present(task.description, _REVISE_DIAGRAM_MARKERS)
+
+
+def revise_diagram(request: CapabilityRequest) -> TaskResult:
+    """Revise an existing image/diagram artifact - the same artifact
+    identity, one real version further along, never a new, disconnected
+    file. Resolution order identical to ``revise_artifact``: an explicit
+    ``artifact <id>`` reference first, otherwise the most recently
+    created/revised image this agent itself owns.
+    """
+    if not request.tools.permits("artifact_production"):
+        equipped = ", ".join(request.tools.names()) or "none"
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "I can revise a diagram, but the underlying 'artifact_production' "
+            f"capability is not installed. Currently equipped: {equipped}.",
+        )
+
+    text = request.task.description
+    match = _ARTIFACT_ID_PATTERN.search(text)
+    if match:
+        artifact_id = match.group(1)
+    else:
+        lookup = request.tools.invoke(
+            "artifact_production", {"operation": "find_latest", "content": "image"}
+        )
+        if not lookup.ok:
+            return TaskResult.failure(
+                request.task, request.own_name,
+                "I don't have an existing diagram to revise yet - create one "
+                "first, or reference it explicitly with 'artifact <id>'.",
+            )
+        artifact_id = lookup.output.strip()
+
+    current = request.tools.invoke("artifact_production", {"operation": "get", "content": artifact_id})
+    if not current.ok:
+        return TaskResult.failure(
+            request.task, request.own_name, f"I couldn't find that diagram to revise: {current.error}",
+        )
+
+    remainder = _after_marker(text, _REVISE_DIAGRAM_MARKERS)
+    # An explicit "artifact <id>" reference is evidence for *which*
+    # artifact, never part of *what it should now show* - stripped out
+    # here so a revision request naming an id does not leak that id
+    # into the new image prompt itself.
+    id_match = _ARTIFACT_ID_PATTERN.search(remainder)
+    if id_match:
+        remainder = (remainder[: id_match.start()] + remainder[id_match.end() :]).strip(" ,.:;-")
+    if len(remainder) >= _DIAGRAM_PROMPT_MIN_CHARS:
+        new_prompt = remainder
+    else:
+        if request.converse is None:
+            return TaskResult.failure(
+                request.task, request.own_name,
+                "I don't have a way to compose the revision yet - no language "
+                "model is configured for me right now. Tell me specifically "
+                "what the revised diagram/image should show.",
+            )
+        decision = request.converse(
+            request.task,
+            (
+                f"The diagram/image's current description is: {current.output!r}. "
+                "The person asked for a revision. Propose one single, concrete, "
+                "updated prompt for an image-generation model that reflects "
+                "their requested change, and respond with ONLY that prompt "
+                "text - no other commentary.",
+            ),
+        )
+        if not decision.is_decided or not decision.reason.strip():
+            return TaskResult.failure(
+                request.task, request.own_name,
+                f"I couldn't compose that revision ({decision.reason or 'no usable answer'}).",
+            )
+        new_prompt = decision.reason
+
+    from src.services.artifacts.models import ImageContent
+
+    try:
+        new_content = ImageContent(prompt=new_prompt)
+    except ValueError as exc:
+        return TaskResult.failure(request.task, request.own_name, str(exc))
+
+    outcome = request.tools.invoke(
+        "artifact_production",
+        {"operation": "revise_image", "content": f"{artifact_id}\n{new_content.to_json()}"},
+    )
+    if not outcome.ok:
+        return TaskResult.failure(
+            request.task, request.own_name, f"I composed the revision but couldn't save it: {outcome.error}",
+        )
+
+    return TaskResult.success(
+        request.task, request.own_name, outcome.output,
+        payload={"handled_by": "revise_diagram"},
+    )
+
+
+REVISE_DIAGRAM = ManagerCapability(
+    name="revise_diagram",
+    capabilities=frozenset({"diagram", "visual", "map"}),
+    handle=revise_diagram,
+    description=(
+        "Revises an existing image/diagram artifact under the same identity, "
+        "producing a new real version rather than a disconnected new file."
+    ),
+    claims=revise_diagram_intent,
+    scoreable=False,
+)
+
+
+# ---------------------------------------------------------------------------
 # Creative media production - real narration, image and video assets,
 # one operation per call, dynamically sequenced by the objective loop
 # rather than by any workflow fixed here.
@@ -4583,6 +4824,8 @@ MANAGER_CAPABILITIES: dict[str, ManagerCapability] = {
     GENERATE_DOCUMENT.name: GENERATE_DOCUMENT,
     CREATE_ARTIFACT.name: CREATE_ARTIFACT,
     REVISE_ARTIFACT.name: REVISE_ARTIFACT,
+    CREATE_DIAGRAM.name: CREATE_DIAGRAM,
+    REVISE_DIAGRAM.name: REVISE_DIAGRAM,
     MEDIA_PRODUCTION.name: MEDIA_PRODUCTION,
     CLIP_VIDEO.name: CLIP_VIDEO,
     RECORD_THIS.name: RECORD_THIS,

@@ -4,39 +4,51 @@ workspace foundation. Genuinely different from every prior production
 tool in this project: ``DocumentGenerationTool`` writes one flat,
 disposable text file per call; this tool creates and revises a real
 ``Artifact`` (``src/services/artifacts/store.py``) with a stable
-identity, a real version chain, and, where a rendering engine is
-configured, a real exported file (a PDF today) - reopenable, revisable
-through the same identity, and visible to an operator (the Control
-Center) through the identical, authoritative store this tool itself
-writes through.
+identity, a real version chain, and, where a rendering/generation
+engine is configured, a real exported file (a PDF for documents, a PNG
+for images/diagrams today) - reopenable, revisable through the same
+identity, and visible to an operator (the Control Center) through the
+identical, authoritative store this tool itself writes through.
+
+**Two artifact types today, never a closed catalog.** ``document`` (a
+real, structured, multi-page-capable handout, rendered to PDF by a
+``DocumentRenderer``) and ``image`` (a real picture generated from a
+text description by the identical ``ImageProvider``
+``media_production``'s own ``illustrate`` operation already uses - a
+diagram, a map, an illustration, or any other visual an ``ImageProvider``
+can produce, never a hardcoded subject). Both go through the identical
+create/revise/get/find_latest shape below; a future third type (video,
+audio, code, ...) adds its own content schema
+(``src/services/artifacts/models.py``) and its own
+``_create_<type>``/``_revise_<type>`` pair here, never a redesign of
+``ArtifactStore`` or this tool's own contract.
 
 **Agent-independent, on purpose.** Nothing here names Alfred. ``owner_agent``
 is a plain string supplied at construction, the identical "identity is a
 string, never a class" discipline ``ManagerCapability``/``ProviderAccount``
 already hold themselves to - a future specialist gets its own artifacts
 by being handed its own instance of this exact class, never a
-duplicated implementation. ``get``/``revise_document`` check ownership
-before acting - an artifact belonging to a different agent (a real
-possibility once a second agent shares this same ``ArtifactStore``) is
-refused exactly as if it did not exist, never revealed or revisable by
-an instance that merely knows its id.
+duplicated implementation. ``get``/``revise_*`` check ownership before
+acting - an artifact belonging to a different agent (a real possibility
+once a second agent shares this same ``ArtifactStore``) is refused
+exactly as if it did not exist, never revealed or revisable by an
+instance that merely knows its id.
 
-**One tool, four narrow operations** - the same "one name, several
-provider-backed questions" shape ``MediaProductionTool`` already
-establishes: ``create_document`` and ``revise_document`` write a real
-version; ``get`` and ``find_latest`` are real, governed reads a
-capability handler needs (to show a Brain an existing version's real
-content before revising it, or to resolve "the handout" with no
-explicit id named) - reading through a Tool is an ordinary, already-
-established pattern (``KnowledgeLookupTool``, ``CommunicationReadTool``),
-not something reserved for writes alone.
+**Provider-neutral, on purpose.** ``renderer``/``illustrator`` are the
+identical ``DocumentRenderer``/``ImageProvider`` contracts every other
+real capability in this project already depends on - never one vendor's
+own SDK, never a credential held here. Swapping either changes nothing
+about this class, ``create_diagram``/``create_artifact``
+(``src/manager/capabilities.py``), or ``ArtifactStore``.
 
 **Composing the content is not this tool's job.** Identical discipline
 to every other Tool in this project: this class has no route to a
 conversation, an objective, or the Brain. It is handed already-finished,
-already-structured ``DocumentContent`` JSON and writes/renders exactly
-that - see ``src/manager/capabilities.py``'s ``create_artifact``/
-``revise_artifact`` for where that structure actually gets composed.
+already-structured content (a ``DocumentContent``/``ImageContent``'s
+own JSON) and writes/renders exactly that - see
+``src/manager/capabilities.py``'s ``create_artifact``/``revise_artifact``/
+``create_diagram``/``revise_diagram`` for where that content actually
+gets composed.
 """
 
 from __future__ import annotations
@@ -46,21 +58,31 @@ from pathlib import Path
 
 from src.agents.tools.tool import Tool, ToolSpec
 from src.providers.documents.pdf import DocumentRenderError, DocumentRenderer
-from src.services.artifacts.models import DocumentContent
+from src.providers.media.image import ImageError, ImageProvider
+from src.services.artifacts.models import DocumentContent, ImageContent
 from src.services.artifacts.store import ArtifactError, ArtifactStore
 
 DOCUMENT_TYPE = "document"
+IMAGE_TYPE = "image"
+
+_RENDITION_EXTENSION = {DOCUMENT_TYPE: "pdf", IMAGE_TYPE: "png"}
 
 
 class ArtifactProductionTool(Tool):
-    """Wraps one ``ArtifactStore`` and one ``DocumentRenderer`` behind
-    the ordinary ``Tool`` contract."""
+    """Wraps one ``ArtifactStore``, one ``DocumentRenderer`` and one
+    ``ImageProvider`` behind the ordinary ``Tool`` contract."""
 
     def __init__(
-        self, store: ArtifactStore, renderer: DocumentRenderer, *, owner_agent: str
+        self,
+        store: ArtifactStore,
+        renderer: DocumentRenderer,
+        illustrator: ImageProvider,
+        *,
+        owner_agent: str,
     ) -> None:
         self._store = store
         self._renderer = renderer
+        self._illustrator = illustrator
         self._owner_agent = owner_agent
 
     @property
@@ -68,9 +90,10 @@ class ArtifactProductionTool(Tool):
         return ToolSpec(
             name="artifact_production",
             description=(
-                "Creates or revises a real, persistent, versioned document artifact "
-                "(and its PDF rendition, when a rendering engine is configured), or "
-                "reads back an existing one - never a fabricated file or record."
+                "Creates or revises a real, persistent, versioned artifact - a "
+                "document (with a PDF rendition, when configured) or an image/"
+                "diagram (with a PNG rendition, when configured) - or reads back "
+                "an existing one. Never a fabricated file or record."
             ),
             schema={"operation": str, "content": str},
         )
@@ -83,18 +106,24 @@ class ArtifactProductionTool(Tool):
             return self._create_document(content)
         if operation == "revise_document":
             return self._revise_document(content)
+        if operation == "create_image":
+            return self._create_image(content)
+        if operation == "revise_image":
+            return self._revise_image(content)
         if operation == "get":
             return self._get(content)
         if operation == "find_latest":
             return self._find_latest(content)
         raise ValueError(
             f"unknown artifact_production operation {operation!r}; expected one of: "
-            "create_document, revise_document, get, find_latest"
+            "create_document, revise_document, create_image, revise_image, get, find_latest"
         )
 
     # ------------------------------------------------------------------
+    # document
+    # ------------------------------------------------------------------
 
-    def _render(self, doc: DocumentContent, version_dir: Path) -> tuple[dict, str]:
+    def _render_document(self, doc: DocumentContent, version_dir: Path) -> tuple[dict, str]:
         """Real PDF bytes when a rendering engine is configured, an
         honest empty rendition set (never a fabricated one) otherwise -
         rendering failure never blocks the document's own content from
@@ -118,7 +147,7 @@ class ArtifactProductionTool(Tool):
         content_path = version_dir / "content.json"
         content_path.write_text(doc.to_json(), encoding="utf-8")
 
-        renditions, render_note = self._render(doc, version_dir)
+        renditions, render_note = self._render_document(doc, version_dir)
 
         artifact = self._store.create(
             artifact_id=artifact_id,
@@ -138,35 +167,110 @@ class ArtifactProductionTool(Tool):
                 "revise_document needs an artifact id on the first line and the "
                 "new document JSON on the rest"
             ) from None
-        artifact_id = artifact_id.strip()
+        existing = self._existing_owned(artifact_id, expected_type=DOCUMENT_TYPE)
 
+        doc = DocumentContent.from_json(json_part)
+        version_dir, content_path = self._new_version_dir(existing)
+        content_path.write_text(doc.to_json(), encoding="utf-8")
+
+        renditions, render_note = self._render_document(doc, version_dir)
+
+        artifact = self._store.revise(
+            existing.artifact_id,
+            title=doc.title,
+            content_path=content_path.as_posix(),
+            renditions=renditions,
+        )
+        return self._describe("revised", artifact, content_path, renditions, render_note)
+
+    # ------------------------------------------------------------------
+    # image / diagram
+    # ------------------------------------------------------------------
+
+    def _render_image(self, img: ImageContent, version_dir: Path) -> tuple[dict, str]:
+        """Real PNG bytes from the configured ``ImageProvider`` - the
+        identical provider ``media_production``'s own ``illustrate``
+        operation already reaches, never a second image mechanism.
+        Generation failure never blocks the artifact's own real content
+        (the prompt) from being created and persisted."""
+        try:
+            asset = self._illustrator.generate(img.prompt)
+        except ImageError as exc:
+            return {}, str(exc)
+        image_path = version_dir / f"image.{asset.format}"
+        image_path.write_bytes(asset.data)
+        return {asset.format: image_path.as_posix()}, ""
+
+    def _create_image(self, content: str) -> str:
+        img = ImageContent.from_json(content)
+
+        artifact_id = uuid.uuid4().hex[:12]
+        version_dir = self._store.artifact_dir(artifact_id) / "v1"
+        version_dir.mkdir(parents=True, exist_ok=True)
+        content_path = version_dir / "content.json"
+        content_path.write_text(img.to_json(), encoding="utf-8")
+
+        renditions, render_note = self._render_image(img, version_dir)
+
+        artifact = self._store.create(
+            artifact_id=artifact_id,
+            type=IMAGE_TYPE,
+            owner_agent=self._owner_agent,
+            title=img.prompt[:80],
+            content_path=content_path.as_posix(),
+            renditions=renditions,
+        )
+        return self._describe("created", artifact, content_path, renditions, render_note)
+
+    def _revise_image(self, content: str) -> str:
+        try:
+            artifact_id, json_part = content.split("\n", 1)
+        except ValueError:
+            raise ValueError(
+                "revise_image needs an artifact id on the first line and the "
+                "new image content JSON on the rest"
+            ) from None
+        existing = self._existing_owned(artifact_id, expected_type=IMAGE_TYPE)
+
+        img = ImageContent.from_json(json_part)
+        version_dir, content_path = self._new_version_dir(existing)
+        content_path.write_text(img.to_json(), encoding="utf-8")
+
+        renditions, render_note = self._render_image(img, version_dir)
+
+        artifact = self._store.revise(
+            existing.artifact_id,
+            title=img.prompt[:80],
+            content_path=content_path.as_posix(),
+            renditions=renditions,
+        )
+        return self._describe("revised", artifact, content_path, renditions, render_note)
+
+    # ------------------------------------------------------------------
+    # shared reads and helpers
+    # ------------------------------------------------------------------
+
+    def _existing_owned(self, raw_artifact_id: str, *, expected_type: str):
+        artifact_id = raw_artifact_id.strip()
         existing = self._store.get(artifact_id)
-        if existing is None:
-            raise ArtifactError(f"no artifact found with id {artifact_id!r}")
-        if existing.owner_agent != self._owner_agent:
+        if existing is None or existing.owner_agent != self._owner_agent:
             # Ownership, not merely existence - a future second agent
             # sharing this same ArtifactStore must not be able to revise
             # another agent's artifact just by knowing its id. The
             # identical boundary ManagerSkills already holds every
             # other agent's own Memory/Brain to.
             raise ArtifactError(f"no artifact found with id {artifact_id!r}")
+        if existing.type != expected_type:
+            raise ArtifactError(
+                f"artifact {artifact_id!r} is a {existing.type!r} artifact, not {expected_type!r}"
+            )
+        return existing
 
-        doc = DocumentContent.from_json(json_part)
+    def _new_version_dir(self, existing) -> "tuple[Path, Path]":
         new_version = existing.latest.version + 1
-        version_dir = self._store.artifact_dir(artifact_id) / f"v{new_version}"
+        version_dir = self._store.artifact_dir(existing.artifact_id) / f"v{new_version}"
         version_dir.mkdir(parents=True, exist_ok=True)
-        content_path = version_dir / "content.json"
-        content_path.write_text(doc.to_json(), encoding="utf-8")
-
-        renditions, render_note = self._render(doc, version_dir)
-
-        artifact = self._store.revise(
-            artifact_id,
-            title=doc.title,
-            content_path=content_path.as_posix(),
-            renditions=renditions,
-        )
-        return self._describe("revised", artifact, content_path, renditions, render_note)
+        return version_dir, version_dir / "content.json"
 
     def _get(self, content: str) -> str:
         artifact_id = content.strip()
@@ -174,8 +278,17 @@ class ArtifactProductionTool(Tool):
         if artifact is None or artifact.owner_agent != self._owner_agent:
             raise ArtifactError(f"no artifact found with id {artifact_id!r}")
         latest = artifact.latest
-        doc = DocumentContent.from_json(Path(latest.content_path).read_text(encoding="utf-8"))
-        return doc.as_plain_text()
+        raw = Path(latest.content_path).read_text(encoding="utf-8")
+        if artifact.type == IMAGE_TYPE:
+            return ImageContent.from_json(raw).prompt
+        # DOCUMENT_TYPE, and the honest fallback for any future type
+        # this tool does not yet special-case: the canonical content is
+        # still real JSON on disk even when this method does not yet
+        # know how to summarise it as prose.
+        try:
+            return DocumentContent.from_json(raw).as_plain_text()
+        except ValueError:
+            return raw
 
     def _find_latest(self, content: str) -> str:
         artifact_type = content.strip() or None
@@ -193,8 +306,12 @@ class ArtifactProductionTool(Tool):
             f"Artifact {verb}: id={artifact.artifact_id} type={artifact.type} "
             f"version={latest.version} title={latest.title!r} content={content_path.as_posix()}"
         )
-        if "pdf" in renditions:
-            line += f" pdf={renditions['pdf']}"
+        wanted = _RENDITION_EXTENSION.get(artifact.type)
+        if wanted and wanted in renditions:
+            line += f" {wanted}={renditions[wanted]}"
+        elif renditions:
+            fmt, path = next(iter(renditions.items()))
+            line += f" {fmt}={path}"
         else:
-            line += f" (no PDF produced: {render_note})"
+            line += f" (no rendition produced: {render_note})"
         return line

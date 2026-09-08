@@ -1842,19 +1842,29 @@
   // Workspace/artifact checkpoint: the real, persisted
   // artifacts this agent has produced - read straight off S.artifacts
   // (the same /snapshot.json field every restart/poll re-reads from the
-  // one authoritative ArtifactStore), never invented here. A document
-  // with a real "pdf" rendition links straight to the real file
-  // /artifact/<id>.pdf actually serves; one without still shows its
-  // real structured content exists, honestly, with no link to fabricate.
+  // one authoritative ArtifactStore), never invented here. Genuinely
+  // type-agnostic: whichever rendition format an artifact's own latest
+  // version actually has (a document's "pdf", an image/diagram's "png",
+  // or any future format) links straight to the real file
+  // /artifact/<id>.<format> actually serves - this function never
+  // hardcodes which formats exist. An image-typed artifact additionally
+  // renders as a real inline thumbnail, the actual served file, never a
+  // placeholder icon; one with no rendition yet still shows its real
+  // content exists, honestly, with no link to fabricate.
   function artifactsOf(agentName){
     const mine = (S.artifacts || []).filter(x => x.owner_agent === agentName);
     if(!mine.length) return "none yet";
     return mine.map(x => {
-      const pdf = x.renditions && x.renditions.pdf;
+      const renditions = x.renditions || {};
+      const formats = Object.keys(renditions);
       const label = `${x.title} (v${x.version}, ${x.status})`;
-      return pdf
-        ? `<a class="chip on" href="artifact/${esc(x.artifact_id)}.pdf" target="_blank" rel="noopener">${esc(label)}</a>`
-        : `<span class="chip off">${esc(label)}</span>`;
+      if(!formats.length) return `<span class="chip off">${esc(label)}</span>`;
+      const format = formats[0];
+      const href = `artifact/${esc(x.artifact_id)}.${esc(format)}`;
+      const preview = x.type === "image"
+        ? `<img src="${href}" alt="${esc(label)}" style="display:block;max-width:140px;max-height:100px;border-radius:6px;margin-top:4px">`
+        : "";
+      return `<a class="chip on" href="${href}" target="_blank" rel="noopener" style="display:inline-block">${esc(label)} [${esc(format)}]${preview}</a>`;
     }).join("");
   }
 

@@ -219,6 +219,11 @@ class TestHandlersAreSelectedThroughTheRegistry:
             # already-structured content, Brain-assisted when organizing an
             # objective into that structure instead.
             "create_artifact",
+            # Multimodal workspace/artifact checkpoint, image/diagram half:
+            # a real, persistent, versioned image artifact - a diagram, a
+            # map, or any other real visual, deterministic given an
+            # already-descriptive request, Brain-assisted for a bare ask.
+            "create_diagram",
             "create_task",
             "current_datetime",
             "forget",
@@ -253,6 +258,10 @@ class TestHandlersAreSelectedThroughTheRegistry:
             # existing document artifact under the same identity, a new
             # real version rather than a disconnected new file.
             "revise_artifact",
+            # Multimodal workspace/artifact checkpoint, image/diagram half:
+            # revises an existing image/diagram artifact under the same
+            # identity, a new real version rather than a disconnected file.
+            "revise_diagram",
             "roster_report",
             "small_talk",
             "temporal_derivation",

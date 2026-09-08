@@ -431,20 +431,28 @@ def build(settings: Settings):
             # evolved, so an unconfigured installation behaves identically.
             DocumentGenerationTool(output_dir=Path(config.get(TOOL_DOCUMENT_GENERATION, settings.documents_dir))),
             # Multimodal workspace/artifact checkpoint: real, persistent,
-            # versioned document artifacts - genuinely different from
-            # DocumentGenerationTool above (one flat, disposable file, no
-            # identity, no version chain). Backed by runtime.artifacts
-            # (the same store the Control Center's own `artifacts`
-            # command reads - one authoritative record, never a second
-            # copy) and runtime.document_renderer (real PDF export by
-            # default; "null" only if MANAGER_DOCUMENT_RENDERING was
-            # deliberately set to it). owner_agent is this Manager's own
-            # declared name, never hardcoded - the identical name-driven
-            # ownership every other per-agent construction here already
-            # uses, so a future specialist's own instance of this exact
-            # class needs no code change, only its own name.
+            # versioned artifacts (documents and images/diagrams) -
+            # genuinely different from DocumentGenerationTool above (one
+            # flat, disposable file, no identity, no version chain).
+            # Backed by runtime.artifacts (the same store the Control
+            # Center's own `artifacts` command reads - one authoritative
+            # record, never a second copy), runtime.document_renderer
+            # (real PDF export by default; "null" only if
+            # MANAGER_DOCUMENT_RENDERING was deliberately set to it),
+            # and runtime.media.illustrator - the identical ImageProvider
+            # media_production's own "illustrate" operation already
+            # reaches, never a second image-generation mechanism, so a
+            # diagram/image artifact is exactly as real (and exactly as
+            # honestly "null" by default) as any other AI-image
+            # capability this project already has. owner_agent is this
+            # Manager's own declared name, never hardcoded - the
+            # identical name-driven ownership every other per-agent
+            # construction here already uses, so a future specialist's
+            # own instance of this exact class needs no code change,
+            # only its own name.
             ArtifactProductionTool(
-                runtime.artifacts, runtime.document_renderer, owner_agent=runtime.identity.name,
+                runtime.artifacts, runtime.document_renderer, runtime.media.illustrator,
+                owner_agent=runtime.identity.name,
             ),
             # Files/Documents completion: real visual reasoning reaches
             # Alfred through the Brain's own analyze_image question
@@ -580,11 +588,12 @@ def render_capabilities(centre: "ControlCenter") -> str:
     # given already-structured content (Half-Brain safe), so this row's
     # readiness reflects the tool grant alone, never brain.is_full_brain.
     lines.append(_capability_row(
-        "Artifact Workspace (handouts)", ready=permits("artifact_production"),
+        "Artifact Workspace (documents, images/diagrams)", ready=permits("artifact_production"),
         detail=(
             f"artifact_production tool={'granted' if permits('artifact_production') else 'not granted'}, "
             f"{len(runtime.artifacts.all())} artifact(s) persisted, "
-            f"pdf export={runtime.document_renderer.name}"
+            f"pdf export={runtime.document_renderer.name}, "
+            f"image/diagram export={runtime.media.illustrator.name}"
         ),
     ))
 
