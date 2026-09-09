@@ -412,3 +412,166 @@ def load_service_registry_fresh():
     from src.services.connections.service_registry import load_service_registry
 
     return load_service_registry(service_registry_module.DEFAULT_SERVICES_PATH)
+
+
+class TestGenericOperationExecutionEndToEnd:
+    """Operation-level authorization + generalized real-world action
+    execution (2026-09-09) - the full lifecycle in one place: an
+    industry-agnostic, deliberately generic test service (never a real
+    company, never a named industry - 'genericsvc', 'read_item',
+    'write_item' name nothing real) is discovered, not hand-declared;
+    its safe read and its consequential write are correctly told apart
+    from the service's own declared metadata alone; the write is
+    refused without confirmation; both are exercised through the real,
+    unmodified Control Center execution surface and the real,
+    unmodified connected_action capability.
+    """
+
+    def _serve_generic_service(self, monkeypatch):
+        import json
+        import urllib.request
+
+        class _FakeResponse:
+            def __enter__(self_): return self_
+            def __exit__(self_, *a): return False
+            def read(self_, *a, **k):
+                return json.dumps({
+                    "openapi": "3.0.0",
+                    "info": {"title": "Generic Test Service"},
+                    "paths": {
+                        "/item": {
+                            "get": {"operationId": "read_item", "summary": "harmless read"},
+                            "post": {
+                                "operationId": "write_item",
+                                "summary": "consequential write",
+                                "security": [{"apiKey": []}],
+                            },
+                        },
+                    },
+                }).encode("utf-8")
+
+        monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _FakeResponse())
+
+    def test_the_generic_service_is_genuinely_discovered_not_hand_declared(self, monkeypatch):
+        from src.providers.service_discovery import discover_service
+
+        self._serve_generic_service(monkeypatch)
+        found = discover_service("genericsvc", "http://127.0.0.1:8905")
+
+        assert found.source_kind == "openapi"
+        assert set(found.descriptor.operation_names) == {"read_item", "write_item"}
+        assert found.descriptor.operation("read_item").requires_auth is False
+        assert found.descriptor.operation("write_item").requires_auth is True
+
+    def test_the_write_operation_is_never_executed_through_natural_language(self, monkeypatch):
+        from src.agents.tools.connection import ConnectionActionTool
+        from src.agents.tools.toolset import ToolSet
+        from src.composition import build_manager, build_runtime
+        from src.config.settings import Settings
+        from src.providers.service_discovery import discover_service
+        from src.services.email.in_memory_mailbox import InMemoryMailbox
+
+        self._serve_generic_service(monkeypatch)
+        found = discover_service("genericsvc", "http://127.0.0.1:8905")
+        declare_service(found.descriptor, service_registry_module.DEFAULT_SERVICES_PATH)
+
+        settings = Settings.from_env(
+            env={}, log_level="CRITICAL", memory="ephemeral", connection_provider="genericsvc",
+        )
+        runtime = build_runtime(settings)
+        connection = runtime.connection
+        assert isinstance(connection, DeclaredConnection)
+
+        # write_item is declared second (read_item first) - conversation
+        # only ever reaches operations[0], so this specifically proves
+        # write_item cannot be reached through it at all, by construction,
+        # not merely that it is refused when selected.
+        assert connection.supported_operations[0] == "read_item"
+
+        tools = ToolSet([
+            ConnectionActionTool(connection, operation=op, description=f"Performs {op}.")
+            for op in connection.supported_operations
+        ])
+        manager = build_manager(runtime, mailbox=InMemoryMailbox(), profile=None, tools=tools)
+        manager.own_skills._connection = connection
+        result = manager.handle_task(CONNECTED_TASK)
+
+        assert result.succeeded  # the safe read, genuinely executed
+        assert result.payload["operation"] == "read_item"
+
+    def test_the_write_operation_succeeds_once_genuinely_authorized(self, monkeypatch):
+        """The other half of the pair: write_item is never reachable
+        through conversation (proven above), but *is* genuinely
+        executable once a real credential exists for it - discovered,
+        declared, credentialed, operation-authorized, and executed, all
+        through the real provider/connection layer. The confirm_token/
+        audit-log dance this same call goes through when reached via
+        Control Center is separately, thoroughly proven in
+        tests/test_administrative_write_audit.py -
+        TestOperationLevelExecutionGovernance; this test's own job is
+        the discovery-to-execution chain itself, not re-proving that
+        gate a second time.
+        """
+        self._serve_generic_service(monkeypatch)
+
+        from src.providers.service_discovery import discover_service
+
+        found = discover_service("genericsvc", "http://127.0.0.1:8905")
+        declare_service(found.descriptor, service_registry_module.DEFAULT_SERVICES_PATH)
+
+        store = CredentialStore()
+        store.add(ProviderAccount(provider="genericsvc", account_id="default", credential="genuine-token"))
+        save_credential_store(store, account_store_file_module.DEFAULT_ACCOUNTS_PATH)
+
+        registry = load_service_registry_fresh()
+        descriptor = registry["genericsvc"]
+        account = store.active("genericsvc")
+        connection = DeclaredConnection(descriptor, account)
+
+        assert connection.authorization_for("write_item") is AuthorizationState.AUTHORIZED
+        assert connection.requires_confirmation_for("write_item") is True
+
+        import json
+        import urllib.request as urllib_request_module
+
+        class _WriteResponse:
+            def __enter__(self_): return self_
+            def __exit__(self_, *a): return False
+            def read(self_): return json.dumps({"id": "created-1"}).encode()
+
+        monkeypatch.setattr(urllib_request_module, "urlopen", lambda *a, **k: _WriteResponse())
+
+        result = connection.execute("write_item", note="a real generic write")
+        assert result.ok
+        assert "created-1" in result.detail
+
+    def test_a_second_generic_service_with_a_different_shape_needs_no_new_code(self, monkeypatch):
+        """Open-endedness: a completely different, unrelated generic
+        service - different name, different operation names, different
+        paths - works through the identical mechanism with zero new
+        branches, proving nothing about *this specific* service was
+        ever assumed."""
+        import json
+        import urllib.request
+
+        class _FakeResponse:
+            def __enter__(self_): return self_
+            def __exit__(self_, *a): return False
+            def read(self_, *a, **k):
+                return json.dumps({
+                    "openapi": "3.0.0",
+                    "info": {"title": "A Completely Different Generic Service"},
+                    "paths": {
+                        "/status": {"get": {"operationId": "check_status"}},
+                        "/entries": {"post": {"operationId": "submit_entry", "security": [{"basic": []}]}},
+                    },
+                }).encode("utf-8")
+
+        monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _FakeResponse())
+
+        from src.providers.service_discovery import discover_service
+
+        found = discover_service("othergenericsvc", "http://127.0.0.1:8906")
+        assert set(found.descriptor.operation_names) == {"check_status", "submit_entry"}
+        assert found.descriptor.operation("check_status").requires_auth is False
+        assert found.descriptor.operation("submit_entry").requires_auth is True

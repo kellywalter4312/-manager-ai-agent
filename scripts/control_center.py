@@ -267,6 +267,16 @@ HELP = """
   services <name> declare <base-url> <op>:<METHOD>:<path>:<auth|open>[,...]
                            declare a legitimate new service - no code
                            change, ever, for a new company or website
+  services <name> execute <operation> [key=value ...]
+                           run one already-declared, already-connected
+                           operation for real - a genuine network call,
+                           the real result. A read (GET) needs no
+                           confirmation; anything else does, exactly
+                           like declare above. Authorization is checked
+                           per operation, not for the whole service -
+                           a harmless read is never blocked merely
+                           because a different operation needs a
+                           credential nobody has provided yet.
   services <name> forget   remove a declared service permanently
 
   A declared service becomes a real, usable connection (reachable
@@ -1237,6 +1247,16 @@ def run_connections_command(centre: "ControlCenter", rest: str) -> str:
 #                                          nothing, requires no
 #                                          confirmation
 #     services <name> declare <url> <op>:<METHOD>:<path>:<auth|open>[,...]
+#     services <name> execute <op> [key=value ...]
+#                                        -> operation-level authorization
+#                                          (DeclaredConnection.authorization_for),
+#                                          a real network call
+#                                          (DeclaredConnection.execute),
+#                                          and an honest result - GET
+#                                          needs no confirmation; every
+#                                          other method does, the exact
+#                                          same confirm_token/audit path
+#                                          declare/forget already use
 #     services <name> forget
 #
 # ``discover`` (src/providers/service_discovery.py) tries two real,
@@ -1399,11 +1419,65 @@ def run_services_command(centre: "ControlCenter", rest: str) -> str:
             f"with MANAGER_CONNECTION_PROVIDER={descriptor.name} on the next start."
         )
 
+    if action == "execute":
+        # Operation-level, generalized real-world action execution
+        # (Phase 6, 2026-09-09) - the actual DISCOVER -> ... -> EXECUTE ->
+        # VERIFY -> RECORD lifecycle's own final steps, reusing every
+        # governance mechanism already established rather than inventing
+        # a second one: the identical confirm_token dance
+        # classify_administrative_write/_record_if_administrative_write
+        # already give declare/forget above, now also covering a
+        # consequential (non-GET) operation - never a GET, which needs
+        # no more confirmation than 'connections <name> status' already
+        # does. The credential, if any, is still whatever
+        # 'connections <name> connect ...' already put on file - never a
+        # second credential path.
+        if len(rest_args) < 2:
+            return "usage: services <name> execute <operation> [key=value ...]"
+        operation = rest_args[1]
+        params: "dict[str, str]" = {}
+        for raw_param in rest_args[2:]:
+            if "=" not in raw_param:
+                return f"could not execute '{operation}' on '{name}': '{raw_param}' must be key=value"
+            key, _, value = raw_param.partition("=")
+            if not key:
+                return f"could not execute '{operation}' on '{name}': a parameter name must not be empty"
+            params[key] = value
+
+        registry = load_service_registry(DEFAULT_SERVICES_PATH)
+        descriptor = registry.get(normalised)
+        if descriptor is None:
+            return f"'{name}' is not a declared service - discover and declare it first."
+        if descriptor.operation(operation) is None:
+            return (
+                f"'{name}' has no operation named '{operation}'. "
+                f"Declared: {', '.join(descriptor.operation_names) or 'none'}"
+            )
+
+        from src.providers.declared_connection import DeclaredConnection
+        from src.services.credentials.account_store_file import load_credential_store
+
+        store = load_credential_store(DEFAULT_ACCOUNTS_PATH)
+        account = store.active(descriptor.name)
+        connection = DeclaredConnection(descriptor, account)
+
+        auth_state = connection.authorization_for(operation)
+        if not auth_state.grants_access:
+            return (
+                f"'{operation}' on '{name}' is not authorized - no credential is on file. "
+                f"Add one with 'connections {name} connect <account-id> <credential>' first."
+            )
+
+        result = connection.execute(operation, **params)
+        if not result.ok:
+            return f"'{operation}' on '{name}' did not succeed ({result.status.value}): {result.detail}"
+        return f"'{operation}' on '{name}' succeeded:\n{result.detail}"
+
     if action == "forget":
         removed = forget_service(normalised, DEFAULT_SERVICES_PATH)
         return f"forgot '{normalised}'" if removed else f"'{name}' was not declared"
 
-    return f"unknown services action '{action}' for '{name}'. Try: discover, declare, forget"
+    return f"unknown services action '{action}' for '{name}'. Try: discover, declare, execute, forget"
 
 
 # ---------------------------------------------------------------------------
@@ -1702,6 +1776,22 @@ def classify_administrative_write(command: str) -> "tuple[bool, str]":
             return True, f"declare a new service connection '{parts[1]}' (open-ended discovery)"
         return True, f"forget the declared service '{parts[1]}'"
 
+    if verb == "services" and len(parts) >= 4 and parts[2].lower() == "execute":
+        # Operation-level, not connection-level: a GET (read) needs no
+        # more confirmation than 'connections <name> status' already
+        # does; anything else genuinely changes state on a real,
+        # external service and is gated exactly like every other
+        # consequential write above - read from the operation's own
+        # already-declared method, the same real signal
+        # DeclaredConnection.requires_confirmation_for reuses, never a
+        # second classification of the identical fact.
+        service_name, operation_name = parts[1], parts[3]
+        descriptor = load_service_registry(DEFAULT_SERVICES_PATH).get(service_name.strip().lower())
+        operation = descriptor.operation(operation_name) if descriptor is not None else None
+        if operation is not None and operation.method == "GET":
+            return False, ""
+        return True, f"execute the operation '{operation_name}' on the connected service '{service_name}'"
+
     if (
         verb == "ecosystem" and len(parts) >= 5
         and parts[2].lower() in ("run", "rollback")
@@ -1740,7 +1830,7 @@ def _administrative_write_succeeded(verb: str, result: str) -> bool:
     if verb == "connections":
         return text.startswith("connected ") or text.startswith("disconnected ")
     if verb == "services":
-        return text.startswith("declared ") or text.startswith("forgot ")
+        return text.startswith("declared ") or text.startswith("forgot ") or "' succeeded:" in text
     if verb == "capabilities":
         return " is now enabled " in text or " is now disabled " in text
     if verb == "ecosystem":

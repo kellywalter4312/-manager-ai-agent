@@ -341,6 +341,142 @@ class TestTheServicesVerbUsesTheIdenticalGovernanceNoParallelSystem:
         assert "weatherstub" in registry
 
 
+class TestOperationLevelExecutionGovernance:
+    """Generalized real-world action execution (2026-09-09):
+    'services <name> execute <operation>' reuses the identical
+    classify_administrative_write/_record_if_administrative_write pair
+    every other verb here already does - a GET operation needs no
+    confirmation (the same shape 'provider validate'/'connections
+    status' already have); anything else does, and is durably recorded
+    exactly like declare/forget above."""
+
+    def _declare(self, centre, channel, conversation, action_log_path, *, auth_op=True):
+        auth = "auth" if auth_op else "open"
+        run_command(
+            centre,
+            f"services weatherstub declare http://127.0.0.1:9911 "
+            f"ping:GET:/ping:open,place_order:POST:/orders:{auth}",
+            80, channel, conversation, action_log_path=action_log_path,
+        )
+
+    def test_a_get_execute_needs_no_confirmation_and_creates_no_record(self, _isolated_paths, monkeypatch):
+        import urllib.request
+
+        class _FakeResponse:
+            def __enter__(self_): return self_
+            def __exit__(self_, *a): return False
+            def read(self_): return b'{"ok": true}'
+
+        monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _FakeResponse())
+
+        runtime, manager, channel, conversation = real_system()
+        centre = ControlCenter(runtime, manager)
+        self._declare(centre, channel, conversation, _isolated_paths)
+
+        result = run_command(
+            centre, "services weatherstub execute ping", 80, channel, conversation,
+            action_log_path=_isolated_paths,
+        )
+        assert "succeeded" in result
+
+        # Only the (confirmed) declare above was recorded - the GET
+        # execute itself, needing no confirmation, creates no record,
+        # the identical "real but inert read" shape a validate call
+        # already has.
+        entries = load_action_log(_isolated_paths)
+        assert [e.capability for e in entries] == ["admin.services"]
+
+    def test_a_post_execute_requires_confirmation_first(self, _isolated_paths):
+        runtime, manager, channel, conversation = real_system()
+        centre = ControlCenter(runtime, manager)
+        self._declare(centre, channel, conversation, _isolated_paths)
+        before = len(load_action_log(_isolated_paths))  # the declare above legitimately recorded one
+        system = _live_system(runtime, manager, channel, conversation)
+
+        status, body, _ = route_command(
+            "services weatherstub execute place_order", None, system, action_log_path=_isolated_paths,
+        )
+        assert status == 200
+
+        import json as jsonlib
+        assert jsonlib.loads(body)["requires_confirmation"] is True
+        # The pending (unconfirmed) execute call itself contributed no
+        # new record - the count is exactly what the declare above left it at.
+        assert len(load_action_log(_isolated_paths)) == before
+
+    def test_confirming_a_post_execute_runs_it_for_real_and_records_exactly_one_entry(self, _isolated_paths, monkeypatch):
+        import json as jsonlib
+        import urllib.request
+
+        class _FakeResponse:
+            def __enter__(self_): return self_
+            def __exit__(self_, *a): return False
+            def read(self_): return b'{"id": "order-1"}'
+
+        monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _FakeResponse())
+
+        runtime, manager, channel, conversation = real_system()
+        centre = ControlCenter(runtime, manager)
+        self._declare(centre, channel, conversation, _isolated_paths, auth_op=False)  # open, so no credential needed
+        system = _live_system(runtime, manager, channel, conversation)
+        command = "services weatherstub execute place_order"
+
+        _, pending_body, _ = route_command(command, None, system, action_log_path=_isolated_paths)
+        token = jsonlib.loads(pending_body)["confirm_token"]
+        status, body, _ = route_command(command, token, system, action_log_path=_isolated_paths)
+
+        assert status == 200
+        entries = load_action_log(_isolated_paths)
+        # Exactly one execute entry, alongside the one declare entry
+        # from _declare above - the pending call contributed none.
+        assert [e.capability for e in entries] == ["admin.services", "admin.services"]
+        assert entries[-1].succeeded is True
+
+    def test_an_unauthorized_operation_is_never_executed_and_never_recorded_as_success(self, _isolated_paths):
+        """place_order requires a credential here (auth_op=True,
+        default) and none was ever connected - the confirmed execute
+        must still fail honestly, not fabricate success, and the
+        failure itself is durably recorded as a failure."""
+        runtime, manager, channel, conversation = real_system()
+        centre = ControlCenter(runtime, manager)
+        self._declare(centre, channel, conversation, _isolated_paths)  # auth_op=True (default)
+        system = _live_system(runtime, manager, channel, conversation)
+        command = "services weatherstub execute place_order"
+
+        import json as jsonlib
+        _, pending_body, _ = route_command(command, None, system, action_log_path=_isolated_paths)
+        token = jsonlib.loads(pending_body)["confirm_token"]
+        route_command(command, token, system, action_log_path=_isolated_paths)
+
+        entries = load_action_log(_isolated_paths)
+        assert entries[-1].succeeded is False
+
+    def test_a_safe_operation_is_never_blocked_by_a_siblings_missing_credential(self, _isolated_paths, monkeypatch):
+        """The actual finding this checkpoint fixes, proven through the
+        real Control Center command surface: 'ping' (no auth) must
+        still execute even though 'place_order' (auth required,
+        default) has no credential on file for the same service."""
+        import urllib.request
+
+        class _FakeResponse:
+            def __enter__(self_): return self_
+            def __exit__(self_, *a): return False
+            def read(self_): return b'{"ok": true}'
+
+        monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _FakeResponse())
+
+        runtime, manager, channel, conversation = real_system()
+        centre = ControlCenter(runtime, manager)
+        self._declare(centre, channel, conversation, _isolated_paths)  # place_order still needs auth
+
+        result = run_command(
+            centre, "services weatherstub execute ping", 80, channel, conversation,
+            action_log_path=_isolated_paths,
+        )
+        assert "succeeded" in result
+        assert "not authorized" not in result
+
+
 class TestPersistenceAcrossRestart:
     def test_a_recorded_entry_survives_a_fresh_load(self, _isolated_paths):
         runtime, manager, channel, conversation = real_system()

@@ -743,3 +743,95 @@ class TestMutationReplacingTheCanonicalInstance:
         tool.run()
         assert connection_a.executed == ["read_email"]
         assert connection_b.executed == []
+
+
+# ---------------------------------------------------------------------------
+# Operation-level authorization + confirmation (Phase 6, 2026-09-09):
+# connected_action now duck-types authorization_for/requires_confirmation_for
+# rather than always reading the connection's own blanket .authorization -
+# proven here through a real DeclaredConnection, never a hand-rolled test
+# double, so the actual production duck-typed lookup is what is under test.
+# ---------------------------------------------------------------------------
+
+
+def _mixed_declared_connection(*, account=None):
+    from src.providers.declared_connection import DeclaredConnection
+    from src.providers.service_descriptor import ServiceDescriptor, ServiceOperation
+
+    descriptor = ServiceDescriptor(
+        name="weatherstub", base_url="http://127.0.0.1:9911",
+        operations=(
+            ServiceOperation(name="ping", method="GET", path="/ping", requires_auth=False),
+            ServiceOperation(name="place_order", method="POST", path="/orders", requires_auth=True),
+        ),
+    )
+    return DeclaredConnection(descriptor, account)
+
+
+class TestConnectedActionUsesOperationLevelAuthorizationWhenAvailable:
+    def test_a_safe_first_operation_succeeds_even_though_a_sibling_operation_needs_auth(self, monkeypatch):
+        """The actual live-discovered finding this checkpoint fixes: a
+        mixed-operation connection must not block its own safe, first-
+        declared operation merely because a *different* operation on
+        the same connection needs a credential nobody has provided."""
+        import urllib.request
+
+        connection = _mixed_declared_connection()
+
+        class _FakeResponse:
+            def __enter__(self_): return self_
+            def __exit__(self_, *a): return False
+            def read(self_): return b'{"conditions": "clear"}'
+
+        monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _FakeResponse())
+
+        tools = ToolSet([
+            ConnectionActionTool(connection, operation="ping", description="Pings weatherstub."),
+            ConnectionActionTool(connection, operation="place_order", description="Places an order."),
+        ])
+        manager = real_manager(tools=tools, connection=connection)
+        result = manager.handle_task(CONNECTED_TASK)
+
+        assert result.succeeded
+        assert result.payload["operation"] == "ping"
+
+    def test_a_consequential_first_operation_is_refused_through_natural_language(self):
+        """place_order (POST) is declared *first* here, so it is
+        genuinely the operation connected_action itself selects -
+        proving the refusal is about the operation actually chosen, not
+        merely present somewhere on the connection."""
+        from src.providers.declared_connection import DeclaredConnection
+        from src.providers.service_descriptor import ServiceDescriptor, ServiceOperation
+
+        descriptor = ServiceDescriptor(
+            name="weatherstub", base_url="http://127.0.0.1:9911",
+            operations=(
+                ServiceOperation(name="place_order", method="POST", path="/orders", requires_auth=True),
+                ServiceOperation(name="ping", method="GET", path="/ping", requires_auth=False),
+            ),
+        )
+        connection = DeclaredConnection(descriptor, None)
+        tools = ToolSet([
+            ConnectionActionTool(connection, operation="place_order", description="Places an order."),
+            ConnectionActionTool(connection, operation="ping", description="Pings weatherstub."),
+        ])
+        manager = real_manager(tools=tools, connection=connection)
+        result = manager.handle_task(CONNECTED_TASK)
+
+        assert not result.succeeded
+        assert "confirmation" in result.error.lower()
+        assert "control center" in result.error.lower()
+        assert "services weatherstub execute place_order" in result.error
+        # Never actually reached the network - refused before invoke().
+        assert connection.availability.state is AvailabilityState.UNKNOWN
+
+    def test_a_scripted_connection_with_no_new_methods_still_behaves_exactly_as_before(self):
+        """ScriptedConnection (this file's own test double) also has
+        neither method - the identical Gmail/Null fallback path,
+        confirmed against the pre-existing double every earlier test in
+        this file already relies on."""
+        connection = ScriptedConnection(authorized=True)
+        manager = manager_with_connection(connection)
+        result = manager.handle_task(CONNECTED_TASK)
+        assert result.succeeded
+        assert connection.executed == ["read_email"]

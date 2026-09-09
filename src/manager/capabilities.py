@@ -4685,9 +4685,14 @@ PERSONAL_RECURRING_EVENTS = ManagerCapability(
 #                              UNKNOWN before a first attempt is not
 #                              actionable information - only the execution
 #                              result below can genuinely answer this
-#     authorization            connection.authorization - a credential is
-#                              either configured or it is not, checkable
-#                              without ever attempting anything
+#     authorization            connection.authorization_for(operation) when
+#                              available (DeclaredConnection - see its own
+#                              docstring on why this is now per-operation,
+#                              not the whole connection's blanket state),
+#                              falling back to connection.authorization for
+#                              a connection with nothing more precise to
+#                              offer (Gmail, Null) - checkable without ever
+#                              attempting anything
 #     execution                request.tools.invoke(tool_name, {}) - the
 #                              one and only place this file ever reaches a
 #                              Connection, and only through the identical
@@ -4701,6 +4706,22 @@ PERSONAL_RECURRING_EVENTS = ManagerCapability(
 # below names Gmail, a calendar, commerce or travel - the operation
 # actually attempted is whatever ``connection.supported_operations``
 # itself declares, so a future connection needs no new branch here.
+#
+# **Operation-level authorization + confirmation (this checkpoint).**
+# A duck-typed check, the identical "ask for it, accept UNKNOWN/False
+# when a component cannot answer" shape ``availability_of`` already
+# uses: ``authorization_for``/``requires_confirmation_for`` are read
+# only if the connection actually offers them (DeclaredConnection does;
+# Gmail/Null do not and are completely unaffected). A consequential
+# operation (today, read from the same operation's own declared HTTP
+# method - GET is safe, anything else is not) is never executed through
+# natural language at all - conversation has no confirm_token dance to
+# offer, so the honest answer is to name what is needed and point at
+# the one surface that already has one: Control Center's own
+# ``services <name> execute`` (scripts/control_center.py), reusing the
+# identical confirmed, audited administrative-write path
+# ``declare``/``forget`` already go through - never a second
+# confirmation mechanism invented here.
 
 
 CONNECTED_ACTION_MARKERS: tuple[str, ...] = (
@@ -4742,7 +4763,24 @@ def connected_action(request: CapabilityRequest) -> TaskResult:
             f"is not installed. Currently equipped: {equipped}.",
         )
 
-    if not connection.authorization.grants_access:
+    # Consequential operations never run through conversation - see this
+    # section's own module comment. Checked before authorization: a
+    # consequential operation is refused the same way regardless of
+    # whether a credential happens to be on file, because the missing
+    # thing is confirmation, not authorization.
+    requires_confirmation = getattr(connection, "requires_confirmation_for", None)
+    if requires_confirmation is not None and requires_confirmation(operation):
+        return TaskResult.failure(
+            request.task, request.own_name,
+            f"'{operation}' on '{connection.name}' changes something on the real "
+            "service, so it needs your explicit confirmation - use Control "
+            f"Center's 'services {connection.name} execute {operation}' rather "
+            "than asking in conversation.",
+        )
+
+    authorization_for = getattr(connection, "authorization_for", None)
+    op_authorization = authorization_for(operation) if authorization_for is not None else connection.authorization
+    if not op_authorization.grants_access:
         return TaskResult.failure(
             request.task, request.own_name,
             f"The '{connection.name}' connection is not authorized yet.",

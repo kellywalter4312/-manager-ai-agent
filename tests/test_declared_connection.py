@@ -199,3 +199,161 @@ class TestExecuteRealCallShape:
     def test_construction_rejects_a_non_positive_timeout(self):
         with pytest.raises(ValueError):
             DeclaredConnection(_descriptor(), None, timeout=0)
+
+
+def _mixed_descriptor(**kw):
+    """One safe read (no credential needed), one consequential write
+    (credential required) - the exact shape that surfaced the real,
+    live 'a whole connection is blocked by one operation's own
+    requirement' finding this checkpoint fixes."""
+    defaults = dict(
+        name="weatherstub", base_url="http://127.0.0.1:9911",
+        operations=(
+            ServiceOperation(name="ping", method="GET", path="/ping", requires_auth=False),
+            ServiceOperation(name="place_order", method="POST", path="/orders", requires_auth=True),
+        ),
+    )
+    defaults.update(kw)
+    return ServiceDescriptor(**defaults)
+
+
+class TestOperationLevelAuthorization:
+    """Operation-level authorization (this checkpoint): a connection's
+    own blanket .authorization stays unchanged (still conservative, on
+    purpose, for a caller that genuinely wants "is anything here usable
+    at all"); .authorization_for(operation) is the new, precise check a
+    caller uses to ask about one specific operation."""
+
+    def test_a_safe_operation_is_not_required_even_when_a_sibling_operation_needs_auth(self):
+        conn = DeclaredConnection(_mixed_descriptor(), None)
+        assert conn.authorization_for("ping") is AuthorizationState.NOT_REQUIRED
+
+    def test_a_credential_gated_operation_is_unauthorized_with_no_account(self):
+        conn = DeclaredConnection(_mixed_descriptor(), None)
+        assert conn.authorization_for("place_order") is AuthorizationState.UNAUTHORIZED
+
+    def test_a_credential_gated_operation_is_authorized_once_an_account_exists(self):
+        account = ProviderAccount(provider="weatherstub", account_id="default", credential="x")
+        conn = DeclaredConnection(_mixed_descriptor(), account)
+        assert conn.authorization_for("place_order") is AuthorizationState.AUTHORIZED
+
+    def test_the_whole_connections_blanket_authorization_is_unchanged_and_still_conservative(self):
+        """.authorization (the pre-existing property) must keep its own
+        prior, intentionally conservative meaning - this checkpoint adds
+        a more precise check alongside it, never silently changes what
+        the old one already meant for every existing caller of it."""
+        conn = DeclaredConnection(_mixed_descriptor(), None)
+        assert conn.authorization is AuthorizationState.UNAUTHORIZED
+
+    def test_an_unknown_operation_raises_rather_than_returning_a_state(self):
+        conn = DeclaredConnection(_mixed_descriptor(), None)
+        with pytest.raises(KeyError):
+            conn.authorization_for("does_not_exist")
+
+
+class TestRequiresConfirmationFor:
+    def test_a_get_operation_never_requires_confirmation(self):
+        conn = DeclaredConnection(_mixed_descriptor(), None)
+        assert conn.requires_confirmation_for("ping") is False
+
+    def test_a_post_operation_always_requires_confirmation(self):
+        conn = DeclaredConnection(_mixed_descriptor(), None)
+        assert conn.requires_confirmation_for("place_order") is True
+
+    def test_an_unknown_operation_raises_rather_than_returning_a_default(self):
+        conn = DeclaredConnection(_mixed_descriptor(), None)
+        with pytest.raises(KeyError):
+            conn.requires_confirmation_for("does_not_exist")
+
+
+class TestExecuteWithParameters:
+    def test_get_parameters_become_a_real_safely_escaped_query_string(self, monkeypatch):
+        seen = {}
+
+        def fake_urlopen(request, timeout):
+            seen["url"] = request.full_url
+            return _FakeResponse(b"{}")
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        conn = DeclaredConnection(_descriptor(), None)
+        conn.execute("ping", city="New York", days=3)
+        assert seen["url"].startswith("http://127.0.0.1:9911/ping?")
+        assert "city=New+York" in seen["url"] or "city=New%20York" in seen["url"]
+        assert "days=3" in seen["url"]
+
+    def test_a_value_attempting_to_smuggle_a_new_query_key_is_safely_escaped_not_injected(self, monkeypatch):
+        seen = {}
+
+        def fake_urlopen(request, timeout):
+            seen["url"] = request.full_url
+            return _FakeResponse(b"{}")
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        conn = DeclaredConnection(_descriptor(), None)
+        conn.execute("ping", city="x&admin=true")
+        # The literal attempted injection must appear only as an escaped
+        # value, never as a second, real "admin" query parameter.
+        assert "&admin=true" not in seen["url"]
+        assert "admin%3Dtrue" in seen["url"] or "admin=true" not in seen["url"].split("?", 1)[1].split("&")
+
+    def test_post_parameters_become_a_real_json_body(self, monkeypatch):
+        seen = {}
+
+        def fake_urlopen(request, timeout):
+            seen["body"] = request.data
+            seen["content_type"] = request.get_header("Content-type")
+            return _FakeResponse(b'{"id": "order-1"}')
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        account = ProviderAccount(provider="weatherstub", account_id="default", credential="x")
+        conn = DeclaredConnection(_mixed_descriptor(), account)
+        result = conn.execute("place_order", item="widget", quantity=2)
+
+        import json
+        assert json.loads(seen["body"]) == {"item": "widget", "quantity": 2}
+        assert seen["content_type"] == "application/json"
+        assert result.ok
+
+    def test_a_nested_object_parameter_is_refused_not_serialised_blindly(self):
+        conn = DeclaredConnection(_descriptor(), None)
+        result = conn.execute("ping", filters={"nested": "object"})
+        assert not result.ok
+        assert "filters" in result.detail
+
+    def test_a_list_parameter_is_also_refused(self):
+        conn = DeclaredConnection(_descriptor(), None)
+        result = conn.execute("ping", tags=["a", "b"])
+        assert not result.ok
+
+    def test_no_parameters_still_works_exactly_as_before(self, monkeypatch):
+        seen = {}
+
+        def fake_urlopen(request, timeout):
+            seen["url"] = request.full_url
+            return _FakeResponse(b'{"ok": true}')
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        conn = DeclaredConnection(_descriptor(), None)
+        conn.execute("ping")
+        assert seen["url"] == "http://127.0.0.1:9911/ping"  # no trailing '?', unchanged from before
+
+    def test_a_real_service_rejection_is_reported_honestly_never_retried_with_a_guess(self, monkeypatch):
+        """The service's own real, honest rejection (a 400 for a
+        missing/invalid parameter) is reported plainly - Alfred never
+        fabricates the missing value and retries."""
+        def fake_urlopen(request, timeout):
+            raise urllib.error.HTTPError(
+                request.full_url, 400, "Bad Request", {}, io.BytesIO(b'{"error": "quantity is required"}')
+            )
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        account = ProviderAccount(provider="weatherstub", account_id="default", credential="x")
+        conn = DeclaredConnection(_mixed_descriptor(), account)
+        result = conn.execute("place_order", item="widget")
+
+        assert not result.ok
+        assert "400" in result.detail
+        assert "quantity is required" in result.detail
+        # The service WAS genuinely reached, even though it rejected the
+        # request - that is real evidence of availability, not absence.
+        assert conn.availability.state is AvailabilityState.AVAILABLE
