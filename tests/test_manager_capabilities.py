@@ -265,6 +265,10 @@ class TestHandlersAreSelectedThroughTheRegistry:
             "personal_recurring_events",
             "recall_memory",
             "record_this",
+            # Alfred's Real 3D Workspace: the task lifecycle's fourth
+            # verb - reopens a completed task, the mirror of
+            # complete_task, so a completed task is never a dead end.
+            "reopen_task",
             # Multimodal workspace/artifact checkpoint: revises an
             # existing document artifact under the same identity, a new
             # real version rather than a disconnected new file.

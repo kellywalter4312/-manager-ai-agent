@@ -201,6 +201,112 @@ class TestTaskCompletion:
 
 
 # ---------------------------------------------------------------------------
+# Reopening - the lifecycle's fourth verb (Alfred's Real 3D Workspace's
+# own weakness pass: a completed task was previously a dead end).
+# ---------------------------------------------------------------------------
+
+
+class TestTaskReopening:
+    def test_reopening_a_completed_task(self):
+        manager = real_manager()
+        manager.handle_task(Task(description="add a task: buy milk"))
+        manager.handle_task(Task(description="mark the task buy milk as done"))
+        result = manager.handle_task(Task(description="reopen the task buy milk"))
+        assert result.succeeded
+        assert "Reopened" in result.output
+
+    def test_reopening_actually_changes_the_stored_status_back_to_pending(self):
+        manager = real_manager()
+        manager.handle_task(Task(description="add a task: buy milk"))
+        manager.handle_task(Task(description="mark the task buy milk as done"))
+        manager.handle_task(Task(description="reopen the task buy milk"))
+        found = manager.memory.recall(kind=MemoryCategory.TASK.value, limit=10)
+        assert len(found) == 1
+        assert found[0].context["status"] == "pending"
+        assert "task:pending" in found[0].tags
+        assert "task:complete" not in found[0].tags
+
+    def test_reopening_preserves_the_tasks_own_id_and_content(self):
+        manager = real_manager()
+        manager.handle_task(Task(description="add a task: buy milk"))
+        before = manager.memory.recall(kind=MemoryCategory.TASK.value, limit=10)[0]
+        manager.handle_task(Task(description="mark the task buy milk as done"))
+        manager.handle_task(Task(description="reopen the task buy milk"))
+        after = manager.memory.recall(kind=MemoryCategory.TASK.value, limit=10)[0]
+        assert before.id == after.id
+        assert before.content == after.content == "buy milk"
+
+    def test_reopening_a_pending_task_fails_honestly(self):
+        """Only a completed task can be reopened - reopen_task queries
+        tags={"task:complete"} exclusively, the mirror of complete_task's
+        own tags={"task:pending"} restriction."""
+        manager = real_manager()
+        manager.handle_task(Task(description="add a task: buy milk"))
+        result = manager.handle_task(Task(description="reopen the task buy milk"))
+        assert not result.succeeded
+
+    def test_reopening_a_nonexistent_task_fails_honestly(self):
+        manager = real_manager()
+        result = manager.handle_task(Task(description="reopen the task nothing-like-this-exists"))
+        assert not result.succeeded
+
+    def test_a_genuinely_ambiguous_reopen_is_refused_not_guessed(self):
+        manager = real_manager()
+        manager.handle_task(Task(description="add a task: call the dentist"))
+        manager.handle_task(Task(description="add a task: call the plumber"))
+        manager.handle_task(Task(description="mark the task call the dentist as done"))
+        manager.handle_task(Task(description="mark the task call the plumber as done"))
+        result = manager.handle_task(Task(description="reopen the task call the"))
+        assert not result.succeeded
+        assert "specific" in result.error.lower()
+
+    def test_the_full_lifecycle_incomplete_complete_reopen_complete(self):
+        """The exact lifecycle the Workspace UI must support end to end."""
+        manager = real_manager()
+        manager.handle_task(Task(description="add a task: buy milk"))
+        task_id = manager.memory.recall(kind=MemoryCategory.TASK.value, limit=10)[0].id
+
+        manager.handle_task(Task(description="mark the task buy milk as done"))
+        assert manager.memory.recall(kind=MemoryCategory.TASK.value, limit=10)[0].context["status"] == "complete"
+
+        manager.handle_task(Task(description="reopen the task buy milk"))
+        assert manager.memory.recall(kind=MemoryCategory.TASK.value, limit=10)[0].context["status"] == "pending"
+
+        result = manager.handle_task(Task(description="mark the task buy milk as done"))
+        assert result.succeeded
+        found = manager.memory.recall(kind=MemoryCategory.TASK.value, limit=10)[0]
+        assert found.context["status"] == "complete"
+        assert found.id == task_id  # identity survived the whole round trip
+
+    def test_reopen_and_complete_markers_never_both_claim_the_same_phrase(self):
+        """A regression this feature could have introduced: reopen_task's
+        own markers must never be substrings of complete_task's (or vice
+        versa), or the router would face two capabilities both honestly
+        claiming one phrase."""
+        from src.services.memory.tasks import complete_task_intent, reopen_task_intent
+
+        for phrase in (
+            "complete the task buy milk",
+            "mark the task buy milk as done",
+            "i finished buy milk",
+        ):
+            assert complete_task_intent(phrase)
+            assert not reopen_task_intent(phrase)
+        for phrase in (
+            "reopen the task buy milk",
+            "make the task buy milk incomplete",
+        ):
+            assert reopen_task_intent(phrase)
+            assert not complete_task_intent(phrase)
+        # Deliberately excluded from _REOPEN_MARKERS: this phrase reads
+        # naturally as a reopen request, but contains "complete the
+        # task" as a literal substring - exactly the collision the
+        # marker set must avoid, pinned here as a real regression guard.
+        assert complete_task_intent("uncomplete the task buy milk")
+        assert not reopen_task_intent("uncomplete the task buy milk")
+
+
+# ---------------------------------------------------------------------------
 # Update
 # ---------------------------------------------------------------------------
 
@@ -285,6 +391,21 @@ class TestPersistenceAcrossRestart:
         third = self._make_manager(tmp_path)
         result = third.handle_task(Task(description="what are my tasks"))
         assert "no pending tasks" in result.output.lower()
+
+    def test_a_reopened_task_survives_a_full_manager_reconstruction(self, tmp_path):
+        first = self._make_manager(tmp_path)
+        first.handle_task(Task(description="add a task: buy milk"))
+        first.handle_task(Task(description="mark the task buy milk as done"))
+        first.handle_task(Task(description="reopen the task buy milk"))
+
+        second = self._make_manager(tmp_path)  # a brand new instance - simulated restart
+        found = second.memory.recall(kind=MemoryCategory.TASK.value, limit=10)
+        assert len(found) == 1
+        assert found[0].context["status"] == "pending"
+        assert found[0].content == "buy milk"
+
+        result = second.handle_task(Task(description="what are my tasks"))
+        assert "buy milk" in result.output
 
 
 # ---------------------------------------------------------------------------

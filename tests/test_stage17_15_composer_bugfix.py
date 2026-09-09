@@ -330,6 +330,31 @@ class TestNoOtherBlockingMechanismExists:
         assert "document.addEventListener(\"keydown\"" not in shell
         assert "window.addEventListener(\"keydown\"" not in shell
 
+    def test_the_workspace_add_input_never_carries_the_composer_class(self):
+        """A genuine, live-verified regression: the Workspace's own
+        add-task input was originally given class="composer ws-add-input"
+        purely to inherit visual styling (never needed - ".say input"
+        already styles it generically) - but wireComposer()'s own
+        selector, ".say input.composer", matched it too, so BOTH
+        listeners fired on Enter. wireComposer's ran first, cleared the
+        input and sent the raw text with no "add a task to " prefix and
+        no addressing - silently swallowing every attempt to add a task
+        from the Workspace UI. Caught only by executing the real script
+        against a real browser (see tests/test_alfred_workspace.py's own
+        wiring tests for the structural half of this guard); pinned here
+        as a hard regex boundary so "composer" can never again appear as
+        a whole class token on this element.
+        """
+        import re
+
+        shell = _shell()
+        input_line = [ln for ln in shell.splitlines() if "ws-add-input" in ln][0]
+        class_match = re.search(r'class="([^"]*)"', input_line)
+        assert class_match is not None
+        classes = class_match.group(1).split()
+        assert "composer" not in classes
+        assert "ws-add-input" in classes
+
     def test_the_composer_carries_no_readonly_or_negative_tabindex(self):
         shell = _shell()
         composer_line = [ln for ln in shell.splitlines() if 'class="composer"' in ln][0]

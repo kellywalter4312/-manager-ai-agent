@@ -314,6 +314,69 @@ class TestSnapshotExposure:
 
 
 # ---------------------------------------------------------------------------
+# 5b. The full, reversible task lifecycle - incomplete -> complete ->
+# reopen -> complete - proven through the real Workspace's own read
+# surfaces (snapshot, Control Center), never a dead end.
+# ---------------------------------------------------------------------------
+
+
+class TestTaskLifecycleThroughTheWorkspace:
+    def test_the_full_lifecycle_is_consistent_across_snapshot_and_control_center(self):
+        from scripts.exchange import exchange
+
+        runtime, manager, channel, conversation = real_system()
+        centre = ControlCenter(runtime, manager)
+        name = manager.own_skills.name
+
+        def alfred_task(data):
+            alfred = next(a for a in data["agents"] if a["name"] == name)
+            return next(t for t in alfred["tasks"] if t["content"] == "water the plants")
+
+        def cc_task():
+            view = next(v for v in centre.workspaces() if v.agent == name)
+            return next(t for t in view.tasks if t.content == "water the plants")
+
+        exchange(channel, conversation, "add a task to water the plants", addressed=name)
+        task_id = alfred_task(snapshot(centre))["id"]
+        assert alfred_task(snapshot(centre))["status"] == "pending"
+        assert cc_task().status == "pending"
+
+        exchange(channel, conversation, "complete the task water the plants", addressed=name)
+        assert alfred_task(snapshot(centre))["status"] == "complete"
+        assert cc_task().status == "complete"
+
+        result = exchange(channel, conversation, "reopen the task water the plants", addressed=name)
+        assert result.succeeded
+        assert alfred_task(snapshot(centre))["status"] == "pending"
+        assert cc_task().status == "pending"
+        # Identity and content survived the round trip - same task,
+        # never a delete-and-recreate.
+        assert alfred_task(snapshot(centre))["id"] == task_id
+
+        exchange(channel, conversation, "complete the task water the plants", addressed=name)
+        assert alfred_task(snapshot(centre))["status"] == "complete"
+        assert cc_task().status == "complete"
+        assert alfred_task(snapshot(centre))["id"] == task_id
+
+    def test_a_reopened_task_survives_a_genuine_restart(self, tmp_path):
+        from scripts.exchange import exchange
+
+        settings = Settings.from_env(env={}, memory="persistent", memory_dir=str(tmp_path))
+        runtime, manager, channel, conversation = build(settings)
+        name = manager.own_skills.name
+        exchange(channel, conversation, "add a task to water the plants", addressed=name)
+        exchange(channel, conversation, "complete the task water the plants", addressed=name)
+        exchange(channel, conversation, "reopen the task water the plants", addressed=name)
+
+        runtime2, manager2, channel2, conversation2 = build(settings)
+        centre2 = ControlCenter(runtime2, manager2)
+        data = snapshot(centre2)
+        alfred = next(a for a in data["agents"] if a["name"] == name)
+        task = next(t for t in alfred["tasks"] if t["content"] == "water the plants")
+        assert task["status"] == "pending"
+
+
+# ---------------------------------------------------------------------------
 # 6. Half Brain: none of this ever touches Brain/LLM availability
 # ---------------------------------------------------------------------------
 
@@ -393,6 +456,26 @@ class TestFrontendConnection:
         assert '"add a task to " + text' in board
         assert '"complete the task " + content' in board
         assert "workspace/enter" not in board
+
+    def test_the_reopen_action_reuses_the_same_message_endpoint_and_toggle(self):
+        """The lifecycle is genuinely reversible in the UI: a completed
+        task's own toggle button sends the reopen phrase through the
+        identical /message endpoint and the identical click handler the
+        complete direction already uses - never a second button, a
+        second route, or a dead end."""
+        board = _script().split("function wireWorkspaceBoard(){", 1)[1].split("\n  }\n", 1)[0]
+        assert '"reopen the task " + content' in board
+        assert 'dataset.wsAction === "reopen"' in board
+        # One handler, both directions - not a second wiring loop.
+        assert board.count('addEventListener("click"') == 1
+
+    def test_a_completed_task_row_renders_a_real_clickable_reopen_control(self):
+        block = _script().split("V.space = () => {", 1)[1].split("\n  };", 1)[0]
+        assert 'data-ws-action="${complete ? "reopen" : "complete"}"' in block
+        # A real <button>, not a static, inert checkmark - genuinely
+        # clickable and keyboard-reachable either way.
+        assert "<button class=\"ws-task-toggle" in block
+        assert "ws-task-mark" not in block
 
 
 # ---------------------------------------------------------------------------

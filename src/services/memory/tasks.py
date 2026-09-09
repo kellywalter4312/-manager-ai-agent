@@ -82,6 +82,19 @@ _UPDATE_MARKERS: tuple[str, ...] = (
     "change the task", "change task", "update the task", "update task",
     "rename the task", "rename task",
 )
+# Deliberately non-overlapping with _COMPLETE_MARKERS above ("make the
+# task"/"make task", never "mark the task"/"mark task") - a phrase must
+# not be able to satisfy both complete_task_intent and reopen_task_intent,
+# which would leave the router choosing between two capabilities that
+# both claimed it. "uncomplete the task" is deliberately NOT a marker
+# here even though it reads naturally: it contains "complete the task"
+# as a literal substring, so it would satisfy complete_task_intent too -
+# exactly the collision this set exists to avoid.
+_REOPEN_MARKERS: tuple[str, ...] = (
+    "reopen the task", "reopen task", "reopen this task",
+    "make the task", "make task",
+)
+_TRAILING_INCOMPLETE = re.compile(r"\s*\bincomplete\b\.?\s*$", re.IGNORECASE)
 
 _LEADING_JOINER = re.compile(r"^(?:to|that|:|-)\s*", re.IGNORECASE)
 _TRAILING_STATUS = re.compile(
@@ -166,6 +179,25 @@ def extract_completion_topic(text: str) -> str:
     "buy milk", not "buy milk as done"."""
     topic = _after_marker(text, _COMPLETE_MARKERS)
     return _TRAILING_STATUS.sub("", topic).strip()
+
+
+def reopen_task_intent(text: str) -> bool:
+    """The ``claims=`` predicate for reopening a completed task - the
+    lifecycle's missing fourth verb (add/complete/reopen), so a task
+    accidentally marked done, or genuinely not finished after all, is
+    not a dead end."""
+    return _marker_present(text, _REOPEN_MARKERS)
+
+
+def extract_reopen_topic(text: str) -> str:
+    """Which completed task the person means. Mirrors
+    ``extract_completion_topic``'s own shape: ``_after_marker`` first,
+    then a trailing status clause stripped - "make the task buy milk
+    incomplete" names the task "buy milk", not "buy milk incomplete" -
+    the identical reasoning ``_TRAILING_STATUS`` already applies for
+    "... as done"."""
+    topic = _after_marker(text, _REOPEN_MARKERS)
+    return _TRAILING_INCOMPLETE.sub("", topic).strip()
 
 
 def update_task_intent(text: str) -> bool:

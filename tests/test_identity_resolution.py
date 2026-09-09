@@ -278,10 +278,12 @@ class TestThisIsNotASecondRouter:
         rather than the ordinary word "report" ("she reported the
         issue"), and a genuine ask to look at a real image by its own
         marker shape, Phase 3; and recognising an explicit task
-        create/list/complete/update request ("remind me to X", "what
-        are my tasks", "mark the task X as done", "change the task X to
-        Y") by its own marker shape rather than the ordinary word "task"
-        ("that was quite a task"), Phase 5.1; and recognising an explicit
+        create/list/complete/reopen/update request ("remind me to X",
+        "what are my tasks", "mark the task X as done", "make the task X
+        incomplete", "change the task X to Y") by its own marker shape
+        rather than the ordinary word "task" ("that was quite a task"),
+        Phase 5.1 (reopen added by Alfred's Real 3D Workspace, so a
+        completed task is never a dead end); and recognising an explicit
         ask to cut real clips from an existing video ("clip this video
         X.mp4 from 1:20-1:45", "find the best moments and clip them") by
         its own marker-plus-evidence shape rather than the ordinary word
@@ -307,7 +309,7 @@ class TestThisIsNotASecondRouter:
             "media_production",
             "milestone_recognition", "participant_invitation", "personal_context",
             "personal_recurring_events",
-            "recall_memory", "record_this", "revise_artifact", "revise_diagram",
+            "recall_memory", "record_this", "reopen_task", "revise_artifact", "revise_diagram",
             "select_voice",
             "small_talk", "temporal_derivation", "update_task",
         ]

@@ -587,16 +587,23 @@
     background:rgba(10,16,24,.6);border:1px solid rgba(var(--ac,125,216,232),.16);
     border-radius:6px;padding:9px 12px;
     -webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px)}
-  .ws-task.done{opacity:.55}
-  .ws-task.done .ws-task-text{text-decoration:line-through}
+  /* Completed stays visually distinct (dimmed, struck through) on the
+     TEXT only - the toggle button itself stays at full opacity, because
+     it is the one control that reverses a completion and must read as
+     genuinely clickable, never as a spent, inert checkmark. */
+  .ws-task.done .ws-task-text{opacity:.55;text-decoration:line-through}
   .ws-task-text{font-size:var(--t-control);color:var(--ink-2);line-height:1.4;word-break:break-word}
   .ws-task-toggle{flex:none;width:20px;height:20px;border-radius:5px;cursor:pointer;
-    border:1px solid rgba(var(--ac,125,216,232),.4);background:transparent;
-    transition:background .2s,border-color .2s}
+    display:flex;align-items:center;justify-content:center;font-size:12px;line-height:1;
+    border:1px solid rgba(var(--ac,125,216,232),.4);background:transparent;color:transparent;
+    transition:background .2s,border-color .2s,color .2s}
   .ws-task-toggle:hover{background:rgba(var(--ac,125,216,232),.18);border-color:rgba(var(--ac,125,216,232),.7)}
   .ws-task-toggle:disabled{opacity:.4;cursor:default}
-  .ws-task-mark{flex:none;width:20px;height:20px;display:flex;align-items:center;justify-content:center;
-    border-radius:5px;color:#4fd1a5;border:1px solid rgba(79,209,165,.4);background:rgba(79,209,165,.1)}
+  /* The reopen affordance: a real, hoverable, keyboard-reachable button -
+     never a static, inert checkmark - so an accidental completion is
+     never a dead end. */
+  .ws-task-toggle.done{color:#4fd1a5;border-color:rgba(79,209,165,.4);background:rgba(79,209,165,.1)}
+  .ws-task-toggle.done:hover{background:rgba(79,209,165,.22);border-color:rgba(79,209,165,.75);color:#6fe3bb}
   .ws-none{padding:40px 0}
 
   /* Last in the hierarchy, and quiet on purpose: what this agent is made
@@ -1959,12 +1966,23 @@
       data-goto="space" data-agent="${esc(x.name)}"
       style="--pc:${identityOf(x).hue}">${esc(x.name)}</button>`).join("");
 
-    const taskRow = t => `<div class="ws-task${t.status === "complete" ? " done" : ""}">
-      ${t.status === "complete"
-        ? `<span class="ws-task-mark">&check;</span>`
-        : `<button class="ws-task-toggle" data-ws-complete="${esc(t.content)}" data-ws-agent="${esc(a.name)}" aria-label="Mark done">&nbsp;</button>`}
-      <span class="ws-task-text">${esc(t.content)}</span>
-    </div>`;
+    // The lifecycle is genuinely reversible: incomplete -> complete ->
+    // reopen -> complete, never a dead end. Both directions are the
+    // SAME button/element, distinguished only by data-ws-action - a
+    // completed task's toggle reopens it, a pending task's toggle
+    // completes it, and either way the click goes through the one real
+    // /message endpoint wireWorkspaceBoard() already owns.
+    const taskRow = t => {
+      const complete = t.status === "complete";
+      const label = complete ? `Reopen "${t.content}"` : `Mark "${t.content}" done`;
+      return `<div class="ws-task${complete ? " done" : ""}">
+        <button class="ws-task-toggle${complete ? " done" : ""}"
+          data-ws-action="${complete ? "reopen" : "complete"}"
+          data-ws-content="${esc(t.content)}" data-ws-agent="${esc(a.name)}"
+          aria-label="${esc(label)}" title="${esc(label)}">${complete ? "&check;" : ""}</button>
+        <span class="ws-task-text">${esc(t.content)}</span>
+      </div>`;
+    };
 
     return `<div class="private">
       <div class="private-env ${esc(state)}" style="--ac:${id.hue}">
@@ -1992,7 +2010,7 @@
           </div>
           <div class="glass say private-say ws-add">${cut}
             <span class="addressed">Add to ${esc(a.name)}'s board</span>
-            <input class="composer ws-add-input" data-ws-agent="${esc(a.name)}" placeholder="What should ${esc(a.name)} work on?"${LIVE ? "" : " disabled"}>
+            <input class="ws-add-input" data-ws-agent="${esc(a.name)}" placeholder="What should ${esc(a.name)} work on?"${LIVE ? "" : " disabled"}>
           </div>
         </div>
         <div class="env-foot">
@@ -4824,17 +4842,27 @@
         await refreshFromLive();
       });
     }
+    // The lifecycle's own two verbs, one handler: "complete" and
+    // "reopen" both construct the exact natural-language phrase the
+    // real, governed capability (src/manager/capabilities.py's
+    // complete_task/reopen_task) already recognises, and send it
+    // through the one existing /message endpoint - never a second,
+    // form-based task-mutation route, and never a different route for
+    // the reverse direction than the forward one already uses.
     stage.querySelectorAll(".ws-task-toggle").forEach(btn => {
       btn.addEventListener("click", async () => {
         if(btn.disabled) return;
         const agent = btn.dataset.wsAgent;
-        const content = btn.dataset.wsComplete;
+        const content = btn.dataset.wsContent;
+        const phrase = btn.dataset.wsAction === "reopen"
+          ? "reopen the task " + content
+          : "complete the task " + content;
         btn.disabled = true;
         try{
           await fetch("message", {
             method: "POST",
             headers: {"Content-Type": "application/json"},
-            body: JSON.stringify({text: "complete the task " + content, to: agent}),
+            body: JSON.stringify({text: phrase, to: agent}),
           });
         }catch(e){ /* honest silence - refreshFromLive shows the real state */ }
         await refreshFromLive();

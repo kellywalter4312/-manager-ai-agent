@@ -168,10 +168,12 @@ from src.services.memory.tasks import (
     create_task_intent,
     describe_task,
     extract_completion_topic,
+    extract_reopen_topic,
     extract_task_query,
     extract_task_update,
     list_tasks_intent,
     match_tasks_by_topic,
+    reopen_task_intent,
     update_task_intent,
 )
 from src.services.memory.temporal_facts import (
@@ -3204,6 +3206,77 @@ COMPLETE_TASK = ManagerCapability(
 )
 
 
+def reopen_task(request: CapabilityRequest) -> TaskResult:
+    """Reopen one completed task - the lifecycle's missing fourth verb.
+    The identical governed replace-in-place ``complete_task`` already
+    uses, run in reverse: same MemoryRecord.id, same content, status
+    moved back to pending, with the identical explicit restore path if
+    the reopened version is refused. Never a delete-and-recreate - the
+    task's identity (its id) is preserved exactly as it is across a
+    completion.
+    """
+    if request.recall is None or request.retain is None or request.forget is None:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "I don't have a way to reopen tasks right now.",
+        )
+
+    topic = extract_reopen_topic(request.task.description)
+    if not topic:
+        return TaskResult.failure(
+            request.task, request.own_name, "Reopen which task, exactly?"
+        )
+
+    pool = request.recall(kind=MemoryCategory.TASK.value, tags={"task:complete"}, limit=200)
+    matches = match_tasks_by_topic(pool, topic)
+    if not matches:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            f"I don't have a completed task matching '{topic}'.",
+        )
+    if len(matches) > 1:
+        listing = "; ".join(record.content for record in matches)
+        return TaskResult.failure(
+            request.task, request.own_name,
+            f"I found {len(matches)} completed tasks matching '{topic}' - "
+            f"be more specific: {listing}",
+        )
+
+    target = matches[0]
+    updated = dataclass_replace(
+        target,
+        tags={"task", "task:pending"},
+        context={**(target.context or {}), "status": "pending"},
+    )
+
+    if not request.forget(target.id):
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "I couldn't reopen that task: it was already gone.",
+        )
+    verdict = request.retain(updated)
+    if not verdict.allowed:
+        return _restore_or_report(
+            request, target, f"I couldn't reopen that task: {verdict.reason}"
+        )
+
+    return TaskResult.success(
+        request.task, request.own_name,
+        f"Reopened: {target.content}",
+        payload={"handled_by": "reopen_task", "task_id": target.id},
+    )
+
+
+REOPEN_TASK = ManagerCapability(
+    name="reopen_task",
+    capabilities=frozenset({"task", "tasks"}),
+    handle=reopen_task,
+    description="Reopens a completed task ('reopen the task ...', 'make the task ... incomplete').",
+    claims=lambda task, participants=(): reopen_task_intent(task.description),
+    scoreable=False,
+)
+
+
 def update_task(request: CapabilityRequest) -> TaskResult:
     """Rename a task - the identical governed replace-in-place
     complete_task uses, restoring the untouched original if the renamed
@@ -5460,7 +5533,8 @@ def calendar_intent(task: Task, participants: Sequence[str] = ()) -> bool:
     text = task.description
     if (
         create_task_intent(text) or list_tasks_intent(text)
-        or complete_task_intent(text) or update_task_intent(text)
+        or complete_task_intent(text) or reopen_task_intent(text)
+        or update_task_intent(text)
     ):
         return False
     if relational_birthday_intent(text):
@@ -5848,6 +5922,7 @@ MANAGER_CAPABILITIES: dict[str, ManagerCapability] = {
     CREATE_TASK.name: CREATE_TASK,
     LIST_TASKS.name: LIST_TASKS,
     COMPLETE_TASK.name: COMPLETE_TASK,
+    REOPEN_TASK.name: REOPEN_TASK,
     UPDATE_TASK.name: UPDATE_TASK,
     TEMPORAL_DERIVATION.name: TEMPORAL_DERIVATION,
     # Foundation Repair #1: current day/date/month/year, from the real
