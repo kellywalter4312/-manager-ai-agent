@@ -1,4 +1,4 @@
-"""Final pre-push connection check: the real "tasks" quick-view button.
+"""Final pre-push connection check: the real quick-view buttons.
 
 The gap this closes is not a missing feature - it is missing *proof*.
 Phase 5.1's own tests already proved (a) "tasks" is generated as a
@@ -14,6 +14,17 @@ already established, applied here to the generic MGMT_VERBS button
 path that file's own harness stubbed out (querySelectorAll("[data-cc-
 verb]") always returned [] there, since that file only exercised the
 dedicated capability-registry form).
+
+**Control Center integration gate (2026-09-09).** "recordings" and
+"unresolved" were real, already-governed, already-tested server verbs
+(`scripts/control_center.py`'s own `run_command`) with no corresponding
+quick-view button - reachable only by typing the exact word into the
+free-text command box, unlike every sibling read-only view (personal/
+calendar/experience/tasks/...), which the whole point of MGMT_VERBS is
+to make one click away. Added to MGMT_VERBS; `TestTheRealTasksButtonIs
+GenuinelyConnected` below is generalised to `_run_button_harness(verb=...)`
+so the identical, already-proven click-to-fetch-to-render chain is
+re-verified for each one, not merely asserted present by name.
 """
 
 from __future__ import annotations
@@ -123,9 +134,10 @@ if (end === -1) { console.log(JSON.stringify({ error: "could not extract functio
 vm.runInContext(scriptSrc.slice(start, end) + "\nthis.__wire = wireControlCenterCommands;", sandbox);
 sandbox.__wire();
 
-const tasksButton = verbButtons.find(b => b.dataset.ccVerb === "tasks");
-if (!tasksButton) { console.log(JSON.stringify({ error: "no tasks button generated from MGMT_VERBS", verbs })); process.exit(1); }
-tasksButton.click();
+const targetVerb = process.argv[4];
+const targetButton = verbButtons.find(b => b.dataset.ccVerb === targetVerb);
+if (!targetButton) { console.log(JSON.stringify({ error: `no ${targetVerb} button generated from MGMT_VERBS`, verbs })); process.exit(1); }
+targetButton.click();
 
 setTimeout(() => {
   console.log(JSON.stringify({ verbs, fetchCalls, outText: byId["cc-out"].textContent }));
@@ -133,7 +145,7 @@ setTimeout(() => {
 """
 
 
-def _run_harness(tmp_path, *, fetch_body: str):
+def _run_harness(tmp_path, *, fetch_body: str, verb: str = "tasks"):
     node = _node()
     script_path = tmp_path / "ui_script.js"
     script_path.write_text(_script(), encoding="utf-8")
@@ -145,7 +157,7 @@ def _run_harness(tmp_path, *, fetch_body: str):
         encoding="utf-8",
     )
     result = subprocess.run(
-        [node, str(harness_path), str(script_path), str(fetch_script_path)],
+        [node, str(harness_path), str(script_path), str(fetch_script_path), verb],
         capture_output=True, text=True, timeout=30,
     )
     assert result.returncode == 0, result.stderr
@@ -193,3 +205,65 @@ class TestTheRealTasksButtonIsGenuinelyConnected:
             fetch_body=json.dumps({"requires_confirmation": False, "result": "no pending tasks"}),
         )
         assert len(result["fetchCalls"]) == 1
+
+
+@pytest.mark.parametrize("verb", ["recordings", "unresolved"])
+class TestTheNewlyConnectedReadOnlyButtonsWork:
+    """Control Center integration gate: 'recordings' and 'unresolved'
+    were real, governed, tested server verbs with no one-click path in
+    the served page - reachable only by typing the exact word into the
+    free-text command box. Every sibling read-only verb (tasks, above)
+    already gets the full click-to-fetch-to-render proof; these two now
+    get the identical proof, not just a name check."""
+
+    def test_the_verb_is_among_the_real_generated_quick_view_buttons(self, tmp_path, verb):
+        result = _run_harness(
+            tmp_path, verb=verb,
+            fetch_body=json.dumps({"requires_confirmation": False, "result": "placeholder"}),
+        )
+        assert verb in result["verbs"]
+
+    def test_clicking_the_real_button_sends_the_exact_command(self, tmp_path, verb):
+        result = _run_harness(
+            tmp_path, verb=verb,
+            fetch_body=json.dumps({"requires_confirmation": False, "result": "placeholder"}),
+        )
+        assert len(result["fetchCalls"]) == 1
+        assert result["fetchCalls"][0]["body"]["command"] == verb
+        assert "confirm_token" not in result["fetchCalls"][0]["body"]
+
+    def test_the_real_backend_response_is_rendered_into_cc_out(self, tmp_path, verb):
+        result = _run_harness(
+            tmp_path, verb=verb,
+            fetch_body=json.dumps({
+                "requires_confirmation": False,
+                "result": f"real {verb} output, not a placeholder",
+            }),
+        )
+        assert result["outText"] == f"real {verb} output, not a placeholder"
+
+    def test_never_triggers_the_confirmation_flow(self, tmp_path, verb):
+        result = _run_harness(
+            tmp_path, verb=verb,
+            fetch_body=json.dumps({"requires_confirmation": False, "result": "placeholder"}),
+        )
+        assert len(result["fetchCalls"]) == 1
+
+
+class TestTheServerGenuinelyAcceptsBothVerbsAndNeverAsksForConfirmation:
+    """The other half of the connection: the button is real, and the
+    verb it sends is one the real, unmocked classify_administrative_write
+    (scripts/control_center.py) genuinely treats as read-only - not just
+    something the frontend hopes is true."""
+
+    def test_recordings_is_never_classified_as_an_administrative_write(self):
+        from scripts.control_center import classify_administrative_write
+
+        is_write, _ = classify_administrative_write("recordings")
+        assert is_write is False
+
+    def test_unresolved_is_never_classified_as_an_administrative_write(self):
+        from scripts.control_center import classify_administrative_write
+
+        is_write, _ = classify_administrative_write("unresolved")
+        assert is_write is False
