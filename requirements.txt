@@ -47,5 +47,16 @@ openpyxl>=3.1
 # lazily.
 python-pptx>=0.6
 
+# Optional - only needed for `scripts/serve_ui.py --https` (see
+# scripts/dev_tls.py). Generates the private, locally-signed TLS
+# certificate that lets the user's own other devices - a phone on the
+# same private network - use microphone-dependent capabilities, which
+# browsers otherwise refuse outside a secure context. Imported lazily;
+# the project, and plain-HTTP --host, run without it installed. Already
+# present transitively via google-auth (MANAGER_MAILBOX=gmail) in many
+# installs, but not guaranteed, so it is listed here explicitly rather
+# than relied on by accident.
+cryptography>=41.0
+
 # Development dependencies:
 pytest>=8.0

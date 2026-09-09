@@ -1,6 +1,21 @@
 """Serve the interface against the live running system - and now talk to it.
 
     python scripts/serve_ui.py [--host 127.0.0.1] [--port 8642]
+                                [--https] [--tls-host HOST ...]
+
+**Private device access (2026-09-09).** `--https` wraps this exact server -
+same routes, same one `LiveSystem`, nothing duplicated - in a locally
+generated TLS certificate (`scripts/dev_tls.py`), so a browser reached over
+`--host 0.0.0.0` from another device on the same private network gets a
+real secure context and can therefore use microphone-dependent capabilities
+(Recording, ambient voice activation) that browsers otherwise refuse
+outside `localhost`. This is never a public deployment: the certificate is
+self-signed, covers only addresses this machine is actually reachable at on
+its own network (detected live - see `dev_tls.detect_private_addresses`),
+and each device must explicitly trust it once, the same way any internal-
+only HTTPS site is trusted on a phone that has never heard of a public CA.
+Omitting `--https` leaves this file's behaviour byte-identical to before -
+plain HTTP, `localhost`-only by default, exactly as it always was.
 
 **Phase 6 changes what "live" means here.** The read-only milestone before
 this one rebuilt the whole system fresh on every request - correct for
@@ -112,6 +127,7 @@ import argparse
 import base64
 import json
 import secrets
+import ssl
 import sys
 import threading
 import time
@@ -1255,6 +1271,26 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Serve the interface live.")
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument(
+        "--https", action="store_true",
+        help=(
+            "wrap this same server in a private, locally-generated TLS "
+            "certificate (see scripts/dev_tls.py) - never a public one - so "
+            "another device on this machine's own private network can use "
+            "microphone-dependent capabilities, which browsers otherwise "
+            "refuse outside a secure context. Omit to keep serving plain "
+            "HTTP, exactly as before."
+        ),
+    )
+    parser.add_argument(
+        "--tls-host", action="append", default=[], metavar="HOST",
+        help=(
+            "an extra hostname or IP to cover in the --https certificate, "
+            "beyond what is auto-detected from this machine's own network "
+            "right now (e.g. a router-assigned static IP or LAN DNS name). "
+            "May be given more than once. Only meaningful with --https."
+        ),
+    )
     args = parser.parse_args(argv)
 
     settings = Settings.from_env()
@@ -1275,7 +1311,32 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     httpd = LiveServer((args.host, args.port), system)
-    print(f"serving http://{args.host}:{args.port}/  (Ctrl+C to stop)")
+    scheme = "http"
+    if args.https:
+        # Private device-access checkpoint (2026-09-09): a transport
+        # decision made here, in main(), never inside LiveServer itself -
+        # LiveServer still stores exactly the one `system` attribute the
+        # architecture guard in tests/test_live_ui.py already requires.
+        # Lazily imported so a plain-HTTP run (still the default) never
+        # even attempts to import the optional 'cryptography' dependency
+        # this needs.
+        from scripts.dev_tls import TLSUnavailable, build_ssl_context, describe_trust_steps, ensure_certificate
+
+        try:
+            info = ensure_certificate(extra_hosts=tuple(args.tls_host))
+            httpd.socket = build_ssl_context(info).wrap_socket(httpd.socket, server_side=True)
+        except TLSUnavailable as exc:
+            # The same honest-refusal shape as the configuration guard
+            # above: no fallback to plain HTTP, which would silently
+            # hand back a microphone-refusing origin while claiming
+            # --https had been honoured.
+            print(f"configuration error: {exc}")
+            httpd.server_close()
+            return 2
+        scheme = "https"
+        print(describe_trust_steps(info))
+
+    print(f"serving {scheme}://{args.host}:{args.port}/  (Ctrl+C to stop)")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

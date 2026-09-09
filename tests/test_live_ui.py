@@ -805,3 +805,117 @@ class TestTheServerHoldsNoSystemOfItsOwn:
 
     def test_the_server_binds_to_loopback_by_default(self):
         assert DEFAULT_HOST == "127.0.0.1"
+
+
+class TestPrivateHttpsIsOptIn:
+    """Private device-access checkpoint (2026-09-09): `--https` must never
+    change what happens when it is omitted. These are structural (AST)
+    checks in the same spirit as the class above, for the same reason -
+    `tests/conftest.py::_no_network` blocks real `connect()`/DNS/
+    `SSLContext.wrap_socket` for this whole suite, so `main()`'s actual
+    wire-level behaviour (both with and without `--https`) is proven
+    separately, by hand, outside pytest - see `tests/test_dev_tls.py`'s own
+    module docstring and the live verification in this checkpoint's own
+    commit message."""
+
+    def _main_function(self):
+        tree = ast.parse(SERVE_UI.read_text(encoding="utf-8"))
+        return next(
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "main"
+        )
+
+    def test_dev_tls_is_never_imported_at_module_level(self):
+        """The optional 'cryptography' dependency dev_tls.py needs must
+        never be imported just by importing serve_ui.py itself - a
+        plain-HTTP run (still the default) must not even attempt it."""
+        tree = ast.parse(SERVE_UI.read_text(encoding="utf-8"))
+        top_level_imports = []
+        for node in tree.body:  # module top level only, not inside main()
+            if isinstance(node, ast.ImportFrom) and node.module:
+                top_level_imports.append(node.module)
+            elif isinstance(node, ast.Import):
+                top_level_imports += [alias.name for alias in node.names]
+        assert not any("dev_tls" in m for m in top_level_imports)
+
+    def test_dev_tls_is_imported_only_inside_an_https_branch(self):
+        """The lazy import must live inside a real `if` - never at the
+        top of main(), which would attempt it on every plain-HTTP run
+        too."""
+        main_fn = self._main_function()
+        import_nodes = [
+            n for n in ast.walk(main_fn)
+            if (isinstance(n, ast.ImportFrom) and n.module and "dev_tls" in n.module)
+        ]
+        assert import_nodes, "main() must import dev_tls somewhere for --https to work"
+
+        # Every such import must have an ast.If somewhere among its
+        # ancestors within main() - i.e. it is conditional, not top-level
+        # in the function body.
+        def ancestors_within(root, target):
+            for node in ast.walk(root):
+                for child in ast.iter_child_nodes(node):
+                    if child is target:
+                        yield node
+
+        for imp in import_nodes:
+            found_if = False
+            # Walk the whole function tree looking for an If node whose
+            # subtree contains this import.
+            for node in ast.walk(main_fn):
+                if isinstance(node, ast.If) and imp in ast.walk(node):
+                    found_if = True
+                    break
+            assert found_if, "the dev_tls import must be gated behind an if, not unconditional"
+
+    def test_https_flag_exists_and_defaults_to_off(self):
+        tree = ast.parse(SERVE_UI.read_text(encoding="utf-8"))
+        main_fn = self._main_function()
+        calls = [
+            n for n in ast.walk(main_fn)
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute) and n.func.attr == "add_argument"
+        ]
+        https_calls = [
+            c for c in calls
+            if c.args and isinstance(c.args[0], ast.Constant) and c.args[0].value == "--https"
+        ]
+        assert https_calls, "main() must define a --https flag"
+        kwargs = {kw.arg: kw.value for kw in https_calls[0].keywords}
+        assert "action" in kwargs and getattr(kwargs["action"], "value", None) == "store_true"
+
+    def test_tls_unavailable_is_caught_and_reported_not_silently_swallowed(self):
+        """A missing 'cryptography' package (or any other real TLS setup
+        failure) must fail loudly, the same honest-refusal shape the
+        pre-existing configuration guard already uses - never a silent
+        fallback to plain HTTP, which would claim --https had been
+        honoured while actually handing back a microphone-refusing
+        origin."""
+        main_fn = self._main_function()
+        handlers = [n for n in ast.walk(main_fn) if isinstance(n, ast.ExceptHandler)]
+        names = []
+        for h in handlers:
+            if h.type is None:
+                continue
+            if isinstance(h.type, ast.Name):
+                names.append(h.type.id)
+            elif isinstance(h.type, ast.Tuple):
+                names += [e.id for e in h.type.elts if isinstance(e, ast.Name)]
+        assert "TLSUnavailable" in names
+
+    def test_serving_still_binds_to_whatever_host_was_asked_for(self):
+        """--https must not silently override --host to something else -
+        the same flexible, already-real bind override the prior audit
+        confirmed exists (test_the_server_binds_to_loopback_by_default
+        above), now proven to remain untouched by the TLS branch: no
+        assignment to args.host anywhere in main()."""
+        main_fn = self._main_function()
+        assigned_names = {
+            target.attr
+            for node in ast.walk(main_fn)
+            if isinstance(node, ast.Assign)
+            for target in node.targets
+            if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name)
+            and target.value.id == "args"
+        }
+        assert "host" not in assigned_names
