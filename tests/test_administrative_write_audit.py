@@ -42,11 +42,12 @@ def real_system(**overrides):
 
 @pytest.fixture(autouse=True)
 def _isolated_paths(tmp_path, monkeypatch):
-    """Every test gets its own accounts/config/action-log files - never
-    the real ones, and never shared between tests."""
+    """Every test gets its own accounts/config/action-log/services files
+    - never the real ones, and never shared between tests."""
     monkeypatch.setattr(control_center_module, "DEFAULT_ACCOUNTS_PATH", tmp_path / "accounts.json")
     monkeypatch.setattr(control_center_module, "DEFAULT_CONFIG_PATH", tmp_path / "config.json")
     monkeypatch.setattr(control_center_module, "DEFAULT_LEDGER_PATH", tmp_path / "ledger.json")
+    monkeypatch.setattr(control_center_module, "DEFAULT_SERVICES_PATH", tmp_path / "services.json")
     return tmp_path / "action_log.json"
 
 
@@ -196,6 +197,96 @@ class TestUnconfirmedOrReadOnlyRequestsNeverCreateRecords:
         route_command(command, token, system, action_log_path=_isolated_paths)
 
         assert len(load_action_log(_isolated_paths)) == 1
+
+
+class TestTheServicesVerbUsesTheIdenticalGovernanceNoParallelSystem:
+    """Open-ended service discovery (2026-09-09): 'services declare'/
+    'forget' reuse classify_administrative_write/_record_if_administrative_write
+    exactly like the four verbs above - proven here the same way, not
+    assumed from shared code alone."""
+
+    def test_declaring_a_service_is_recorded(self, _isolated_paths):
+        runtime, manager, channel, conversation = real_system()
+        centre = ControlCenter(runtime, manager)
+
+        run_command(
+            centre, "services weatherstub declare http://127.0.0.1:9911 ping:GET:/ping:open",
+            80, channel, conversation, action_log_path=_isolated_paths,
+        )
+
+        entries = load_action_log(_isolated_paths)
+        assert len(entries) == 1
+        assert entries[0].capability == "admin.services"
+        assert entries[0].succeeded is True
+
+    def test_forgetting_a_service_is_recorded(self, _isolated_paths):
+        runtime, manager, channel, conversation = real_system()
+        centre = ControlCenter(runtime, manager)
+
+        run_command(
+            centre, "services weatherstub declare http://127.0.0.1:9911 ping:GET:/ping:open",
+            80, channel, conversation, action_log_path=_isolated_paths,
+        )
+        run_command(centre, "services weatherstub forget", 80, channel, conversation, action_log_path=_isolated_paths)
+
+        entries = load_action_log(_isolated_paths)
+        assert [e.capability for e in entries] == ["admin.services", "admin.services"]
+        assert entries[-1].succeeded is True
+
+    def test_a_malformed_declare_is_recorded_as_failed_not_success(self, _isolated_paths):
+        runtime, manager, channel, conversation = real_system()
+        centre = ControlCenter(runtime, manager)
+
+        run_command(
+            centre, "services badservice declare not-a-real-url ping:GET:/ping:open",
+            80, channel, conversation, action_log_path=_isolated_paths,
+        )
+
+        entries = load_action_log(_isolated_paths)
+        assert len(entries) == 1
+        assert entries[0].succeeded is False
+
+    def test_a_bare_services_list_is_read_only_and_creates_no_record(self, _isolated_paths):
+        runtime, manager, channel, conversation = real_system()
+        centre = ControlCenter(runtime, manager)
+
+        run_command(centre, "services", 80, channel, conversation, action_log_path=_isolated_paths)
+
+        assert load_action_log(_isolated_paths) == ()
+
+    def test_declaring_over_http_requires_confirmation_first(self, _isolated_paths):
+        """The decisive case, the identical shape
+        test_the_pending_confirmation_step_over_http_creates_no_record
+        above already proves for 'provider add' - route_command's first
+        call, with no token, must never reach run_command's own
+        recording point for 'services declare' either."""
+        runtime, manager, channel, conversation = real_system()
+        system = _live_system(runtime, manager, channel, conversation)
+
+        status, body, _ = route_command(
+            "services weatherstub declare http://127.0.0.1:9911 ping:GET:/ping:open",
+            None, system, action_log_path=_isolated_paths,
+        )
+        assert status == 200
+        assert load_action_log(_isolated_paths) == ()
+
+    def test_confirming_declares_the_service_and_creates_exactly_one_record(self, _isolated_paths):
+        import json as jsonlib
+
+        runtime, manager, channel, conversation = real_system()
+        system = _live_system(runtime, manager, channel, conversation)
+        command = "services weatherstub declare http://127.0.0.1:9911 ping:GET:/ping:open"
+
+        _, pending_body, _ = route_command(command, None, system, action_log_path=_isolated_paths)
+        token = jsonlib.loads(pending_body)["confirm_token"]
+        route_command(command, token, system, action_log_path=_isolated_paths)
+
+        assert len(load_action_log(_isolated_paths)) == 1
+
+        from src.services.connections.service_registry import load_service_registry
+
+        registry = load_service_registry(control_center_module.DEFAULT_SERVICES_PATH)
+        assert "weatherstub" in registry
 
 
 class TestPersistenceAcrossRestart:

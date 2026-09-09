@@ -207,14 +207,17 @@ class TestTheRealTasksButtonIsGenuinelyConnected:
         assert len(result["fetchCalls"]) == 1
 
 
-@pytest.mark.parametrize("verb", ["recordings", "unresolved"])
+@pytest.mark.parametrize("verb", ["recordings", "unresolved", "services"])
 class TestTheNewlyConnectedReadOnlyButtonsWork:
-    """Control Center integration gate: 'recordings' and 'unresolved'
-    were real, governed, tested server verbs with no one-click path in
-    the served page - reachable only by typing the exact word into the
-    free-text command box. Every sibling read-only verb (tasks, above)
-    already gets the full click-to-fetch-to-render proof; these two now
-    get the identical proof, not just a name check."""
+    """Control Center integration gate: 'recordings', 'unresolved' and
+    (open-ended service discovery, 2026-09-09) 'services' were real,
+    governed, tested server verbs with no one-click path in the served
+    page - reachable only by typing the exact word into the free-text
+    command box. Every sibling read-only verb (tasks, above) already
+    gets the full click-to-fetch-to-render proof; these three now get
+    the identical proof, not just a name check. 'services' with no
+    argument is the bare, read-only list - declare/forget still need
+    arguments the generic free-text box supplies, unchanged."""
 
     def test_the_verb_is_among_the_real_generated_quick_view_buttons(self, tmp_path, verb):
         result = _run_harness(

@@ -110,6 +110,13 @@ from src.services.credentials.account_store_file import (  # noqa: E402
     load_credential_store,
     save_credential_store,
 )
+from src.providers.service_descriptor import ServiceDescriptor, ServiceOperation  # noqa: E402
+from src.services.connections.service_registry import (  # noqa: E402
+    DEFAULT_SERVICES_PATH,
+    declare_service,
+    forget_service,
+    load_service_registry,
+)
 from src.services.ecosystem.registry_factory import build_ecosystem_registry  # noqa: E402
 from src.evolution import RiskLevel  # noqa: E402
 from src.services.evolution import ecosystem_evolution  # noqa: E402
@@ -245,6 +252,21 @@ HELP = """
   future service) can all be connected at once. There is no single
   "active connection" the way there is one active LLM/voice/video
   backend - connecting or disconnecting one never touches another.
+
+  services                 every open-ended-discovery service declared so
+                           far - name, base URL, operation count
+  services <name>          one declared service's full detail
+  services <name> declare <base-url> <op>:<METHOD>:<path>:<auth|open>[,...]
+                           declare a legitimate new service - no code
+                           change, ever, for a new company or website
+  services <name> forget   remove a declared service permanently
+
+  A declared service becomes a real, usable connection (reachable
+  through 'talk', the same 'connected account' capability Gmail already
+  uses) once it also has a credential ('connections <name> connect ...'
+  above) and is selected with MANAGER_CONNECTION_PROVIDER=<name> on the
+  next start - the same "declared, credentialed, then selected" shape
+  gmail already follows, generalised to any name.
 
   RELOAD / RESTART REQUIRED: 'provider ... add/select/revoke' and
   'connections ... connect/disconnect' persist to disk immediately, but
@@ -1194,6 +1216,123 @@ def run_connections_command(centre: "ControlCenter", rest: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Open-ended service discovery (Phase 6 foundation, 2026-09-09): the
+# smallest missing generalized mechanism for a legitimate service Alfred
+# was never built knowing about to become a real, governed connection -
+# never a hard-coded catalogue, never a new capability per company.
+#
+#     services                          -> every declared service
+#     services <name>                   -> one service's own detail
+#     services <name> declare <url> <op>:<METHOD>:<path>:<auth|open>[,...]
+#     services <name> forget
+#
+# ``declare``/``forget`` are administrative writes - confirmed and
+# audited exactly like ``connections connect``/``provider add`` above,
+# through the identical classify_administrative_write/
+# _record_if_administrative_write pair. A credential for a declared
+# service is still added the ordinary way, through the already-generic
+# ``connections <name> connect ...`` above - this verb only ever
+# declares what the service *is* (its base URL and operations), never a
+# second, parallel credential mechanism. Once both exist, selecting
+# ``MANAGER_CONNECTION_PROVIDER=<name>`` at the next process start
+# builds a real ``DeclaredConnection`` (connection_factory.py's own
+# fallback) - reachable through the unmodified ``connected_action``
+# capability, the identical governed path Gmail already uses.
+# ---------------------------------------------------------------------------
+
+
+def run_services_command(centre: "ControlCenter", rest: str) -> str:
+    """Decide what to answer for the ``services`` verb - declare,
+    forget, or list what open-ended service discovery has registered so
+    far. Real, persisted state throughout
+    (``src/services/connections/service_registry.py``); never a mock
+    catalogue and never in-process-only.
+
+    Reads/writes ``DEFAULT_SERVICES_PATH`` by the identical explicit-
+    argument shape ``run_connections_command`` already threads
+    ``DEFAULT_ACCOUNTS_PATH`` through - a module-level name resolved
+    fresh on every call, not a function default bound once at import
+    time, so a test can monkeypatch this module's own
+    ``DEFAULT_SERVICES_PATH`` and have every call below honour it.
+    """
+    args = rest.split()
+    if not args:
+        registry = load_service_registry(DEFAULT_SERVICES_PATH)
+        if not registry:
+            return (
+                "no services declared yet.\n"
+                "declare one with: services <name> declare <base-url> "
+                "<op-name>:<METHOD>:<path>:<auth|open>[,<op2>...]"
+            )
+        lines = ["DECLARED SERVICES (open-ended discovery)", ""]
+        for name, descriptor in sorted(registry.items()):
+            lines.append(f"{name}: {descriptor.base_url} ({len(descriptor.operations)} operation(s))")
+        return "\n".join(lines)
+
+    name, *rest_args = args
+    normalised = name.strip().lower()
+
+    if not rest_args:
+        registry = load_service_registry(DEFAULT_SERVICES_PATH)
+        descriptor = registry.get(normalised)
+        if descriptor is None:
+            return f"'{name}' is not a declared service. Try: services (to list all)"
+        lines = [f"{descriptor.name}: {descriptor.base_url}"]
+        if descriptor.description:
+            lines.append(descriptor.description)
+        for op in descriptor.operations:
+            auth = "auth required" if op.requires_auth else "open"
+            lines.append(f"  {op.name} ({op.method} {op.path}, {auth})" + (f" - {op.description}" if op.description else ""))
+        return "\n".join(lines)
+
+    action = rest_args[0].lower()
+
+    if action == "declare":
+        if len(rest_args) < 3:
+            return (
+                "usage: services <name> declare <base-url> "
+                "<op-name>:<METHOD>:<path>:<auth|open>[,<op2>...]"
+            )
+        base_url = rest_args[1]
+        op_specs = rest_args[2].split(",")
+        operations: "list[ServiceOperation]" = []
+        for spec in op_specs:
+            fields = spec.split(":")
+            if len(fields) != 4:
+                return (
+                    f"could not declare '{name}': operation '{spec}' must have the "
+                    "shape name:METHOD:path:auth|open"
+                )
+            op_name, method, path, auth_word = fields
+            try:
+                operations.append(
+                    ServiceOperation(
+                        name=op_name, method=method, path=path,
+                        requires_auth=(auth_word.strip().lower() == "auth"),
+                    )
+                )
+            except ValueError as exc:
+                return f"could not declare '{name}': {exc}"
+        try:
+            descriptor = ServiceDescriptor(name=name, base_url=base_url, operations=tuple(operations))
+        except ValueError as exc:
+            return f"could not declare '{name}': {exc}"
+        declare_service(descriptor, DEFAULT_SERVICES_PATH)
+        return (
+            f"declared '{descriptor.name}' with {len(descriptor.operations)} operation(s) "
+            f"at {descriptor.base_url}. Add a credential with 'connections {descriptor.name} "
+            f"connect <account-id> <credential>' if any operation needs one, then select it "
+            f"with MANAGER_CONNECTION_PROVIDER={descriptor.name} on the next start."
+        )
+
+    if action == "forget":
+        removed = forget_service(normalised, DEFAULT_SERVICES_PATH)
+        return f"forgot '{normalised}'" if removed else f"'{name}' was not declared"
+
+    return f"unknown services action '{action}' for '{name}'. Try: declare, forget"
+
+
+# ---------------------------------------------------------------------------
 # Full Alfred OS Ecosystem Evolution: a real, governed management surface
 # spanning the whole ecosystem - providers, connections, specialists,
 # Brain mode, and the existing system/schema/visual-environment Upgrade
@@ -1483,6 +1622,12 @@ def classify_administrative_write(command: str) -> "tuple[bool, str]":
     if verb == "connections" and len(parts) >= 3 and parts[2].lower() in ("connect", "disconnect"):
         return True, f"{parts[2].lower()} the '{parts[1]}' connection"
 
+    if verb == "services" and len(parts) >= 3 and parts[2].lower() in ("declare", "forget"):
+        action = parts[2].lower()
+        if action == "declare":
+            return True, f"declare a new service connection '{parts[1]}' (open-ended discovery)"
+        return True, f"forget the declared service '{parts[1]}'"
+
     if (
         verb == "ecosystem" and len(parts) >= 5
         and parts[2].lower() in ("run", "rollback")
@@ -1520,6 +1665,8 @@ def _administrative_write_succeeded(verb: str, result: str) -> bool:
         return text.startswith("added ") or " is now active." in text or text.startswith("revoked ")
     if verb == "connections":
         return text.startswith("connected ") or text.startswith("disconnected ")
+    if verb == "services":
+        return text.startswith("declared ") or text.startswith("forgot ")
     if verb == "capabilities":
         return " is now enabled " in text or " is now disabled " in text
     if verb == "ecosystem":
@@ -2105,6 +2252,11 @@ def run_command(
 
     if verb == "connections":
         result = run_connections_command(centre, rest)
+        _record_if_administrative_write(command, result, action_log_path)
+        return result
+
+    if verb == "services":
+        result = run_services_command(centre, rest)
         _record_if_administrative_write(command, result, action_log_path)
         return result
 

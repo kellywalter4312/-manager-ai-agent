@@ -994,8 +994,8 @@ MANAGEMENT_VERBS = frozenset(
     {
         "status", "history", "actions", "unresolved", "avatar", "environment",
         "profile", "voice", "review", "capabilities", "provider", "connections",
-        "ecosystem", "tasks", "artifacts", "personal", "calendar", "experience",
-        "workspace", "recordings",
+        "services", "ecosystem", "tasks", "artifacts", "personal", "calendar",
+        "experience", "workspace", "recordings",
     }
 )
 

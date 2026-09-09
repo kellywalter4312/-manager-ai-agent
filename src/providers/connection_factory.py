@@ -14,6 +14,25 @@ provider is, so a real one is always a deliberate
 external dependency - no new package, no new service, no new risk
 beyond what this project's Gmail integration already carries.
 
+**Open-ended service discovery (Phase 6 foundation).** ``_BUILDERS``
+above stays exactly two entries - "null" and "gmail" are the only
+connections this project ships bespoke Python for. A name that is
+*not* one of them is no longer an immediate failure: it is looked up in
+the declared-service registry
+(``src/services/connections/service_registry.py``), populated only
+through the confirmed, audited ``services <name> declare`` Control
+Center write - never by this factory, never by Alfred mid-conversation.
+A match becomes a real ``DeclaredConnection``
+(``src/providers/declared_connection.py``), built from that
+descriptor plus whatever ``ProviderAccount`` the existing
+``CredentialStore`` already holds for the identical name - the same
+credential layer Gmail's own account already lives beside, never a
+second one. This is what closes the actual gap: a legitimate new
+service can become a real, usable connection - reachable through the
+unmodified ``connected_action`` capability - without a new subclass or
+a new entry in ``_BUILDERS`` itself. A name that matches neither a
+builder nor a declared service still fails exactly as before.
+
 **Adapter version (Full Alfred OS Ecosystem Evolution).**
 ``adapter_version`` is threaded straight through to whichever builder
 accepts it - today, only Gmail's own ``GmailConnection`` does anything
@@ -74,17 +93,56 @@ def build_connection(
     Omitted, every existing caller reproduces this function's prior
     behaviour exactly.
 
-    Fails fast and loudly on an unknown name, the same rule every other
-    factory in this project already follows.
+    Fails fast and loudly on a name that matches neither a built-in
+    builder nor a declared service, the same rule every other factory
+    in this project already follows.
     """
     try:
         builder = _BUILDERS[settings.connection_provider]
     except KeyError:
+        declared = _build_declared(settings.connection_provider)
+        if declared is not None:
+            logger.info("connection ready: %s (declared service)", declared.name)
+            return declared
         raise ValueError(
             f"Unknown connection provider {settings.connection_provider!r}. "
-            f"Available: {', '.join(available_connection_providers())}"
+            f"Available built-in: {', '.join(available_connection_providers())}. "
+            "A name not listed there must first be registered with "
+            "'services <name> declare ...' (see Control Center)."
         ) from None
 
     connection = builder(settings, adapter_version)
     logger.info("connection ready: %s", connection.name)
     return connection
+
+
+def _build_declared(name: str) -> "Connection | None":
+    """``name`` as a declared service, built into a real
+    ``DeclaredConnection`` with whatever credential is already on file
+    for it - or ``None`` if nothing was ever declared under that name.
+    Imported locally, the identical reason ``_build_gmail`` imports its
+    own dependencies only when selected: a plain "null"/"gmail" run
+    never touches this module, or the credential-store file, at all.
+    """
+    from src.providers.declared_connection import DeclaredConnection
+    from src.services.connections import service_registry as service_registry_module
+    from src.services.credentials import account_store_file as account_store_file_module
+
+    # Read the module's own DEFAULT_*_PATH name fresh on every call
+    # (never a function's own default-parameter value, which would bind
+    # once at that function's *definition* time) - the identical
+    # explicit-argument shape run_connections_command's own
+    # DEFAULT_ACCOUNTS_PATH import already uses, so a test can
+    # monkeypatch either module's path constant and have this function
+    # honour it.
+    registry = service_registry_module.load_service_registry(
+        service_registry_module.DEFAULT_SERVICES_PATH
+    )
+    descriptor = registry.get(name)
+    if descriptor is None:
+        return None
+    store = account_store_file_module.load_credential_store(
+        account_store_file_module.DEFAULT_ACCOUNTS_PATH
+    )
+    account = store.active(descriptor.name)
+    return DeclaredConnection(descriptor, account)
