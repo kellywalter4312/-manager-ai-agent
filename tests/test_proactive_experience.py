@@ -413,11 +413,20 @@ class TestLiveHttpAndFrontendConnection:
         from scripts.serve_ui import route
 
         system = self._live_system()
-        # Use today's real date so the calendar item is genuinely due -
-        # the snapshot path resolves "today" from the real clock, never
-        # a fixed one, so this must be phrased relative to now.
-        from src.services.memory.temporal_facts import utc_today
-        today = utc_today()
+        # Use the live system's own real, configured Calendar for
+        # "today" - the identical clock scripts/heartbeat.py's own
+        # documented fix (see its own comment on `today =
+        # Calendar.configured(...).local_date(now)`) established as
+        # this project's one correct "what day is it" answer, and the
+        # identical clock ControlCenter.experiences() itself resolves
+        # "today" from server-side when this route is actually served.
+        # `utc_today()` disagrees with it for the hour before local
+        # midnight in a positive-offset zone (this project's own
+        # default configured timezone is "Africa/Lagos", UTC+1) -
+        # exactly the discrepancy that comment already names, which is
+        # what made this test genuinely flaky rather than merely
+        # "time-sensitive by design".
+        today = system.runtime.calendar.today()
         system.manager.handle_task(
             Task(description=f"I have a synthetic test occasion on {today.isoformat()}.")
         )
@@ -428,10 +437,13 @@ class TestLiveHttpAndFrontendConnection:
 
     def test_the_experience_route_delivers_a_real_pending_record(self):
         from scripts.serve_ui import route, route_experience
-        from src.services.memory.temporal_facts import utc_today
 
         system = self._live_system()
-        today = utc_today()
+        # See test_snapshot_carries_a_real_pending_experience_for_a_due_event's
+        # own comment: the live system's own real Calendar, never a bare
+        # UTC date, is the one correct "today" this project's own
+        # heartbeat.py fix already established.
+        today = system.runtime.calendar.today()
         system.manager.handle_task(
             Task(description=f"I have a synthetic test occasion on {today.isoformat()}.")
         )
