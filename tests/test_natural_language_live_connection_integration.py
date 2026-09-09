@@ -28,7 +28,12 @@ from src.config.settings import Settings
 from src.control_center.observer import ControlCenter
 from src.core.contracts import Task
 
-CONNECTED_TASK = Task(description="check my connected account")
+def _intent_task(words: str) -> Task:
+    """A connected-account request that also carries real intent beyond
+    the bare routing marker - the words after the colon are what
+    ``_select_operation`` (src/manager/capabilities.py) actually matches
+    against each operation's own declared name."""
+    return Task(description=f"check my connected account: {words}")
 
 
 def real_system(**overrides):
@@ -95,7 +100,10 @@ class TestASafeOperationIsReachableThroughNaturalLanguage:
         # scripts/control_center.py's own docstring already documents.
         runtime, manager, channel, conversation = real_system(connection_provider="fixturesvc")
 
-        result = manager.handle_task(CONNECTED_TASK)
+        # "read the item" genuinely picks read_item over its sibling
+        # write_item (this checkpoint's own fix) - not an accident of
+        # declaration order.
+        result = manager.handle_task(_intent_task("read the item"))
 
         assert result.succeeded
         assert result.payload["connection"] == "fixturesvc"
@@ -116,15 +124,15 @@ class TestASafeOperationIsReachableThroughNaturalLanguage:
         connected_action's own operation-level authorization check still
         runs first and still refuses honestly when no credential is on
         file for an operation that needs one. Proven here with the
-        auth-required operation placed *first*, so it is genuinely what
-        connected_action selects."""
+        auth-required operation named so the request's own words clearly
+        pick it out over its sibling."""
         _declare_and_credential(
             _isolated_paths, operations="checked_read:GET:/checked:auth,write_item:POST:/item:auth",
             credential=None,
         )
         runtime, manager, channel, conversation = real_system(connection_provider="fixturesvc")
 
-        result = manager.handle_task(CONNECTED_TASK)
+        result = manager.handle_task(_intent_task("checked read please"))
 
         assert not result.succeeded
         assert "not authorized" in result.error.lower()
@@ -149,23 +157,31 @@ class TestTheConsequentialBoundaryIsNotBypassedByTheNewGrant:
         assert not manager.own_skills.tools.permits(tool_name_for("write_item"))
         assert manager.own_skills.tools.permits(tool_name_for("read_item"))
 
-    def test_a_consequential_first_operation_is_refused_not_silently_executed(self, _isolated_paths):
-        """write_item declared *first*, so it is genuinely the operation
-        connected_action itself would select - the honest refusal must
-        still happen, now through the real, production-built system."""
+    def test_a_matched_consequential_operation_is_refused_not_silently_executed(self, _isolated_paths):
+        """The user's own words clearly pick out write_item (declared
+        *second* here, so this is genuinely about intent, not
+        declaration order) - selection genuinely identifies it (the
+        refusal names 'connection_write_item', not some other tool or
+        an ambiguity message), and it is still refused, now through the
+        real, production-built system where write_item's Tool was never
+        granted at all (see TestTheConsequentialBoundaryIsNotBypassedBy
+        TheNewGrant's own sibling test) - a different, but equally
+        honest, refusal than the manually-wired unit test in
+        test_stage16_connections.py exercises for the same boundary."""
         _declare_and_credential(
-            _isolated_paths, operations="write_item:POST:/item:auth,read_item:GET:/item:open",
+            _isolated_paths, operations="read_item:GET:/item:open,write_item:POST:/item:auth",
             credential="genuine-secret-token",
         )
         runtime, manager, channel, conversation = real_system(connection_provider="fixturesvc")
 
-        result = manager.handle_task(CONNECTED_TASK)
+        result = manager.handle_task(_intent_task("write the item"))
 
         assert not result.succeeded
         # Refused before ever being attempted - the real fixture was
         # never reached (no urlopen monkeypatch exists in this test, so
         # any real attempt would raise rather than fail gracefully).
-        assert "write_item" in result.error or "not installed" in result.error.lower()
+        assert "connection_write_item" in result.error
+        assert "not installed" in result.error.lower()
 
     def test_the_confirmed_control_center_path_remains_the_only_way_to_actually_run_it(self, _isolated_paths, monkeypatch):
         """The consequential operation genuinely still runs - just never

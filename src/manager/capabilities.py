@@ -4671,11 +4671,18 @@ PERSONAL_RECURRING_EVENTS = ManagerCapability(
 #     (request.connection) -> external action (request.tools.invoke,
 #     never called directly) -> verified result -> Alfred's response
 #
-# **Six genuinely different facts, checked in this order, never
+# **Seven genuinely different facts, checked in this order, never
 # collapsed into one:**
 #
 #     reasoning               already settled - this handler was reached
 #                              because connected_action_intent matched
+#     operation selection     _select_operation(request.task, operations)
+#                              - which declared operation the user's own
+#                              words pick out, never merely
+#                              operations[0] (see that function's own
+#                              docstring) - an honest failure here, not
+#                              a guess, when nothing matches or more
+#                              than one operation matches equally well
 #     capability availability request.tools.permits(tool_name) - was this
 #                              specific operation *granted*?
 #     connection availability connection.availability - Evidence from an
@@ -4734,6 +4741,51 @@ def connected_action_intent(task: Task, participants: Sequence[str] = ()) -> boo
     return _marker_present(task.description, CONNECTED_ACTION_MARKERS)
 
 
+def _select_operation(task: Task, operations: "Sequence[str]") -> "tuple[str | None, tuple[str, ...]]":
+    """Which of ``operations`` the user actually meant - never merely
+    ``operations[0]``.
+
+    **Trivial when there is only one.** No decision to make, so every
+    existing single-operation connection (Gmail's own ``read_email``,
+    any legacy or future connection that only ever declares one
+    operation) behaves exactly as before - completely unaffected.
+
+    **Generic over more than one, from declared metadata alone.** The
+    one piece of metadata every ``Connection`` universally exposes for
+    each of its operations is the operation's own *name*
+    (``supported_operations``) - so that name, word-split by this
+    file's own canonical ``tokenize()`` (the identical function every
+    other word-overlap capability here already uses, e.g.
+    ``general_conversation``'s own routing), is matched against the
+    part of the user's own request that is not the routing marker
+    itself (``_after_marker`` - the same extraction ``forget_this``/
+    ``recall_memory`` already share) - never a fixed word list, never a
+    named service or industry, so a future connection with new
+    operation names needs no change here.
+
+    **Fails honestly rather than guessing**, in either direction:
+    ``(None, ())`` when nothing in the request's own words overlaps any
+    declared operation at all, and ``(None, tied_candidates)`` when two
+    or more operations are genuinely, equally plausible. Only a single,
+    strictly-highest-scoring operation is ever returned as a real pick.
+    """
+    if len(operations) <= 1:
+        return (operations[0] if operations else None, ())
+
+    intent_words = tokenize(_after_marker(task.description, CONNECTED_ACTION_MARKERS))
+    if not intent_words:
+        return (None, ())
+
+    scored = [(op, len(tokenize(op) & intent_words)) for op in operations]
+    best = max(score for _, score in scored)
+    if best == 0:
+        return (None, ())
+    candidates = tuple(op for op, score in scored if score == best)
+    if len(candidates) > 1:
+        return (None, candidates)
+    return (candidates[0], ())
+
+
 def connected_action(request: CapabilityRequest) -> TaskResult:
     """Attempt one governed action through Alfred's configured
     connection - see this section's own module comment for the full,
@@ -4752,7 +4804,20 @@ def connected_action(request: CapabilityRequest) -> TaskResult:
             request.task, request.own_name,
             f"The '{connection.name}' connection is configured but offers no supported actions yet.",
         )
-    operation = operations[0]
+
+    operation, ambiguous = _select_operation(request.task, operations)
+    if operation is None:
+        if ambiguous:
+            return TaskResult.failure(
+                request.task, request.own_name,
+                f"'{connection.name}' has more than one action that could match that "
+                f"({', '.join(ambiguous)}) - say which one you mean.",
+            )
+        return TaskResult.failure(
+            request.task, request.own_name,
+            f"I'm not sure which of '{connection.name}''s actions you mean "
+            f"({', '.join(operations)}) - say which one, more specifically.",
+        )
     tool_name = tool_name_for(operation)
 
     if not request.tools.permits(tool_name):

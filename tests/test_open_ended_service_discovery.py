@@ -463,7 +463,11 @@ class TestGenericOperationExecutionEndToEnd:
         assert found.descriptor.operation("read_item").requires_auth is False
         assert found.descriptor.operation("write_item").requires_auth is True
 
-    def test_the_write_operation_is_never_executed_through_natural_language(self, monkeypatch):
+    def test_the_matching_operation_is_selected_by_intent_not_declaration_order(self, monkeypatch):
+        """Intent-driven operation selection's own checkpoint: a request
+        that genuinely asks to read reaches read_item, and a request
+        that genuinely asks to write reaches (and is honestly refused
+        for) write_item - never merely whichever was declared first."""
         from src.agents.tools.connection import ConnectionActionTool
         from src.agents.tools.toolset import ToolSet
         from src.composition import build_manager, build_runtime
@@ -481,12 +485,7 @@ class TestGenericOperationExecutionEndToEnd:
         runtime = build_runtime(settings)
         connection = runtime.connection
         assert isinstance(connection, DeclaredConnection)
-
-        # write_item is declared second (read_item first) - conversation
-        # only ever reaches operations[0], so this specifically proves
-        # write_item cannot be reached through it at all, by construction,
-        # not merely that it is refused when selected.
-        assert connection.supported_operations[0] == "read_item"
+        assert connection.supported_operations[0] == "read_item"  # the fixture's own declaration order
 
         tools = ToolSet([
             ConnectionActionTool(connection, operation=op, description=f"Performs {op}.")
@@ -494,10 +493,15 @@ class TestGenericOperationExecutionEndToEnd:
         ])
         manager = build_manager(runtime, mailbox=InMemoryMailbox(), profile=None, tools=tools)
         manager.own_skills._connection = connection
-        result = manager.handle_task(CONNECTED_TASK)
 
-        assert result.succeeded  # the safe read, genuinely executed
-        assert result.payload["operation"] == "read_item"
+        read_result = manager.handle_task(Task(description="check my connected account: read the item"))
+        assert read_result.succeeded  # the safe read, genuinely executed
+        assert read_result.payload["operation"] == "read_item"
+
+        write_result = manager.handle_task(Task(description="check my connected account: write the item"))
+        assert not write_result.succeeded
+        assert "confirmation" in write_result.error.lower()
+        assert "control center" in write_result.error.lower()
 
     def test_the_write_operation_succeeds_once_genuinely_authorized(self, monkeypatch):
         """The other half of the pair: write_item is never reachable
