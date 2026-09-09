@@ -258,10 +258,12 @@ HELP = """
                            far - name, base URL, operation count
   services <name>          one declared service's full detail
   services <name> discover <base-url>
-                           read that service's own published
-                           .well-known/alfred-service.json and propose a
-                           declare command - writes nothing, no
-                           confirmation needed, never itself a connection
+                           read what that service already publishes -
+                           its own .well-known/alfred-service.json, or
+                           (falling back) its own OpenAPI/Swagger
+                           document - and propose a declare command;
+                           writes nothing, no confirmation needed,
+                           never itself a connection
   services <name> declare <base-url> <op>:<METHOD>:<path>:<auth|open>[,...]
                            declare a legitimate new service - no code
                            change, ever, for a new company or website
@@ -1229,18 +1231,25 @@ def run_connections_command(centre: "ControlCenter", rest: str) -> str:
 #
 #     services                          -> every declared service
 #     services <name>                   -> one service's own detail
-#     services <name> discover <url>    -> read the service's own
-#                                          .well-known metadata and
-#                                          propose a declare command -
-#                                          writes nothing, requires no
+#     services <name> discover <url>    -> read what the service itself
+#                                          already publishes and propose
+#                                          a declare command - writes
+#                                          nothing, requires no
 #                                          confirmation
 #     services <name> declare <url> <op>:<METHOD>:<path>:<auth|open>[,...]
 #     services <name> forget
 #
-# ``discover`` (src/providers/service_discovery.py) is the DISCOVER/
-# INSPECT/VALIDATE half of a new lifecycle this checkpoint adds ahead of
-# the REPRESENT/authorize/CONNECT half below, which is unchanged - a
-# discovered proposal still has to be reviewed and separately declared
+# ``discover`` (src/providers/service_discovery.py) tries two real,
+# pre-existing conventions in order - a service's own
+# .well-known/alfred-service.json if it specifically knows about
+# Alfred, falling back to a bounded subset of OpenAPI/Swagger at the
+# conventional locations real, already-existing services already
+# publish it (/openapi.json, /.well-known/openapi.json, /swagger.json)
+# - the genuinely open-ended source, since it needs no accommodation
+# from the service at all. This is the DISCOVER/INSPECT/VALIDATE half
+# of a lifecycle ahead of the REPRESENT/authorize/CONNECT half below,
+# which is unchanged - a discovered proposal still has to be reviewed
+# and separately declared
 # by a person; discovery alone is never authorization to act.
 #
 # ``declare``/``forget`` are administrative writes - confirmed and
@@ -1328,7 +1337,15 @@ def run_services_command(centre: "ControlCenter", rest: str) -> str:
             f"{op.name}:{op.method}:{op.path}:{'auth' if op.requires_auth else 'open'}"
             for op in d.operations
         )
-        lines = [f"DISCOVERED '{d.name}' from {found.source_url}", f"  base URL: {d.base_url}"]
+        source_label = {
+            "alfred-service": "a real .well-known/alfred-service.json this service published for Alfred",
+            "openapi": "a real OpenAPI/Swagger document this service already publishes for anyone",
+        }.get(found.source_kind, found.source_kind)
+        lines = [
+            f"DISCOVERED '{d.name}' from {found.source_url}",
+            f"  source: {source_label}",
+            f"  base URL: {d.base_url}",
+        ]
         if d.description:
             lines.append(f"  description: {d.description}")
         lines.append(

@@ -225,9 +225,11 @@ class TestMalformedOrHostileDocuments:
         assert result.descriptor.operation_names == ("ping",)
 
     def test_an_oversized_response_is_refused_not_partially_parsed(self, monkeypatch):
+        from src.providers.service_discovery import _MAX_RESPONSE_BYTES
+
         huge = json.dumps({
             "operations": [{"name": "ping", "method": "GET", "path": "/ping"}],
-            "description": "x" * 100_000,
+            "description": "x" * (_MAX_RESPONSE_BYTES + 1),
         }).encode()
         _serve(monkeypatch, huge)
         with pytest.raises(ServiceDiscoveryError):
@@ -249,11 +251,28 @@ class TestDuplicateOperationNames:
 class TestNoNetworkCallEverHappensForDiscoveryAlone:
     def test_discover_service_never_calls_execute_on_anything(self, monkeypatch):
         """Discovery alone is not authorization to act - proven
-        structurally: the module never imports DeclaredConnection or
-        ConnectionActionTool at all."""
+        structurally at the AST level (never a docstring substring
+        scan, which the module's own prose about *why* it cannot
+        represent every operation would otherwise trip): no real import
+        of DeclaredConnection/ConnectionActionTool, and no real call to
+        anything named ``.execute``."""
+        import ast
         import inspect
         import src.providers.service_discovery as module
 
-        source = inspect.getsource(module)
-        assert "DeclaredConnection" not in source
-        assert ".execute(" not in source
+        tree = ast.parse(inspect.getsource(module))
+
+        imported_names: "set[str]" = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                imported_names.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.Import):
+                imported_names.update(alias.name for alias in node.names)
+        assert "DeclaredConnection" not in imported_names
+        assert "ConnectionActionTool" not in imported_names
+
+        execute_calls = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute) and node.attr == "execute"
+        ]
+        assert not execute_calls

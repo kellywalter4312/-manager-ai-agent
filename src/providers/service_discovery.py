@@ -2,47 +2,46 @@
 self-published metadata into a *proposed* ``ServiceDescriptor`` -
 never a persisted one.
 
-**The gap this closes.** The prior checkpoint's `services <name>
-declare ...` already lets any legitimate service become a real,
-governed connection - but only once a person has hand-typed its base
-URL and every operation's method/path/auth requirement. Nothing yet
-let Alfred find that shape out *from the service itself*. This module
-is that missing half: DISCOVER and INSPECT, in the DISCOVER -> INSPECT
--> VALIDATE -> REPRESENT -> (present for authorization) -> CONNECT
-lifecycle this checkpoint's own brief describes. REPRESENT is this
-module's own job (producing a real ``ServiceDescriptor``); everything
-from "present for authorization" onward is the *already-governed*
-``services <name> declare`` administrative write
-(``scripts/control_center.py``) - unchanged, and never bypassed.
+**The gap this closes.** ``services <name> declare ...`` already lets
+any legitimate service become a real, governed connection - but only
+once a person has hand-typed its base URL and every operation's
+method/path/auth requirement. This module is the missing half:
+DISCOVER and INSPECT, ahead of the already-governed REPRESENT/
+authorize/CONNECT lifecycle (``services <name> declare``, unchanged,
+never bypassed).
 
-**A real, pre-existing convention, not an invented one.** A service
-publishes its own metadata at a fixed, predictable location -
-``<base_url>/.well-known/alfred-service.json`` - the identical RFC 8615
+**Two real, pre-existing conventions, tried in order - never an
+invented catalogue.** The prior checkpoint added the first:
+``<base_url>/.well-known/alfred-service.json``, the identical RFC 8615
 "a domain describes itself at a standard path" pattern
-``.well-known/openid-configuration`` and ``.well-known/security.txt``
-already use in the wild (and the same shape this project's own
-``video_generation.py`` already fetches a *third party's* published
-OpenAPI document from, live, for a different purpose). Deliberately a
-small, self-describing JSON document - not full OpenAPI parsing, which
-would be a materially larger, riskier surface than this checkpoint's
-own "smallest missing mechanism" calls for.
+``.well-known/openid-configuration``/``.well-known/security.txt``
+already use, for a service that specifically knows about Alfred. This
+checkpoint adds the genuinely open-ended second: a small, bounded
+*subset* of OpenAPI/Swagger - the real, industry-standard way an
+already-existing service (that has never heard of Alfred, and never
+will) already describes its own API, tried at the conventional
+locations real services actually publish it
+(``/openapi.json``, ``/.well-known/openapi.json``, ``/swagger.json``).
+Not full OpenAPI parsing - path parameters, request bodies, response
+schemas and every method beyond GET/POST are deliberately out of
+scope; a legitimate operation this narrow reading cannot represent is
+skipped, not fabricated, the identical "skip what does not validate,
+never invent what would" discipline the alfred-service.json parser
+already holds itself to.
 
-**Untrusted input, treated as untrusted throughout.** Every field this
-module ever reads from a fetched document is named explicitly below -
-``name`` is supplied by the *caller*, never read from the document;
-``base_url`` is likewise always the caller's own, already-validated
-argument, never anything the document claims, so a service can never
-redirect Alfred to represent a different origin than the one actually
-queried. ``operations``/``description`` are read, each individually
-re-validated through ``ServiceDescriptor``/``ServiceOperation``'s own
-existing, already-strict construction - the identical validation a
-hand-typed ``declare`` command already goes through, never a second,
-looser path. Every other key a document might contain (a claimed
-permission, an "auto_approve" flag, an instruction, a different name)
-is silently ignored - never read, never interpreted, never capable of
-reaching Alfred's own configuration, credentials or governance. This
-function itself never persists anything and never calls ``execute()``
-on anything - discovery alone is not authorization to act.
+**Untrusted input, treated as untrusted throughout, for both
+sources.** ``name`` is always the *caller's* argument, never read from
+either one. ``base_url`` is likewise always the caller's own,
+already-validated argument - an OpenAPI document's own ``servers``
+list is read by nobody here, so a service can never redirect Alfred to
+represent a different origin than the one actually queried, exactly
+the same boundary the alfred-service.json source already enforces.
+Every operation extracted from either source is re-validated through
+``ServiceDescriptor``/``ServiceOperation``'s own existing, already-
+strict construction - the identical validation a hand-typed ``declare``
+command already goes through, never a second, looser path. This module
+never persists anything and never calls ``execute()`` on anything -
+discovery alone is not authorization to act, from either source.
 """
 
 from __future__ import annotations
@@ -57,27 +56,58 @@ from src.providers.service_descriptor import ServiceDescriptor, ServiceOperation
 
 # RFC 8615's own well-known-URI prefix, plus a name specific to this
 # project - so a service can publish Alfred's own metadata alongside
-# unrelated .well-known entries (security.txt, openid-configuration, ...)
-# without collision.
+# unrelated .well-known entries without collision.
 WELL_KNOWN_PATH = "/.well-known/alfred-service.json"
 
-# A self-description has no legitimate reason to be large. Bounding the
-# read defends against a hostile or simply broken endpoint that streams
-# an unbounded response - the request is refused outright rather than
-# read in full and discarded, so a malicious host gains nothing by
-# trying.
-_MAX_RESPONSE_BYTES = 65536
+# The real, conventional locations an already-existing service
+# publishes its own OpenAPI/Swagger document at - tried in this order,
+# the first one that yields a recognisable, usable document wins.
+# Never a guess at an arbitrary path: every one of these is a real,
+# widely-used convention.
+OPENAPI_CANDIDATE_PATHS: "tuple[str, ...]" = (
+    "/openapi.json",
+    "/.well-known/openapi.json",
+    "/swagger.json",
+)
+
+# A self-description has no legitimate reason to be enormous. Bounding
+# the read defends against a hostile or simply broken endpoint that
+# streams an unbounded response - the request is refused outright
+# rather than read in full and discarded, so a malicious host gains
+# nothing by trying. OpenAPI documents are naturally larger than a tiny
+# alfred-service.json, so this is generous enough for a real, modest
+# API surface without being unbounded.
+_MAX_RESPONSE_BYTES = 200_000
+
+# A legitimately huge API (hundreds of endpoints) still yields a sane,
+# reviewable proposal rather than an unusable wall of operations - the
+# identical "bounded, not unlimited" discipline the response-size limit
+# above already applies to.
+_MAX_OPENAPI_OPERATIONS = 25
+
+# GET/POST only - the identical, already-enforced allow-list
+# ServiceOperation itself holds a hand-typed declare to; nothing here
+# is more permissive than what a person could type by hand.
+_OPENAPI_METHODS: "tuple[str, ...]" = ("get", "post")
 
 _USER_AGENT = "AlfredOS-ServiceDiscovery/1.0"
 
 
 class ServiceDiscoveryError(Exception):
-    """Discovery could not produce a usable ``ServiceDescriptor`` - an
-    unreachable host, a malformed document, or a document with no
-    individually-valid operation. A real, honest refusal every time,
-    the identical discipline every other real-network call in this
-    project already holds itself to - never a fabricated empty
-    success."""
+    """Discovery could not produce a usable ``ServiceDescriptor`` from
+    any known source - an unreachable host, or every known discovery
+    location returning nothing individually valid. A real, honest
+    refusal every time - never a fabricated empty success."""
+
+
+class _SourceNotFound(Exception):
+    """Internal only: this *specific* discovery source (one URL, one
+    document shape) had nothing usable - never raised across a module
+    boundary. The caller (``discover_service``) catches this to try the
+    next source; a genuine host-level failure (unreachable, timed out)
+    is a ``ServiceDiscoveryError`` instead, and is never caught here,
+    because retrying a different path on a host that cannot be reached
+    at all would only repeat the identical failure."""
 
 
 @dataclass(frozen=True)
@@ -91,63 +121,113 @@ class DiscoveryResult:
 
     descriptor: ServiceDescriptor
     source_url: str
-    # How many operation entries the document itself declared, before
-    # any were dropped as individually malformed - an honest count, so
-    # "3 of 5 were usable" is visible rather than silently rounded down
-    # to "3 operations" with no sign anything was ever discarded.
+    source_kind: str  # "alfred-service" | "openapi" - which convention actually answered
+    # How many operation entries the source itself declared, before any
+    # were dropped as individually unusable (malformed, parameterised,
+    # an unsupported method, over the bound) - an honest count, so
+    # "6 of 14 were usable" is visible rather than silently rounded
+    # down with no sign anything was ever discarded.
     declared_operation_count: int
 
 
 def discover_service(name: str, base_url: str, *, timeout: float = 8.0) -> DiscoveryResult:
-    """Fetch ``<base_url>/.well-known/alfred-service.json`` and turn it
-    into a proposed ``ServiceDescriptor`` named ``name``.
+    """Try every known discovery source against ``base_url``, in order,
+    and turn the first usable one into a proposed ``ServiceDescriptor``
+    named ``name``.
 
-    Raises ``ServiceDiscoveryError`` on any failure - unreachable host,
-    invalid JSON, a document with nothing individually valid to offer.
+    Raises ``ServiceDiscoveryError`` when the host cannot be reached at
+    all, or when every known source was tried and none was usable.
     Never raises anything else, and never returns a descriptor that
-    ``ServiceDescriptor``'s own construction would not itself accept -
-    this function performs no validation ``declare`` does not already
-    enforce, it only *sources* the arguments that construction from
-    somewhere other than a person's own typing.
+    ``ServiceDescriptor``'s own construction would not itself accept.
     """
     normalised_base = str(base_url).strip().rstrip("/")
     parsed = urllib.parse.urlparse(normalised_base)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise ServiceDiscoveryError(f"'{base_url}' is not an absolute http(s) URL")
 
-    url = normalised_base + WELL_KNOWN_PATH
+    attempts: "list[str]" = []
+
+    try:
+        return _try_alfred_service(name, normalised_base, timeout)
+    except _SourceNotFound as exc:
+        attempts.append(str(exc))
+
+    for candidate_path in OPENAPI_CANDIDATE_PATHS:
+        try:
+            return _try_openapi(name, normalised_base, candidate_path, timeout)
+        except _SourceNotFound as exc:
+            attempts.append(str(exc))
+
+    raise ServiceDiscoveryError(
+        f"no usable discovery source found at '{normalised_base}'. Tried: " + "; ".join(attempts)
+    )
+
+
+def _fetch_document(url: str, timeout: float) -> dict:
+    """The one real network call every discovery source shares: fetch,
+    bound, decode, parse. A 404 (or any other HTTP-level error) means
+    only "nothing here" - ``_SourceNotFound``, so the caller tries the
+    next source. Anything that means the *host itself* could not be
+    reached at all - refused, timed out, no such host - is a genuine
+    ``ServiceDiscoveryError``, deliberately never caught by a source
+    loop, since trying a different path on an unreachable host would
+    only repeat the identical failure.
+    """
     request = urllib.request.Request(
         url, headers={"User-Agent": _USER_AGENT, "Accept": "application/json"}
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             raw = response.read(_MAX_RESPONSE_BYTES + 1)
+    except urllib.error.HTTPError as exc:
+        raise _SourceNotFound(f"'{url}' returned HTTP {exc.code}") from None
     except urllib.error.URLError as exc:
         raise ServiceDiscoveryError(f"could not reach '{url}': {exc}") from exc
 
     if len(raw) > _MAX_RESPONSE_BYTES:
-        raise ServiceDiscoveryError(
-            f"'{url}' returned more than {_MAX_RESPONSE_BYTES} bytes - refused"
-        )
+        raise _SourceNotFound(f"'{url}' returned more than {_MAX_RESPONSE_BYTES} bytes")
 
     try:
         payload = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ServiceDiscoveryError(f"'{url}' did not return valid JSON: {exc}") from exc
+        raise _SourceNotFound(f"'{url}' did not return valid JSON: {exc}") from None
 
     if not isinstance(payload, dict):
-        raise ServiceDiscoveryError(
-            f"'{url}' must return a JSON object, got {type(payload).__name__}"
-        )
+        raise _SourceNotFound(f"'{url}' did not return a JSON object")
+
+    return payload
+
+
+def _dedup_by_name(operations: "list[ServiceOperation]") -> "tuple[ServiceOperation, ...]":
+    """First occurrence wins, deterministic - the identical rule both
+    sources already need, factored out once rather than duplicated."""
+    seen: set = set()
+    deduplicated: "list[ServiceOperation]" = []
+    for op in operations:
+        if op.name in seen:
+            continue
+        seen.add(op.name)
+        deduplicated.append(op)
+    return tuple(deduplicated)
+
+
+def _try_alfred_service(name: str, base_url: str, timeout: float) -> DiscoveryResult:
+    """Source 1: ``<base_url>/.well-known/alfred-service.json`` - a
+    service that specifically knows about, and publishes for, Alfred.
+    Unchanged from the prior checkpoint - a document here still means
+    exactly what it always did.
+    """
+    url = base_url + WELL_KNOWN_PATH
+    payload = _fetch_document(url, timeout)
 
     raw_operations = payload.get("operations")
     if not isinstance(raw_operations, list) or not raw_operations:
-        raise ServiceDiscoveryError(f"'{url}' declares no usable 'operations' list")
+        raise _SourceNotFound(f"'{url}' declares no usable 'operations' list")
 
     operations: "list[ServiceOperation]" = []
     for entry in raw_operations:
         if not isinstance(entry, dict):
-            continue  # one malformed entry - a string, a number, null - does not sink the whole document
+            continue
         try:
             operations.append(
                 ServiceOperation(
@@ -159,37 +239,111 @@ def discover_service(name: str, base_url: str, *, timeout: float = 8.0) -> Disco
                 )
             )
         except ValueError:
-            continue  # one operation individually failing validation does not sink the rest
+            continue
 
     if not operations:
-        raise ServiceDiscoveryError(
+        raise _SourceNotFound(
             f"'{url}' declared {len(raw_operations)} operation(s), but none were individually valid"
         )
-
-    # De-duplicate by name, keeping the first occurrence - a document
-    # that (accidentally or otherwise) declares the same operation name
-    # twice must not silently double up; ServiceDescriptor's own
-    # construction already refuses duplicate names outright, so this
-    # keeps a document with an honest mistake usable rather than
-    # refusing the whole discovery over it.
-    seen: set = set()
-    deduplicated: "list[ServiceOperation]" = []
-    for op in operations:
-        if op.name in seen:
-            continue
-        seen.add(op.name)
-        deduplicated.append(op)
 
     try:
         descriptor = ServiceDescriptor(
             name=name,
-            base_url=normalised_base,
-            operations=tuple(deduplicated),
+            base_url=base_url,
+            operations=_dedup_by_name(operations),
             description=str(payload.get("description", ""))[:500],
         )
     except ValueError as exc:
         raise ServiceDiscoveryError(str(exc)) from exc
 
     return DiscoveryResult(
-        descriptor=descriptor, source_url=url, declared_operation_count=len(raw_operations)
+        descriptor=descriptor, source_url=url, source_kind="alfred-service",
+        declared_operation_count=len(raw_operations),
+    )
+
+
+def _try_openapi(name: str, base_url: str, candidate_path: str, timeout: float) -> DiscoveryResult:
+    """Source 2: a bounded subset of OpenAPI/Swagger at one of the real,
+    conventional locations - the genuinely open-ended source, since it
+    needs no accommodation from the service at all, only that it
+    already publishes what most real APIs already do.
+    """
+    url = base_url + candidate_path
+    payload = _fetch_document(url, timeout)
+
+    is_openapi3 = isinstance(payload.get("openapi"), str) and payload["openapi"].startswith("3.")
+    is_swagger2 = payload.get("swagger") == "2.0"
+    if not (is_openapi3 or is_swagger2):
+        raise _SourceNotFound(f"'{url}' is not a recognisable OpenAPI/Swagger document")
+
+    raw_paths = payload.get("paths")
+    if not isinstance(raw_paths, dict) or not raw_paths:
+        raise _SourceNotFound(f"'{url}' declares no usable 'paths'")
+
+    # OpenAPI's own inheritance rule: a document-level 'security' applies
+    # to every operation that does not declare its own - read once, per
+    # document, never per operation guessed.
+    document_security = payload.get("security")
+
+    operations: "list[ServiceOperation]" = []
+    declared_count = 0
+    for path_key in sorted(raw_paths):
+        path_item = raw_paths.get(path_key)
+        if not isinstance(path_item, dict):
+            continue
+        for method in _OPENAPI_METHODS:
+            op_obj = path_item.get(method)
+            if not isinstance(op_obj, dict):
+                continue
+            # Counted here, before any of the filters below - "declared"
+            # means "a real GET/POST operation entry existed in the
+            # document", matching this field's own docstring promise
+            # ("before any were dropped as ... parameterised ... or
+            # over the bound"), not merely "survived every filter".
+            declared_count += 1
+            if "{" in path_key:
+                # A parameterised path (e.g. /orders/{id}) is a real,
+                # legitimate operation this narrow reading cannot
+                # represent yet - DeclaredConnection has no mechanism to
+                # fill in a path parameter at execution time. Skipped,
+                # not fabricated with the literal placeholder text as
+                # the path.
+                continue
+            if len(operations) >= _MAX_OPENAPI_OPERATIONS:
+                continue
+            op_security = op_obj.get("security", document_security)
+            requires_auth = bool(op_security)
+            fallback_name = f"{method}_{path_key.strip('/').replace('/', '_')}" or method
+            raw_name = op_obj.get("operationId") or fallback_name
+            description = str(op_obj.get("summary") or op_obj.get("description") or "")[:500]
+            try:
+                operations.append(
+                    ServiceOperation(
+                        name=str(raw_name), method=method.upper(), path=path_key,
+                        requires_auth=requires_auth, description=description,
+                    )
+                )
+            except ValueError:
+                continue
+
+    if not operations:
+        raise _SourceNotFound(
+            f"'{url}' declared paths, but none were individually usable "
+            "(GET/POST only, no path parameters)"
+        )
+
+    info = payload.get("info")
+    title = str(info.get("title", "")) if isinstance(info, dict) else ""
+
+    try:
+        descriptor = ServiceDescriptor(
+            name=name, base_url=base_url, operations=_dedup_by_name(operations),
+            description=title[:500],
+        )
+    except ValueError as exc:
+        raise ServiceDiscoveryError(str(exc)) from exc
+
+    return DiscoveryResult(
+        descriptor=descriptor, source_url=url, source_kind="openapi",
+        declared_operation_count=declared_count,
     )
