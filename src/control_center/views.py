@@ -271,6 +271,51 @@ class WorkspaceAgentView:
 
 
 @dataclass(frozen=True)
+class RecordingItemView:
+    """One real, saved audio recording, read-only - the identical
+    governed ``MemoryCategory.AUDIO_RECORDING`` record
+    (``src/services/memory/audio_recording.py``) both a conversational
+    answer and a served page's own snapshot already read.
+    ``artifact_id`` names the real, persistent artifact holding the
+    actual audio (``src/services/artifacts/store.py``) - never the
+    bytes themselves, which stay exactly where the artifact store
+    already keeps them; playback reaches them through the existing
+    ``GET /artifact/<id>.<format>`` route, unchanged. ``describe`` is
+    the one shared rendering so this, a served page, and a
+    conversational answer never describe the same recording two
+    different ways."""
+
+    record_id: str
+    artifact_id: str
+    purpose: str
+    duration_seconds: "float | int | None"
+    rendition_format: str
+    transcription_status: str
+    describe: str
+
+
+@dataclass(frozen=True)
+class RecordingAgentView:
+    """One agent's own real recordings and its current live recording
+    session, as Control Center actually observes them - read from the
+    identical backend source of truth (the governed Memory category
+    above and ``runtime.recording_sessions``) a served page's own
+    snapshot reads, never a fabricated or Control-Center-only state.
+    Discovered from the registry (see ``ControlCenter.recordings()``),
+    never a fixed list naming one agent - and never gated behind a
+    declared interface feature the way ``WorkspaceAgentView`` is:
+    recording is a governed capability every agent may be equipped
+    with, not a surface some agents opt into. ``session`` is the plain
+    dict shape ``RecordingSession.to_dict()`` already produces, or
+    None when nothing has ever been requested for this agent - an
+    honest absence, never a fabricated READY state."""
+
+    agent: str
+    items: "tuple[RecordingItemView, ...]"
+    session: "dict[str, object] | None"
+
+
+@dataclass(frozen=True)
 class ToolView:
     """A concrete mechanism, and whether it is genuinely present.
 

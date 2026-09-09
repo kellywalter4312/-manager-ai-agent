@@ -203,6 +203,9 @@ class TestHandlersAreSelectedThroughTheRegistry:
             # recurrence - built on the personal-context mechanism, never
             # a fixed catalog of activities.
             "calendar",
+            # Real Audio Recording/Capture checkpoint: discards an
+            # in-progress recording session without saving it.
+            "cancel_recording",
             # Video-clipping checkpoint: cutting real clips from an
             # existing video - deterministic given explicit timestamps,
             # Brain-assisted (over given text only, never raw video/
@@ -250,6 +253,11 @@ class TestHandlersAreSelectedThroughTheRegistry:
             # exist to keep.
             "knowledge",
             "learning_context",
+            # Real Audio Recording/Capture checkpoint: lists saved
+            # recordings, or answers whether one matching a topic exists -
+            # the identical bare-listing-or-named-topic shape "list_tasks"
+            # already uses.
+            "list_recordings",
             "list_tasks",
             "live_information",
             "media_production",
@@ -283,6 +291,13 @@ class TestHandlersAreSelectedThroughTheRegistry:
             # language/accent, never overriding an explicit user choice.
             "select_voice",
             "small_talk",
+            # Real Audio Recording/Capture checkpoint: opens/stops a real
+            # recording session - never a capture itself (only a browser
+            # can do that), just the one shared, live signal both a
+            # natural-language request and the frontend's own upload
+            # route read and write.
+            "start_recording",
+            "stop_recording",
             "temporal_derivation",
             "update_task",
         ]

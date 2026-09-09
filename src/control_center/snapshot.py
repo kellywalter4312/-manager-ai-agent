@@ -212,8 +212,35 @@ def _workspace(workspace: Any) -> dict[str, Any]:
     }
 
 
+def _recordings(recordings: Any) -> dict[str, Any]:
+    """This agent's own real recordings and current live recording
+    session, exactly as ``ControlCenter.recordings()`` already resolved
+    them - never a second read of Memory or the session registry from
+    this module. ``recordings`` is a ``RecordingAgentView`` (every
+    agent gets one - recording is a capability, never gated behind a
+    declared interface feature the way Workspace is), so this only
+    ever renders real data, honestly empty when nothing exists.
+    """
+    return {
+        "recordings": [
+            {
+                "id": r.record_id,
+                "artifact_id": r.artifact_id,
+                "purpose": r.purpose,
+                "duration_seconds": r.duration_seconds,
+                "rendition_format": r.rendition_format,
+                "transcription_status": r.transcription_status,
+                "describe": r.describe,
+            }
+            for r in recordings.items
+        ],
+        "recording_session": recordings.session,
+    }
+
+
 def _agent(
-    view: Any, agent: Any, *, recall: Any = None, discover_voices: Any = None, workspace: Any = None
+    view: Any, agent: Any, *, recall: Any = None, discover_voices: Any = None,
+    workspace: Any = None, recordings: Any = None,
 ) -> dict[str, Any]:
     """Everything an Agent Workspace needs about one agent.
 
@@ -270,6 +297,10 @@ def _agent(
         # None/empty for an agent that never declared
         # InterfaceFeature.WORKSPACE - a real answer, never invented.
         **_workspace(workspace),
+        # This agent's own real recordings and current live recording
+        # session, read from the identical ControlCenter.recordings()
+        # discovery a served page's own "recordings" command uses.
+        **(_recordings(recordings) if recordings is not None else {"recordings": [], "recording_session": None}),
     }
 
 
@@ -482,6 +513,13 @@ def snapshot(
     # appears here with no change to this function.
     workspace_by_agent = {view.agent: view for view in centre.workspaces()}
 
+    # Real Audio Recording/Capture checkpoint: discovered from the
+    # registry exactly as workspace_by_agent above already is - every
+    # agent gets an entry (recording is never gated behind a declared
+    # interface feature), so a future specialist appears here with no
+    # change to this function.
+    recordings_by_agent = {view.agent: view for view in centre.recordings()}
+
     agents = [
         _agent(
             view,
@@ -489,6 +527,7 @@ def snapshot(
             recall=_recall_for(view.name),
             discover_voices=discover_voices,
             workspace=workspace_by_agent.get(view.name),
+            recordings=recordings_by_agent.get(view.name),
         )
         for view in (overview.manager,) + overview.specialists
     ]

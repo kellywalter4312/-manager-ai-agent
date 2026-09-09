@@ -51,6 +51,7 @@ from src.providers.connection import Connection
 from src.providers.default_celebration_provider import DefaultCelebrationProvider
 from src.control_center.interfaces import InterfaceDescriptor
 from src.services.identity.identity import AgentIdentity
+from src.services.identity.recording_session import RecordingSessionRegistry
 from src.services.memory.day import Calendar
 from src.services.memory.memory import MemoryRecord
 from src.services.profile.profile import UserProfile
@@ -84,6 +85,7 @@ class ManagerSkills(BaseAgent):
         activity_brain: "ActivityBrainOps | None" = None,
         discover_voices: "Callable[[], tuple[Any, ...]] | None" = None,
         interface: "InterfaceDescriptor | None" = None,
+        recording_sessions: "RecordingSessionRegistry | None" = None,
     ) -> None:
         """``roster`` supplies the currently registered agents.
 
@@ -241,6 +243,15 @@ class ManagerSkills(BaseAgent):
         # descriptor lives, one call site per agent rather than a branch
         # in here.
         self._interface = interface
+        # Real Audio Recording/Capture checkpoint: the one shared,
+        # live "is this agent recording right now" signal - never a
+        # second one this class tracks itself, the identical narrowing
+        # every other Runtime-level collaborator here already has. None
+        # by default, the same honest-refusal shape converse/recall/
+        # forget/retain already have: start_recording/stop_recording
+        # report honestly that no recording capability is available,
+        # rather than crashing.
+        self._recording_sessions = recording_sessions
 
     @property
     def interface(self) -> "InterfaceDescriptor | None":
@@ -551,5 +562,6 @@ class ManagerSkills(BaseAgent):
                 activity_sessions=self._activity_sessions,
                 activity_brain=self._activity_brain,
                 discover_voices=self._discover_voices,
+                recording_sessions=self._recording_sessions,
             )
         )

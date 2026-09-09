@@ -67,6 +67,7 @@ from src.manager.activity_session import (
 )
 from src.manager.brain import BrainDecision
 from src.manager.guided_interaction import guided_interaction_response
+from src.services.identity.recording_session import RecordingSessionRegistry
 from src.manager.knowledge import (
     KnowledgeEvidence,
     MODEL_KNOWLEDGE,
@@ -162,6 +163,16 @@ from src.services.memory.milestones import (
 )
 from src.services.memory.day import Calendar
 from src.services.memory.policy import PolicyVerdict
+from src.services.memory.audio_recording import (
+    cancel_recording_intent,
+    describe_recording,
+    extract_recording_purpose,
+    extract_recording_query,
+    list_recordings_intent,
+    match_recordings_by_topic,
+    start_recording_intent,
+    stop_recording_intent,
+)
 from src.services.memory.tasks import (
     build_task_record,
     complete_task_intent,
@@ -378,6 +389,18 @@ class CapabilityRequest:
     # same honest-refusal shape every other optional collaborator here
     # already has.
     discover_voices: "Callable[[], tuple[Any, ...]] | None" = None
+    # Real Audio Recording/Capture checkpoint: the one shared, live
+    # "is this agent recording right now" signal - see
+    # src/services/identity/recording_session.py's own docstring for why
+    # it lives at Runtime level rather than in Memory. Handed through
+    # whole, the same "already narrow enough" shape activity_sessions
+    # above already has: a handler asks it a small, fixed set of
+    # questions (is anything in progress, mark it stopped) and can
+    # reach nothing else through it. None when no registry reaches this
+    # request (a bare construction, or an older caller) -
+    # start_recording/stop_recording report honestly that recording is
+    # unavailable, rather than crashing.
+    recording_sessions: "RecordingSessionRegistry | None" = None
 
     @property
     def knows_the_user(self) -> bool:
@@ -1157,6 +1180,15 @@ def general_assistance_intent(task: Task, participants: Sequence[str] = ()) -> b
     # "select_voice") and send a request about the agent's own voice to
     # a live web search instead.
     if select_voice_intent(task, participants):
+        return False
+    # Real Audio Recording/Capture checkpoint, the identical reasoning
+    # again, found live: "find the recording about research" matches
+    # this function's own "find" verb gate and list_recordings' own
+    # query-marker shape at once - alphabetical sorting would otherwise
+    # let this capability win ("general_assistance" < "list_recordings")
+    # and send a request about the person's own saved audio to a live
+    # web search instead.
+    if list_recordings_intent(task.description):
         return False
     return True
 
@@ -3006,6 +3038,178 @@ RECORD_THIS = ManagerCapability(
     handle=record_this,
     description="Captures an explicit 'record this [for X]' request, with provenance and purpose.",
     claims=lambda task, participants=(): capture_intent(task.description),
+    scoreable=False,
+)
+
+
+# ---------------------------------------------------------------------------
+# Real Audio Recording/Capture: a genuine microphone recording, never text
+# pretending to be one - see src/services/memory/audio_recording.py's own
+# docstring for why this is kept apart from RECORD_THIS above (a text
+# capture) despite an occasional shared word. Half-Brain safe throughout:
+# nothing here touches converse/analyze_image, because starting, stopping
+# or cancelling a recording is exactly as deterministic as creating,
+# completing or reopening a task - the same "governed intent, no model, no
+# guessing" shape TASK's own capabilities already use.
+#
+# **Why these handlers never touch a microphone or an artifact.** Python
+# has no route to a browser's microphone - the actual capture, upload and
+# artifact/Memory write happen at scripts/serve_ui.py's own
+# POST /recording/started|save|cancel routes, called by the frontend once
+# a real user gesture and real captured bytes exist. What a capability
+# CAN do deterministically is recognise the request and flip the one
+# shared, live RecordingSessionRegistry signal - the same division of
+# labour route_workspace_enter/the Workspace capability already established
+# for "a UI action the frontend must actually perform" vs. "a natural-
+# language request Alfred recognises".
+# ---------------------------------------------------------------------------
+
+
+def start_recording(request: CapabilityRequest) -> TaskResult:
+    """Recognise an explicit "start recording [for X]" request and open a
+    real recording session for this agent - never a capture itself,
+    which only a browser can perform. The session this creates is what
+    lets the Workspace/Agents UI honestly show "ready to record for
+    research" rather than a person having to separately explain the
+    purpose to a Start button.
+    """
+    if request.recording_sessions is None:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "I don't have a way to record audio right now.",
+        )
+    purpose = extract_recording_purpose(request.task.description)
+    request.recording_sessions.request(request.own_name, purpose)
+    return TaskResult.success(
+        request.task, request.own_name,
+        f"Ready to record for {purpose} - use the Recording control to begin, "
+        "or say 'stop recording' once you are done.",
+        payload={"handled_by": "start_recording", "purpose": purpose},
+    )
+
+
+START_RECORDING = ManagerCapability(
+    name="start_recording",
+    capabilities=frozenset({"recording", "audio"}),
+    handle=start_recording,
+    description="Opens a real recording session for an explicit 'start recording [for X]' request.",
+    claims=lambda task, participants=(): start_recording_intent(task.description),
+    scoreable=False,
+)
+
+
+def stop_recording(request: CapabilityRequest) -> TaskResult:
+    """Recognise an explicit "stop recording" request and signal the one
+    real, currently-active session to stop - never stops anything
+    itself, which only the frontend holding the real MediaRecorder can
+    do. Refuses honestly when nothing is genuinely recording, rather
+    than pretending a stop happened.
+    """
+    if request.recording_sessions is None:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "I don't have a way to record audio right now.",
+        )
+    if not request.recording_sessions.request_stop(request.own_name):
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "Nothing is currently recording.",
+        )
+    return TaskResult.success(
+        request.task, request.own_name,
+        "Stopping the recording now.",
+        payload={"handled_by": "stop_recording"},
+    )
+
+
+STOP_RECORDING = ManagerCapability(
+    name="stop_recording",
+    capabilities=frozenset({"recording", "audio"}),
+    handle=stop_recording,
+    description="Signals the currently-active recording session to stop.",
+    claims=lambda task, participants=(): stop_recording_intent(task.description),
+    scoreable=False,
+)
+
+
+def cancel_recording(request: CapabilityRequest) -> TaskResult:
+    """Recognise an explicit request to discard the in-progress recording
+    without saving it. Refuses honestly when nothing is in progress."""
+    if request.recording_sessions is None:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "I don't have a way to record audio right now.",
+        )
+    if not request.recording_sessions.cancel(request.own_name):
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "There is no recording in progress to cancel.",
+        )
+    return TaskResult.success(
+        request.task, request.own_name,
+        "Cancelled - nothing was saved.",
+        payload={"handled_by": "cancel_recording"},
+    )
+
+
+CANCEL_RECORDING = ManagerCapability(
+    name="cancel_recording",
+    capabilities=frozenset({"recording", "audio"}),
+    handle=cancel_recording,
+    description="Discards the in-progress recording session without saving it.",
+    claims=lambda task, participants=(): cancel_recording_intent(task.description),
+    scoreable=False,
+)
+
+
+def list_recordings(request: CapabilityRequest) -> TaskResult:
+    """List this agent's own saved recordings, or answer whether one
+    matching a named topic/purpose exists - the identical "bare view vs.
+    named argument" shape ``list_tasks`` already uses, over the
+    governed ``AUDIO_RECORDING`` Memory category rather than the actual
+    artifact store (retrieval by real, searchable metadata - the actual
+    audio stays exactly where the artifact store already keeps it).
+    """
+    if request.recall is None:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "I don't have a way to look up recordings right now.",
+        )
+
+    topic = extract_recording_query(request.task.description)
+    pool = request.recall(kind=MemoryCategory.AUDIO_RECORDING.value, limit=200)
+    if topic:
+        matches = match_recordings_by_topic(pool, topic)
+        if not matches:
+            return TaskResult.success(
+                request.task, request.own_name,
+                f"I don't have a recording matching '{topic}'.",
+                payload={"handled_by": "list_recordings", "count": 0},
+            )
+        return TaskResult.success(
+            request.task, request.own_name,
+            "\n".join(describe_recording(record) for record in matches),
+            payload={"handled_by": "list_recordings", "count": len(matches)},
+        )
+
+    if not pool:
+        return TaskResult.success(
+            request.task, request.own_name, "You have no saved recordings yet.",
+            payload={"handled_by": "list_recordings", "count": 0},
+        )
+    return TaskResult.success(
+        request.task, request.own_name,
+        "\n".join(describe_recording(record) for record in pool),
+        payload={"handled_by": "list_recordings", "count": len(pool)},
+    )
+
+
+LIST_RECORDINGS = ManagerCapability(
+    name="list_recordings",
+    capabilities=frozenset({"recording", "audio"}),
+    handle=list_recordings,
+    description="Lists saved recordings, or answers whether one matching a topic exists.",
+    claims=lambda task, participants=(): list_recordings_intent(task.description),
     scoreable=False,
 )
 
@@ -5529,6 +5733,15 @@ def calendar_intent(task: Task, participants: Sequence[str] = ()) -> bool:
     interpretation" chain) entirely. personal_context's own handler
     creates the matching calendar state itself once it owns the
     request - see its own body.
+
+    A fourth deferral, found live during Real Audio Recording/Capture:
+    ``calendar_cancel_intent``'s own marker set matches bare "cancel"/
+    "cancel the" anywhere in the text, so "cancel the recording" was
+    winning here (sorted before "cancel_recording" alphabetically)
+    before the capability that actually recognises it ever saw the
+    request - the identical "the more specific capability wins" shape
+    as the three deferrals above, for a domain (audio recording)
+    calendar has no business claiming a word from.
     """
     text = task.description
     if (
@@ -5540,6 +5753,11 @@ def calendar_intent(task: Task, participants: Sequence[str] = ()) -> bool:
     if relational_birthday_intent(text):
         return False
     if _personal_context_shape_matches(text):
+        return False
+    if (
+        start_recording_intent(text) or stop_recording_intent(text)
+        or cancel_recording_intent(text) or list_recordings_intent(text)
+    ):
         return False
     if (
         calendar_add_intent(text) or calendar_cancel_intent(text)
@@ -5919,6 +6137,10 @@ MANAGER_CAPABILITIES: dict[str, ManagerCapability] = {
     MEDIA_PRODUCTION.name: MEDIA_PRODUCTION,
     CLIP_VIDEO.name: CLIP_VIDEO,
     RECORD_THIS.name: RECORD_THIS,
+    START_RECORDING.name: START_RECORDING,
+    STOP_RECORDING.name: STOP_RECORDING,
+    CANCEL_RECORDING.name: CANCEL_RECORDING,
+    LIST_RECORDINGS.name: LIST_RECORDINGS,
     CREATE_TASK.name: CREATE_TASK,
     LIST_TASKS.name: LIST_TASKS,
     COMPLETE_TASK.name: COMPLETE_TASK,

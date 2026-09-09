@@ -98,6 +98,7 @@ from src.registry.agent_registry import AgentRegistry
 from src.services.email.mailbox import Mailbox
 from src.services.identity.identity import AgentIdentity, load_identity
 from src.services.identity.presence import PresenceRegistry
+from src.services.identity.recording_session import RecordingSessionRegistry
 from src.services.artifacts.store import ArtifactStore
 from src.services.memory.day import Calendar
 from src.services.memory.factory import (
@@ -267,6 +268,15 @@ class Runtime:
     # state and the Control Center that reads it are looking at the
     # same signal, the way Runtime already shares one avatar_provider.
     presence_registry: PresenceRegistry
+
+    # Real Audio Recording/Capture checkpoint: the one live, in-process
+    # record of where a real recording currently stands for each agent,
+    # the identical shared-instance role presence_registry above already
+    # plays - a natural-language "stop recording" (a capability handler)
+    # and the frontend's own upload route must read and write the exact
+    # same state, never two independently-tracked copies of "is this
+    # agent currently recording".
+    recording_sessions: RecordingSessionRegistry
 
     # Multimodal workspace/artifact checkpoint: the one authoritative,
     # persistent record of every real artifact this installation has
@@ -507,6 +517,12 @@ def build_runtime(
         # per-run runtime state, the same non-configurable role
         # AgentRegistry() already plays a few lines below).
         presence_registry=PresenceRegistry(),
+        # Real Audio Recording/Capture checkpoint: one fresh, empty
+        # registry per runtime, the identical non-configurable role
+        # presence_registry above already plays - there is nothing to
+        # choose between, and no recording is ever in progress at
+        # process start.
+        recording_sessions=RecordingSessionRegistry(),
         # Multimodal workspace/artifact checkpoint: loaded fresh from
         # settings.artifacts_dir - a real, side-effect-free read (this
         # module's own docstring's "no file is written" invariant holds:
@@ -710,6 +726,13 @@ def build_manager(
         # never a second one - so current_datetime answers "what day is
         # it" from this person's actual local day, not bare UTC.
         calendar=runtime.calendar,
+        # Real Audio Recording/Capture checkpoint: the same shared
+        # registry Runtime holds - one live "is this agent recording
+        # right now" signal, never a second one this ManagerSkills
+        # tracks independently. Generic on this class (any agent could
+        # receive one); only this, Alfred's own composition root,
+        # actually wires it in.
+        recording_sessions=runtime.recording_sessions,
         # Alfred's own declared surface, asked the same way EmailAgent's
         # hardcoded ``interface`` property already answers it - see
         # InterfaceDescriptor's own docstring. WORKSPACE is declared and

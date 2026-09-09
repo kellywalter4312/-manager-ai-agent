@@ -63,6 +63,23 @@ Seven routes:
                          identical set_environment_preference() a
                          terminal session's own ``environment`` command
                          calls - never a second write path.
+    POST /recording/started {"agent": "...", "purpose": "..."?} -> the
+                         frontend's own acknowledgement that a real
+                         browser microphone stream actually opened.
+    POST /recording/save {"agent": "...", "purpose": "...", "audio_base64":
+                         "...", "mime_type": "...", "duration_seconds": N} ->
+                         registers a real, persistent audio artifact
+                         (register_new_artifact) and a governed Memory
+                         reference (retain_for) - the actual save.
+    POST /recording/cancel {"agent": "..."} -> discards an in-progress
+                         recording session without saving it.
+    POST /recording/failed {"agent": "...", "reason": "..."} -> the
+                         frontend's own honest report that capture could
+                         not happen (denied permission, unsupported
+                         runtime, a genuine MediaRecorder error).
+    POST /recording/clear {"agent": "..."} -> returns an agent to the
+                         honest READY default once a SAVED/FAILED/
+                         CANCELLED session has been acknowledged on screen.
     POST /workspace/enter {"agent": "..."} -> the one real acknowledgement
                          a served page calls once a person has genuinely
                          entered an agent's own 3D Workspace, through
@@ -92,6 +109,7 @@ nothing else.
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import secrets
 import sys
@@ -113,7 +131,7 @@ from scripts.control_center import (  # noqa: E402
     classify_administrative_write,
     run_command,
 )
-from scripts.exchange import exchange, memory_for  # noqa: E402
+from scripts.exchange import build_recording_record, exchange, memory_for, retain_for  # noqa: E402
 from src.services.audit.action_log import DEFAULT_ACTION_LOG_PATH, load_action_log  # noqa: E402
 from scripts.export_ui import render  # noqa: E402
 from src.config.settings import Settings  # noqa: E402
@@ -122,6 +140,8 @@ from src.control_center.observer import ControlCenter  # noqa: E402
 from src.control_center.render import render_overview  # noqa: E402
 from src.control_center.snapshot import snapshot  # noqa: E402
 from src.manager.proactive_experience import deliver_experience  # noqa: E402
+from src.services.artifacts.models import VoiceRecordingContent  # noqa: E402
+from src.services.artifacts.registration import register_new_artifact  # noqa: E402
 from src.services.identity.presence import (  # noqa: E402
     PresenceState,
     set_avatar_preference,
@@ -269,6 +289,12 @@ def route(path: str, system: LiveSystem) -> tuple[int, bytes, str]:
 _RENDITION_CONTENT_TYPES = {
     "pdf": "application/pdf", "png": "image/png", "jpg": "image/jpeg",
     "mp4": "video/mp4", "wav": "audio/wav", "txt": "text/plain; charset=utf-8",
+    # Real Audio Recording/Capture checkpoint: every real MediaRecorder
+    # container this project's own frontend may produce (see
+    # _RECORDING_EXTENSIONS above) - "m4a" rather than "mp4" for a
+    # Safari-style AAC-in-MP4 recording specifically so it is never
+    # served under the same extension "mp4" already means for video.
+    "webm": "audio/webm", "ogg": "audio/ogg", "m4a": "audio/mp4", "mp3": "audio/mpeg",
 }
 
 
@@ -693,6 +719,251 @@ def route_workspace_enter(agent: object, system: LiveSystem) -> tuple[int, bytes
     )
 
 
+# Real Audio Recording/Capture: four small routes for the one thing only a
+# browser can actually do - capture microphone bytes and hand them over.
+# None of these touch a capability, a claims= predicate or the Brain:
+# recognising "start recording" in words is a Manager capability's job
+# (src/manager/capabilities.py's start_recording/stop_recording/
+# cancel_recording), reached through the existing /message route exactly
+# like every other natural-language request. These routes are the other
+# half - what happens once a real user gesture and real captured bytes
+# exist - mirroring route_workspace_enter's own "a UI action the frontend
+# must actually perform" shape rather than a conversational one.
+#
+# Every real MediaRecorder mimeType this project's own frontend requests
+# (see ui/index.html's own RECORDING_MIME_CANDIDATES), mapped to the file
+# extension _RENDITION_CONTENT_TYPES already knows how to serve back -
+# never a closed catalog forcing a code change per browser: an
+# unrecognised mime type still saves, under "webm", the most broadly
+# supported real container this project can honestly claim.
+_RECORDING_EXTENSIONS = {
+    "audio/webm": "webm",
+    "audio/ogg": "ogg",
+    "audio/mp4": "m4a",
+    "audio/aac": "m4a",
+    "audio/wav": "wav",
+    "audio/x-wav": "wav",
+    "audio/mpeg": "mp3",
+}
+
+
+def _recording_extension(mime_type: object) -> str:
+    base = str(mime_type or "").split(";")[0].strip().lower()
+    return _RECORDING_EXTENSIONS.get(base, "webm")
+
+
+def route_recording_started(agent: object, purpose: object, system: LiveSystem) -> tuple[int, bytes, str]:
+    """Decide what to answer for `POST /recording/started`. No socket
+    involved.
+
+    The one real acknowledgement a served page calls once a genuine user
+    gesture has actually opened a browser microphone stream - never
+    called speculatively, and never a claim this route itself verifies
+    (it cannot reach into a browser to check; it takes the caller's word
+    for the same reason `route_experience` already does for "this was
+    genuinely presented"). Works whether or not a natural-language
+    "start recording" preceded it - see
+    `RecordingSessionRegistry.mark_recording`'s own docstring for why a
+    person pressing a real Start control with nothing said first must
+    not be refused.
+    """
+    if not isinstance(agent, str) or not agent.strip():
+        return (
+            400,
+            json.dumps({"error": "agent must not be empty"}).encode("utf-8"),
+            "application/json; charset=utf-8",
+        )
+    if memory_for(system.manager, agent) is None:
+        return (
+            404,
+            json.dumps({"error": f"no such agent: {agent!r}"}).encode("utf-8"),
+            "application/json; charset=utf-8",
+        )
+    purpose_value = str(purpose).strip() if isinstance(purpose, str) and purpose.strip() else None
+    with system.lock:
+        session = system.runtime.recording_sessions.mark_recording(agent, purpose_value)
+    return (
+        200,
+        json.dumps({"agent": agent, "session": session.to_dict()}).encode("utf-8"),
+        "application/json; charset=utf-8",
+    )
+
+
+def route_recording_save(
+    agent: object, purpose: object, audio_base64: object, mime_type: object,
+    duration_seconds: object, system: LiveSystem,
+) -> tuple[int, bytes, str]:
+    """Decide what to answer for `POST /recording/save`. No socket
+    involved.
+
+    The one real, governed write for a finished recording - a brand-new
+    artifact (`register_new_artifact`, the identical shared helper every
+    other real, produced artifact in this project already uses to write
+    content.json plus one real rendition) and, alongside it, a real
+    Memory reference under `MemoryCategory.AUDIO_RECORDING`, through
+    `retain_for`'s own governed path - never the raw audio itself, which
+    stays exactly where the artifact store already keeps every other
+    media artifact's bytes.
+
+    The artifact write is the source of truth for "this recording is
+    genuinely saved" - a Memory-policy refusal (vanishingly unlikely for
+    a short, generated description) still leaves the real audio
+    retrievable through the artifact store, honestly reported rather
+    than silently discarding a person's real recording over a metadata
+    technicality.
+    """
+    if not isinstance(agent, str) or not agent.strip():
+        return (
+            400,
+            json.dumps({"error": "agent must not be empty"}).encode("utf-8"),
+            "application/json; charset=utf-8",
+        )
+    if not isinstance(audio_base64, str) or not audio_base64.strip():
+        return (
+            400,
+            json.dumps({"error": "audio_base64 must not be empty"}).encode("utf-8"),
+            "application/json; charset=utf-8",
+        )
+    memory = memory_for(system.manager, agent)
+    if memory is None:
+        return (
+            404,
+            json.dumps({"error": f"no such agent: {agent!r}"}).encode("utf-8"),
+            "application/json; charset=utf-8",
+        )
+    retain = retain_for(system.manager, agent)
+    if retain is None:
+        return (
+            404,
+            json.dumps({"error": f"'{agent}' has no governed way to retain a recording"}).encode("utf-8"),
+            "application/json; charset=utf-8",
+        )
+    try:
+        audio_bytes = base64.b64decode(audio_base64, validate=True)
+    except (ValueError, TypeError):
+        return (
+            400,
+            json.dumps({"error": "audio_base64 is not valid base64"}).encode("utf-8"),
+            "application/json; charset=utf-8",
+        )
+    if not audio_bytes:
+        return (
+            400,
+            json.dumps({"error": "the recording is empty - nothing was captured"}).encode("utf-8"),
+            "application/json; charset=utf-8",
+        )
+
+    purpose_value = str(purpose).strip() if isinstance(purpose, str) and purpose.strip() else "general"
+    extension = _recording_extension(mime_type)
+    duration_value = duration_seconds if isinstance(duration_seconds, (int, float)) else None
+
+    with system.lock:
+        system.runtime.recording_sessions.mark_saving(agent)
+        artifact = register_new_artifact(
+            system.runtime.artifacts,
+            type="voice_recording",
+            owner_agent=agent,
+            title=f"Voice recording ({purpose_value})",
+            content_bytes=VoiceRecordingContent(purpose=purpose_value).to_json().encode("utf-8"),
+            rendition_format=extension,
+            rendition_bytes=audio_bytes,
+        )
+        record = build_recording_record(
+            purpose=purpose_value,
+            artifact_id=artifact.artifact_id,
+            created_by=agent,
+            duration_seconds=duration_value,
+            mime_type=str(mime_type or ""),
+            rendition_format=extension,
+        )
+        verdict = retain(record)
+        session = system.runtime.recording_sessions.mark_saved(agent, artifact.artifact_id)
+
+    return (
+        200,
+        json.dumps(
+            {
+                "agent": agent,
+                "artifact_id": artifact.artifact_id,
+                "rendition_format": extension,
+                "memory_saved": bool(verdict.allowed),
+                "memory_reason": verdict.reason if not verdict.allowed else "",
+                "session": session.to_dict(),
+            }
+        ).encode("utf-8"),
+        "application/json; charset=utf-8",
+    )
+
+
+def route_recording_cancel(agent: object, system: LiveSystem) -> tuple[int, bytes, str]:
+    """Decide what to answer for `POST /recording/cancel`. No socket
+    involved. Discards an in-progress session without saving - refuses
+    honestly (400) when nothing was in progress, rather than reporting a
+    cancellation that did not happen."""
+    if not isinstance(agent, str) or not agent.strip():
+        return (
+            400,
+            json.dumps({"error": "agent must not be empty"}).encode("utf-8"),
+            "application/json; charset=utf-8",
+        )
+    with system.lock:
+        cancelled = system.runtime.recording_sessions.cancel(agent)
+    if not cancelled:
+        return (
+            400,
+            json.dumps({"error": "there is no recording in progress to cancel"}).encode("utf-8"),
+            "application/json; charset=utf-8",
+        )
+    return (
+        200,
+        json.dumps({"agent": agent, "cancelled": True}).encode("utf-8"),
+        "application/json; charset=utf-8",
+    )
+
+
+def route_recording_failed(agent: object, reason: object, system: LiveSystem) -> tuple[int, bytes, str]:
+    """Decide what to answer for `POST /recording/failed`. No socket
+    involved. The frontend's own honest report that capture could not
+    happen - a denied microphone permission, an unsupported runtime, a
+    genuine MediaRecorder error - so the session reads FAILED with the
+    real reason rather than silently reverting to READY with nothing
+    explained."""
+    if not isinstance(agent, str) or not agent.strip():
+        return (
+            400,
+            json.dumps({"error": "agent must not be empty"}).encode("utf-8"),
+            "application/json; charset=utf-8",
+        )
+    reason_text = str(reason).strip() if isinstance(reason, str) and reason.strip() else "recording failed"
+    with system.lock:
+        session = system.runtime.recording_sessions.mark_failed(agent, reason_text)
+    return (
+        200,
+        json.dumps({"agent": agent, "session": session.to_dict()}).encode("utf-8"),
+        "application/json; charset=utf-8",
+    )
+
+
+def route_recording_clear(agent: object, system: LiveSystem) -> tuple[int, bytes, str]:
+    """Decide what to answer for `POST /recording/clear`. No socket
+    involved. Returns this agent to the honest READY default once a
+    SAVED/FAILED/CANCELLED session has genuinely been acknowledged on
+    screen - see `RecordingSessionRegistry.clear`'s own docstring."""
+    if not isinstance(agent, str) or not agent.strip():
+        return (
+            400,
+            json.dumps({"error": "agent must not be empty"}).encode("utf-8"),
+            "application/json; charset=utf-8",
+        )
+    with system.lock:
+        system.runtime.recording_sessions.clear(agent)
+    return (
+        200,
+        json.dumps({"agent": agent, "cleared": True}).encode("utf-8"),
+        "application/json; charset=utf-8",
+    )
+
+
 # Foundation Repair #5, part 2 (reconciliation audit, 2026-09-05): the
 # management verbs run_command() already handles for a terminal, minus
 # "talk"/free text. That one stays exclusively /message's - a second way to
@@ -708,7 +979,7 @@ MANAGEMENT_VERBS = frozenset(
         "status", "history", "actions", "unresolved", "avatar", "environment",
         "profile", "voice", "review", "capabilities", "provider", "connections",
         "ecosystem", "tasks", "artifacts", "personal", "calendar", "experience",
-        "workspace",
+        "workspace", "recordings",
     }
 )
 
@@ -894,6 +1165,11 @@ class SnapshotHandler(BaseHTTPRequestHandler):
             "/command",
             "/experience",
             "/workspace/enter",
+            "/recording/started",
+            "/recording/save",
+            "/recording/cancel",
+            "/recording/failed",
+            "/recording/clear",
         ):
             self._respond(404, b"not found", "text/plain; charset=utf-8")
             return
@@ -934,6 +1210,29 @@ class SnapshotHandler(BaseHTTPRequestHandler):
         elif self.path == "/workspace/enter":
             agent = payload.get("agent") if isinstance(payload, dict) else None
             status, body, content_type = route_workspace_enter(agent, self.server.system)
+        elif self.path == "/recording/started":
+            agent = payload.get("agent") if isinstance(payload, dict) else None
+            purpose = payload.get("purpose") if isinstance(payload, dict) else None
+            status, body, content_type = route_recording_started(agent, purpose, self.server.system)
+        elif self.path == "/recording/save":
+            agent = payload.get("agent") if isinstance(payload, dict) else None
+            purpose = payload.get("purpose") if isinstance(payload, dict) else None
+            audio_base64 = payload.get("audio_base64") if isinstance(payload, dict) else None
+            mime_type = payload.get("mime_type") if isinstance(payload, dict) else None
+            duration_seconds = payload.get("duration_seconds") if isinstance(payload, dict) else None
+            status, body, content_type = route_recording_save(
+                agent, purpose, audio_base64, mime_type, duration_seconds, self.server.system
+            )
+        elif self.path == "/recording/cancel":
+            agent = payload.get("agent") if isinstance(payload, dict) else None
+            status, body, content_type = route_recording_cancel(agent, self.server.system)
+        elif self.path == "/recording/failed":
+            agent = payload.get("agent") if isinstance(payload, dict) else None
+            reason = payload.get("reason") if isinstance(payload, dict) else None
+            status, body, content_type = route_recording_failed(agent, reason, self.server.system)
+        elif self.path == "/recording/clear":
+            agent = payload.get("agent") if isinstance(payload, dict) else None
+            status, body, content_type = route_recording_clear(agent, self.server.system)
         else:
             agent = payload.get("agent") if isinstance(payload, dict) else None
             fields = payload.get("fields") if isinstance(payload, dict) else None

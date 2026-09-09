@@ -221,7 +221,15 @@ const sandbox = {
   ResizeObserver: class { observe() {} disconnect() {} },
   requestAnimationFrame: () => 0, cancelAnimationFrame: () => {},
   Math, JSON, Date,
-  setInterval: (fn) => { pollCount++; setImmediate(fn); return 0; },
+  // pollCount tracks specifically the live-refresh interval (the
+  // literal mechanism this test is about), not "any interval the page
+  // ever registers" - the Real Audio Recording/Capture checkpoint
+  // legitimately added a second, unrelated page-lifetime interval (a
+  // once-per-second elapsed-recording-time display, wireRecordingControls()'s
+  // own setInterval(..., 1000)) that has nothing to do with the poll/
+  // flicker mechanism this file guards. Filtering on the 5000ms delay
+  // is what keeps this test measuring the thing it says it measures.
+  setInterval: (fn, delay) => { if (delay === 5000) pollCount++; setImmediate(fn); return 0; },
   setTimeout: () => 0, clearTimeout: () => {},
   fetch: (url) => {
     if (String(url).includes("snapshot.json")) {

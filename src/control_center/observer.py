@@ -53,6 +53,8 @@ from src.control_center.views import (
     MemoryView,
     OverviewView,
     PersonalContextTopicView,
+    RecordingAgentView,
+    RecordingItemView,
     SystemView,
     TaskItemView,
     ToolView,
@@ -68,6 +70,7 @@ from src.services.memory.calendar_items import all_current_calendar_items
 from src.services.memory.day import Calendar
 from src.services.memory.experience_history import all_experiences
 from src.services.memory.personal_context import all_current_personal_context
+from src.services.memory.audio_recording import describe_recording
 from src.services.memory.tasks import describe_task
 from src.services.identity.presence import environment_for, presence_for
 from src.services.identity.workspace import workspace_session_for
@@ -703,6 +706,58 @@ class ControlCenter:
                     first_entered=session.first_entered,
                     last_entered=session.last_entered,
                     tasks=tasks,
+                )
+            )
+        return tuple(views)
+
+    def recordings(self) -> tuple[RecordingAgentView, ...]:
+        """Every registered agent's own real, saved audio recordings and
+        its current live recording session - discovered from the
+        registry exactly as ``workspaces()`` already is, never a fixed
+        list naming Alfred. Unlike ``workspaces()``, this is never
+        gated behind a declared interface feature: recording is a
+        governed *capability*, not a surface a screen renders
+        differently per agent, so every agent gets an honest answer -
+        empty when nothing has ever been recorded.
+
+        Reads the identical governed Memory category
+        (``MemoryCategory.AUDIO_RECORDING``) and the identical shared
+        ``RecordingSessionRegistry`` (``runtime.recording_sessions``) a
+        served page's own snapshot reads and the same routes
+        (``scripts/serve_ui.py``'s ``POST /recording/*``) write -
+        the same backend source of truth, so Control Center and the
+        frontend never disagree about whether a recording is in
+        progress or what has been saved. Read-only: starting/stopping/
+        cancelling stays conversational (``start_recording``/
+        ``stop_recording``/``cancel_recording`` in
+        ``src/manager/capabilities.py``), never from this screen.
+        """
+        views: list[RecordingAgentView] = []
+        for view in (self.manager_view(),) + self.specialist_views():
+            memory = self._memory_for(view.name)
+            recall = memory.recall if memory is not None else None
+            records = (
+                recall(kind=MemoryCategory.AUDIO_RECORDING.value, limit=100)
+                if recall is not None else ()
+            )
+            items = tuple(
+                RecordingItemView(
+                    record_id=record.id,
+                    artifact_id=str((record.context or {}).get("artifact_id") or ""),
+                    purpose=str((record.context or {}).get("purpose") or "general"),
+                    duration_seconds=(record.context or {}).get("duration_seconds"),
+                    rendition_format=str((record.context or {}).get("rendition_format") or ""),
+                    transcription_status=str((record.context or {}).get("transcription_status") or "not_available"),
+                    describe=describe_recording(record),
+                )
+                for record in records
+            )
+            session = self._runtime.recording_sessions.get(view.name)
+            views.append(
+                RecordingAgentView(
+                    agent=view.name,
+                    items=items,
+                    session=session.to_dict() if session is not None else None,
                 )
             )
         return tuple(views)

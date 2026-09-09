@@ -159,6 +159,42 @@ class AudioContent:
 
 
 @dataclass(frozen=True)
+class VoiceRecordingContent:
+    """A real, user-directed microphone recording's canonical content:
+    the purpose the person gave it - never the captured audio itself,
+    which is a rendition (``ArtifactVersion.renditions``), the identical
+    content-vs-rendition split every other artifact type here already
+    establishes.
+
+    Deliberately distinct from ``AudioContent`` above, which is an
+    AI-narrated artifact ("the real text that was narrated" - a
+    generation *input*). This type's own audio is a genuine capture -
+    there is no narration text, because nothing was narrated. Conflating
+    the two would make a raw microphone recording indistinguishable from
+    a TTS narration in the one field every renderer reads to describe
+    what an artifact actually is.
+    """
+
+    purpose: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "purpose", " ".join(str(self.purpose or "").split()) or "general")
+
+    def to_json(self) -> str:
+        return json.dumps({"purpose": self.purpose})
+
+    @classmethod
+    def from_json(cls, data: str) -> "VoiceRecordingContent":
+        try:
+            payload = json.loads(data)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"not valid voice recording content JSON: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("voice recording content JSON must be an object")
+        return cls(purpose=str(payload.get("purpose", "")))
+
+
+@dataclass(frozen=True)
 class VideoContent:
     """A real video artifact's canonical content: a real, honest
     description of how it was produced - a prompt it was AI-generated

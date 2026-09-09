@@ -606,6 +606,43 @@
   .ws-task-toggle.done:hover{background:rgba(79,209,165,.22);border-color:rgba(79,209,165,.75);color:#6fe3bb}
   .ws-none{padding:40px 0}
 
+  /* Real Audio Recording/Capture: the widget lives inside the ordinary
+     per-agent detail grid (.private-context .pair.wide), never a
+     separate page - a person keeps the composer, the transcript and
+     this agent's own presence in view the entire time a recording is
+     open, exactly the "Alfred remains usable while recording" bar this
+     capability holds itself to. */
+  .rec-widget{display:flex;flex-direction:column;gap:10px}
+  .rec-status{font-size:var(--t-control);color:var(--ink-2);line-height:1.5;
+    display:flex;align-items:center;gap:8px}
+  .rec-live-dot{display:inline-block;width:9px;height:9px;border-radius:50%;
+    background:#e5484d;box-shadow:0 0 0 0 rgba(229,72,77,.6);
+    animation:rec-pulse 1.4s ease-out infinite}
+  @keyframes rec-pulse{
+    0%{box-shadow:0 0 0 0 rgba(229,72,77,.55)}
+    70%{box-shadow:0 0 0 8px rgba(229,72,77,0)}
+    100%{box-shadow:0 0 0 0 rgba(229,72,77,0)}
+  }
+  .rec-controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+  .rec-purpose-input{flex:1;min-width:140px;background:rgba(10,16,24,.55);
+    border:1px solid rgba(var(--ac,125,216,232),.24);border-radius:5px;
+    color:var(--ink);font:inherit;padding:8px 10px}
+  .rec-purpose-input::placeholder{color:var(--ink-4)}
+  .rec-btn{cursor:pointer;font:inherit;border-radius:5px;padding:8px 14px;
+    border:1px solid rgba(var(--ac,125,216,232),.4);background:rgba(10,16,24,.6);
+    color:var(--ink-2);transition:background .2s,border-color .2s}
+  .rec-btn:hover:not(:disabled){background:rgba(var(--ac,125,216,232),.18);color:var(--ink)}
+  .rec-btn:disabled{opacity:.5;cursor:default}
+  .rec-btn.rec-stop{border-color:rgba(229,72,77,.5);color:#ff9a9d}
+  .rec-btn.rec-stop:hover{background:rgba(229,72,77,.16)}
+  .rec-empty{font-size:var(--t-control);color:var(--ink-4)}
+  .rec-saved{display:flex;flex-direction:column;gap:8px;max-height:220px;overflow:auto}
+  .rec-item{display:flex;flex-direction:column;gap:4px;
+    background:rgba(10,16,24,.5);border:1px solid rgba(var(--ac,125,216,232),.14);
+    border-radius:6px;padding:8px 10px}
+  .rec-item-desc{font-size:var(--t-meta);color:var(--ink-3)}
+  .rec-item-audio{width:100%;height:32px}
+
   /* Last in the hierarchy, and quiet on purpose: what this agent is made
      of, under the environment rather than inside it. */
   .private-context{display:grid;grid-template-columns:repeat(auto-fit,minmax(175px,1fr));
@@ -1927,9 +1964,68 @@
             || "conversation"}</div></div>
         <div class="pair wide"><div class="k">Artifacts</div>
           <div class="v">${artifactsOf(a.name)}</div></div>
+        <div class="pair wide"><div class="k">Recording</div>
+          <div class="v">${recordingWidget(a)}</div></div>
       </div>
     </div>`;
   };
+
+  // Real Audio Recording/Capture: a genuine microphone capability, never
+  // text pretending to be one. Agent-generic on purpose - reads
+  // a.recording_session/a.recordings, the identical backend state
+  // (runtime.recording_sessions + the governed AUDIO_RECORDING Memory
+  // category) Control Center's own "recordings" command already reads,
+  // never a frontend-only state. The actual getUserMedia/MediaRecorder
+  // call happens in wireRecordingControls() below, inside a real click
+  // handler - the one thing only a browser, in response to a genuine
+  // user gesture, can do.
+  function recordingWidget(a){
+    const session = a.recording_session;
+    const state = session ? session.state : "ready";
+    const purpose = session ? session.purpose : "";
+
+    const statusLine = (() => {
+      if(state === "requested") return `Ready to record for "${esc(purpose)}" - press Start.`;
+      if(state === "recording") return `<span class="rec-live-dot"></span>Recording for "${esc(purpose)}" - <span class="rec-timer" data-rec-agent="${esc(a.name)}">0:00</span>`;
+      if(state === "stop_requested") return "Stopping…";
+      if(state === "saving") return "Saving the recording…";
+      if(state === "saved") return "Saved.";
+      if(state === "failed") return `Could not record: ${esc(session.error || "unknown error")}`;
+      if(state === "cancelled") return "Cancelled - nothing was saved.";
+      return "Not recording. Press Start, or tell " + esc(a.name) + " to start recording.";
+    })();
+
+    const controls = (() => {
+      if(state === "recording"){
+        return `<button class="rec-btn rec-stop" data-rec-agent="${esc(a.name)}">Stop &amp; Save</button>
+          <button class="rec-btn rec-cancel" data-rec-agent="${esc(a.name)}">Cancel</button>`;
+      }
+      if(state === "saving" || state === "stop_requested"){
+        return `<button class="rec-btn" disabled>Working…</button>`;
+      }
+      if(state === "saved" || state === "failed" || state === "cancelled"){
+        return `<button class="rec-btn rec-clear" data-rec-agent="${esc(a.name)}">Dismiss</button>`;
+      }
+      // ready or requested - a real purpose field alongside Start, so a
+      // person who clicks Start with nothing said first still gets to
+      // name one, and a natural-language "start recording for X" pre-
+      // fills it rather than being overridden.
+      return `<input class="rec-purpose-input" type="text" placeholder="Purpose (optional)"
+          value="${esc(purpose)}" data-rec-agent="${esc(a.name)}">
+        <button class="rec-btn rec-start" data-rec-agent="${esc(a.name)}">Start Recording</button>`;
+    })();
+
+    const saved = (a.recordings || []).map(r => `<div class="rec-item">
+        <div class="rec-item-desc">${esc(r.describe)}</div>
+        <audio class="rec-item-audio" controls preload="none" src="artifact/${esc(r.artifact_id)}.${esc(r.rendition_format)}"></audio>
+      </div>`).join("");
+
+    return `<div class="rec-widget">
+      <div class="rec-status">${statusLine}</div>
+      <div class="rec-controls">${controls}</div>
+      ${saved ? `<div class="rec-saved">${saved}</div>` : `<div class="rec-empty">No recordings saved yet.</div>`}
+    </div>`;
+  }
 
   // Alfred's Real 3D Workspace: a distinct, living, entered environment -
   // never Alfred Conversation with a 3D background, never Presentation
@@ -4445,6 +4541,7 @@
     wireMemory3D();
     wireRoom3D();
     wireWorkspaceBoard();
+    wireRecordingControls();
     if(enteringWorkspace) enterWorkspace(openWorkspaceAgent);
   }
 
@@ -4868,6 +4965,223 @@
         await refreshFromLive();
       });
     });
+  }
+
+  // =====================================================================
+  // REAL AUDIO RECORDING/CAPTURE - genuine microphone capture, never a
+  // fake timer and never text pretending to be audio. Nothing here is
+  // the source of truth: S.agents[].recording_session (the shared
+  // RecordingSessionRegistry) and S.agents[].recordings (the governed
+  // AUDIO_RECORDING Memory category) are, and every render below reads
+  // them fresh. This module holds only the one thing that genuinely
+  // cannot live on the server - the live MediaRecorder handle and
+  // in-flight audio chunks for a session actually in progress right
+  // now, in THIS tab.
+  // =====================================================================
+
+  // Page-lifetime, keyed by agent name - never rebuilt per render, the
+  // same reason avatarBody3DStages/activeRecorders-shaped state already
+  // lives outside go()/wireX() everywhere else in this file.
+  const activeRecorders = {};
+  // Guards the elapsed-timer setInterval below so it is only ever
+  // created once per page lifetime. wireRecordingControls() itself
+  // must still re-run on every render (it wires click handlers against
+  // whichever DOM elements the current render just produced), but the
+  // interval it starts must not be re-created each time - the identical
+  // "wire every render, start page-lifetime state once" split
+  // initVoiceActivation()'s own single, non-go()-called invocation
+  // already keeps; found live when the Real Audio Recording/Capture
+  // checkpoint's own poll-cycle regression test caught wireRecordingControls()
+  // stacking a fresh interval on every five-second refreshFromLive re-render.
+  let recordingTimerStarted = false;
+
+  function recordingMimeType(){
+    if(!window.MediaRecorder) return null;
+    const candidates = [
+      "audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "audio/mp4", "audio/aac",
+    ];
+    for(const c of candidates){
+      try{ if(MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(c)) return c; }
+      catch(e){ /* keep trying the next candidate */ }
+    }
+    return ""; // let the browser choose its own real default rather than refusing
+  }
+
+  function blobToBase64(blob){
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(String(reader.result || "").split(",")[1] || "");
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  async function postRecordingRoute(path, body){
+    try{
+      await fetch(path, {
+        method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body),
+      });
+    }catch(e){ /* honest silence - refreshFromLive shows the real resulting state */ }
+  }
+
+  async function reportRecordingFailed(agentName, reason){
+    const active = activeRecorders[agentName];
+    if(active){
+      try{ active.stream.getTracks().forEach(t => t.stop()); }catch(e){}
+      delete activeRecorders[agentName];
+    }
+    await postRecordingRoute("recording/failed", {agent: agentName, reason});
+    await refreshFromLive();
+  }
+
+  // The one real user-gesture-triggered microphone request in this
+  // file. Browsers - iOS Safari in particular - require getUserMedia to
+  // be called synchronously inside a real click handler, never
+  // speculatively ahead of one; this is that handler.
+  async function startRecording(agentName, purpose){
+    if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder){
+      await reportRecordingFailed(agentName, "this browser does not support audio recording");
+      return;
+    }
+    let stream;
+    try{
+      stream = await navigator.mediaDevices.getUserMedia({audio: true});
+    }catch(e){
+      await reportRecordingFailed(agentName, "microphone access was denied or unavailable");
+      return;
+    }
+    const mimeType = recordingMimeType();
+    let recorder;
+    try{
+      recorder = mimeType ? new MediaRecorder(stream, {mimeType}) : new MediaRecorder(stream);
+    }catch(e){
+      stream.getTracks().forEach(t => t.stop());
+      await reportRecordingFailed(agentName, "the recording engine could not start");
+      return;
+    }
+    const chunks = [];
+    recorder.addEventListener("dataavailable", (e) => { if(e.data && e.data.size) chunks.push(e.data); });
+    recorder.addEventListener("error", () => { reportRecordingFailed(agentName, "the recording failed unexpectedly"); });
+    activeRecorders[agentName] = {
+      recorder, chunks, stream, startedAt: Date.now(), mimeType: recorder.mimeType || mimeType || "",
+    };
+    recorder.start();
+    await postRecordingRoute("recording/started", {agent: agentName, purpose: purpose || undefined});
+    await refreshFromLive();
+  }
+
+  async function stopRecordingAndSave(agentName, purpose){
+    const active = activeRecorders[agentName];
+    if(!active){ await refreshFromLive(); return; }
+    const stopped = new Promise((resolve) => { active.recorder.addEventListener("stop", resolve, {once: true}); });
+    try{ active.recorder.stop(); }catch(e){ /* already stopped - the stream is still cleaned up below */ }
+    await stopped;
+    active.stream.getTracks().forEach(t => t.stop());
+    delete activeRecorders[agentName];
+
+    const durationSeconds = (Date.now() - active.startedAt) / 1000;
+    const blob = new Blob(active.chunks, {type: active.mimeType || "audio/webm"});
+    if(!blob.size){
+      await reportRecordingFailed(agentName, "the recording was empty - nothing was captured");
+      return;
+    }
+    let audioBase64;
+    try{ audioBase64 = await blobToBase64(blob); }
+    catch(e){ await reportRecordingFailed(agentName, "could not read the captured audio"); return; }
+
+    try{
+      await fetch("recording/save", {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          agent: agentName, purpose: purpose || undefined, audio_base64: audioBase64,
+          mime_type: blob.type, duration_seconds: durationSeconds,
+        }),
+      });
+    }catch(e){
+      await reportRecordingFailed(agentName, "could not save the recording - check the connection and try again");
+      return;
+    }
+    await refreshFromLive();
+  }
+
+  async function cancelRecording(agentName){
+    const active = activeRecorders[agentName];
+    if(active){
+      try{ active.recorder.stop(); }catch(e){}
+      try{ active.stream.getTracks().forEach(t => t.stop()); }catch(e){}
+      delete activeRecorders[agentName];
+    }
+    await postRecordingRoute("recording/cancel", {agent: agentName});
+    await refreshFromLive();
+  }
+
+  async function clearRecordingSession(agentName){
+    await postRecordingRoute("recording/clear", {agent: agentName});
+    await refreshFromLive();
+  }
+
+  // Wired after every render, the same reason wireWorkspaceBoard is.
+  // Two real, separate concerns: (1) the actual button clicks a person
+  // makes, and (2) noticing that a natural-language "stop recording"
+  // (S.agents[].recording_session.state === "stop_requested", set by
+  // the real stop_recording capability) arrived while THIS tab is the
+  // one actually holding the live MediaRecorder - polling picks this up
+  // within one refreshFromLive cycle, the same latency every other
+  // server-to-frontend signal in this file already accepts.
+  function wireRecordingControls(){
+    if(!LIVE) return;
+    stage.querySelectorAll(".rec-start").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const agent = btn.dataset.recAgent;
+        const input = stage.querySelector(`.rec-purpose-input[data-rec-agent="${CSS.escape(agent)}"]`);
+        startRecording(agent, input ? input.value.trim() : "");
+      });
+    });
+    stage.querySelectorAll(".rec-stop").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const agentName = btn.dataset.recAgent;
+        // The real purpose named at Start, read from the same
+        // authoritative session state the widget itself renders from -
+        // never re-typed, and never silently dropped to "general" just
+        // because the Stop button carries no input of its own.
+        const agent = S.agents.find(a => a.name === agentName);
+        const purpose = agent && agent.recording_session ? agent.recording_session.purpose : "";
+        stopRecordingAndSave(agentName, purpose);
+      });
+    });
+    stage.querySelectorAll(".rec-cancel").forEach(btn => {
+      btn.addEventListener("click", () => cancelRecording(btn.dataset.recAgent));
+    });
+    stage.querySelectorAll(".rec-clear").forEach(btn => {
+      btn.addEventListener("click", () => clearRecordingSession(btn.dataset.recAgent));
+    });
+    for(const agentName of Object.keys(activeRecorders)){
+      const agent = S.agents.find(a => a.name === agentName);
+      if(agent && agent.recording_session && agent.recording_session.state === "stop_requested"){
+        stopRecordingAndSave(agentName, agent.recording_session.purpose);
+      }
+    }
+  }
+
+  // A real, live-updating elapsed-time display for whichever agent THIS
+  // tab is actively recording - page-lifetime, like ambient voice
+  // activation, so a five-second refreshFromLive re-render never
+  // duplicates or loses the interval. Purely cosmetic: the authoritative
+  // "is this recording" fact stays activeRecorders/the session state,
+  // this only formats how long it has run. Guarded by
+  // recordingTimerStarted so the interval itself is created exactly
+  // once no matter how many times wireRecordingControls() re-runs.
+  if(!recordingTimerStarted){
+    recordingTimerStarted = true;
+    setInterval(() => {
+      for(const [agentName, active] of Object.entries(activeRecorders)){
+        const el = stage.querySelector(`.rec-timer[data-rec-agent="${CSS.escape(agentName)}"]`);
+        if(!el) continue;
+        const elapsed = Math.floor((Date.now() - active.startedAt) / 1000);
+        const mins = Math.floor(elapsed / 60), secs = elapsed % 60;
+        el.textContent = `${mins}:${String(secs).padStart(2, "0")}`;
+      }
+    }, 1000);
   }
 
   // ---- Avatar Studio: local, unsaved preview state ----------------------

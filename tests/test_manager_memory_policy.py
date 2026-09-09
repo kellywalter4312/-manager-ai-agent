@@ -107,11 +107,21 @@ class TestTheCategoriesAreExplicit:
         passes the identical test, and is deliberately not MILESTONE
         (the event this describes) or PERSONAL_CONTEXT/CALENDAR_ITEM
         (what was learned): a third, genuinely different question -
-        "what has already been shown for this occurrence"."""
-        assert len(MemoryCategory) == 11
+        "what has already been shown for this occurrence". The Real
+        Audio Recording/Capture checkpoint added an eighth,
+        AUDIO_RECORDING (that a real, user-directed microphone
+        recording exists, its purpose, and a reference to the actual
+        artifact holding the bytes) - passes the identical test, and is
+        deliberately not RECORDING: that category is an explicit *text*
+        capture ("record this for X" - a note), while this one names a
+        real audio artifact - different requests even though both end
+        up governed, and either one changes what the Manager can
+        retrieve and reference next time in a way the other does not."""
+        assert len(MemoryCategory) == 12
 
     def test_the_categories_are_the_agreed_ones(self):
         assert POLICY.category_names == (
+            "audio_recording",
             "calendar_item",
             "decision",
             "delegation_outcome",

@@ -291,7 +291,12 @@ class TestThisIsNotASecondRouter:
         checkpoint; and recognising an explicit ask to create or revise a
         real, persistent handout ("make me a handout", "revise the
         handout") by its own marker shape, the multimodal
-        workspace/artifact checkpoint - and every other request is still
+        workspace/artifact checkpoint; and recognising an explicit
+        start/stop/cancel-a-real-microphone-recording request ("start
+        recording for research", "stop recording", "cancel the
+        recording") by its own marker shape rather than the ordinary
+        word "record" ("that's a new personal record"), the Real Audio
+        Recording/Capture checkpoint - and every other request is still
         settled by word overlap."""
         from src.manager.capabilities import MANAGER_CAPABILITIES
 
@@ -299,19 +304,20 @@ class TestThisIsNotASecondRouter:
         assert claiming == [
             "about_self",
             "calendar",
+            "cancel_recording",
             "clip_video",
             "communication", "complete_task", "connected_action", "correct_memory",
             "create_artifact",
             "create_diagram",
             "create_task", "current_datetime", "forget",
             "general_assistance", "generate_document", "image_analysis",
-            "knowledge", "learning_context", "list_tasks", "live_information",
+            "knowledge", "learning_context", "list_recordings", "list_tasks", "live_information",
             "media_production",
             "milestone_recognition", "participant_invitation", "personal_context",
             "personal_recurring_events",
             "recall_memory", "record_this", "reopen_task", "revise_artifact", "revise_diagram",
             "select_voice",
-            "small_talk", "temporal_derivation", "update_task",
+            "small_talk", "start_recording", "stop_recording", "temporal_derivation", "update_task",
         ]
 
 

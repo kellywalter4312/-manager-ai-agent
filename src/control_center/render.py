@@ -34,6 +34,7 @@ from src.control_center.views import (
     HistoryView,
     OverviewView,
     PersonalContextTopicView,
+    RecordingAgentView,
     UnresolvedFactView,
     VoiceView,
     WorkspaceAgentView,
@@ -606,4 +607,36 @@ def render_workspaces(items: tuple[WorkspaceAgentView, ...], columns: int | None
         else:
             for task in item.tasks:
                 out.append(f"    {task.describe}")
+    return "\n".join(out)
+
+
+def render_recordings(item: "RecordingAgentView | None", columns: int | None = None) -> str:
+    """Real Audio Recording/Capture checkpoint: one agent's own real
+    recordings and its current live recording session. Read-only:
+    starting/stopping/cancelling stays conversational
+    (start_recording/stop_recording/cancel_recording, reached through
+    'talk'), never from this screen. ``item`` is None for an
+    unrecognised agent name - the caller (scripts/control_center.py's
+    own 'recordings' command) has already reported that honestly and
+    never reaches this renderer in that case, so this only ever renders
+    a real, resolved agent."""
+    columns = columns if columns is not None else width()
+    out: list[str] = []
+    out += _heading("recordings", columns)
+
+    if item is None:
+        out.append("")
+        out.append("  no such agent")
+        return "\n".join(out)
+
+    out.append("")
+    out.append(f"  {item.agent}")
+    if item.session is not None:
+        detail = f" - {item.session['error']}" if item.session.get("error") else ""
+        out.append(f"    current session: {item.session['state']} ({item.session['purpose']}){detail}")
+    if not item.items:
+        out.append("    no saved recordings yet")
+    else:
+        for recording in item.items:
+            out.append(f"    {recording.describe}")
     return "\n".join(out)

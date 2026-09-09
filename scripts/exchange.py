@@ -37,6 +37,7 @@ from src.services.audit.action_log import (
     record_action,
     utc_now as audit_utc_now,
 )
+from src.services.memory.audio_recording import build_recording_record
 from src.services.memory.capture import capture_intent
 from src.services.memory.memory import MemoryRecord
 from src.services.memory.session import RETAINED_KIND, RETAINED_SOURCE, retention_requests
@@ -56,9 +57,17 @@ __all__ = [
     "retain_what_was_asked_for",
     "admit_invited",
     "memory_for",
+    "retain_for",
     "start_collaboration",
     "collaboration_candidates",
     "answer_with_collaboration",
+    # Real Audio Recording/Capture checkpoint: re-exported so
+    # scripts/serve_ui.py - guarded (tests/test_live_ui.py) against
+    # importing src.services.memory directly at all - can still reach
+    # this one builder function, the identical "one shared extraction,
+    # reached through this module" shape capture_intent/build_recording
+    # already have for record_this.
+    "build_recording_record",
 ]
 
 
@@ -81,6 +90,32 @@ def memory_for(manager, agent_name: str):
         return manager.memory
     resolved = manager.registry.get(agent_name)
     return getattr(resolved, "memory", None) if resolved is not None else None
+
+
+def retain_for(manager, agent_name: str):
+    """The real, governed write path for ``agent_name``'s own memory -
+    ``ManagerAgent.retain`` when ``agent_name`` is the Manager himself,
+    or that same agent's own ``retain`` method otherwise (every
+    ``CognitiveAgent``-based specialist - see
+    ``src/agents/cognitive_agent.py`` - already exposes one, the
+    identical governed policy-check-then-remember shape
+    ``ManagerAgent.retain`` has, reached through Stage 12 item 7's own
+    "one shared extraction, two callers" pattern for ``record_this``).
+
+    Generic on purpose, never Alfred-specific: Real Audio Recording/
+    Capture's own save route is the first caller, but nothing here
+    names an agent, so a future specialist gains a governed recording-
+    save path with no change to this function - only to whether that
+    specialist is actually offered the capability.
+
+    Returns None for an unrecognised name, or for an agent with no
+    governed write path at all - never fabricates one.
+    """
+    manager_name = manager.own_skills.name if manager.own_skills else None
+    if agent_name == manager_name:
+        return manager.retain
+    resolved = manager.registry.get(agent_name)
+    return getattr(resolved, "retain", None) if resolved is not None else None
 
 
 def exchange(

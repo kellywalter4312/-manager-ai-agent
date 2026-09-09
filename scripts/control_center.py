@@ -85,6 +85,7 @@ from src.control_center.render import (  # noqa: E402
     render_calendar,
     render_experiences,
     render_personal_context,
+    render_recordings,
     render_workspaces,
     render_system,
     render_turn,
@@ -182,6 +183,10 @@ HELP = """
   workspace                every agent with a declared 3D Workspace: real
                            visit history and its current task board - the
                            same backend state the live page reads
+  recordings                one agent's real, saved audio recordings and
+                           its current live recording session - starting/
+                           stopping/cancelling stays conversational
+  recordings <agent>       the same, for a different agent
   artifacts                every real, persisted artifact (documents/handouts)
   artifacts <id>           one artifact's full version history
   avatar                   every agent's current presence and avatar
@@ -1698,6 +1703,24 @@ def run_command(
         if not include_complete:
             lines.append(f"  (type 'tasks {view.name} all' to include completed tasks)")
         return "\n".join(lines)
+
+    if verb == "recordings":
+        # Real Audio Recording/Capture checkpoint: read-only state
+        # visibility, the identical "genuine management surface, never a
+        # fake parallel one" standard the 'tasks'/'workspace' commands
+        # above already hold to - and deliberately read-only for the
+        # SAVED recordings themselves: starting/stopping/cancelling is
+        # conversational (src/manager/capabilities.py's own
+        # start_recording/stop_recording/cancel_recording, reached
+        # through 'talk'). Reads centre.recordings() - the identical
+        # discovery/backend-state a served page's own snapshot uses -
+        # never a second, inline recall() here.
+        agent_name = rest.strip() or centre.manager.own_skills.name
+        match = next((v for v in centre.recordings() if v.agent == agent_name), None)
+        if match is None:
+            known = ", ".join(a.name for a in centre.overview().agents)
+            return f"no agent called '{agent_name}'. Registered: {known}"
+        return render_recordings(match, columns)
 
     if verb == "artifacts":
         # Multimodal workspace/artifact checkpoint: read-only visibility

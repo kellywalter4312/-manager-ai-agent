@@ -147,6 +147,23 @@ class MemoryCategory(str, Enum):
     # must: it plainly changes what the Manager selects and presents
     # next time.
     EXPERIENCE = "experience"
+    # Real Audio Recording/Capture checkpoint: that a real, user-directed
+    # audio recording exists, its purpose/context, and a reference to
+    # the actual artifact (src/services/artifacts/store.py) that holds
+    # the binary - never the audio bytes themselves, which stay in the
+    # artifact store exactly as every other real media artifact's bytes
+    # already do (see AudioContent/VideoContent's own docstrings for why
+    # a *reference* belongs here and the rendered/captured file does
+    # not). Deliberately not folded into RECORDING above: that category
+    # is an explicit *text* capture ("record this for X" - a note),
+    # kept apart from an actual microphone artifact for the identical
+    # reason capture.py's own docstring already draws the remember/
+    # record line - "record this" and "here is a real audio recording"
+    # are different requests even though both end up governed. Passes
+    # the same admission test every category here already must: a
+    # recording plainly changes what the Manager can retrieve, play
+    # back and reference next time.
+    AUDIO_RECORDING = "audio_recording"
 
     @property
     def label(self) -> str:
@@ -162,6 +179,7 @@ class MemoryCategory(str, Enum):
             "personal_context": "PERSONAL CONTEXT",
             "calendar_item": "CALENDAR",
             "experience": "EXPERIENCE",
+            "audio_recording": "AUDIO RECORDING",
         }[self.value]
 
     @property
@@ -223,6 +241,13 @@ class MemoryCategory(str, Enum):
                 "a live frontend yet - so a repeated check never re-selects "
                 "or re-presents the same occurrence, and history informs "
                 "later variety."
+            ),
+            "audio_recording": (
+                "That a real, user-directed microphone recording exists, "
+                "its purpose/context, and a reference to the actual "
+                "artifact holding the audio - never the audio bytes "
+                "themselves, and never ordinary conversation retained "
+                "automatically."
             ),
         }[self.value]
 
