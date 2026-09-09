@@ -60,6 +60,7 @@ from src.agents.tools.communication import (  # noqa: E402
     CommunicationReadTool,
     CommunicationSendTool,
 )
+from src.agents.tools.connection import ConnectionActionTool  # noqa: E402
 from src.agents.tools.knowledge import KnowledgeLookupTool  # noqa: E402
 from src.agents.tools.live_information import LiveInformationTool  # noqa: E402
 from src.agents.tools.web_search import WebSearchTool  # noqa: E402
@@ -95,7 +96,7 @@ from src.control_center.render import (  # noqa: E402
 )
 from src.control_center.views import VoiceView  # noqa: E402
 from src.conversation.conversation import Conversation  # noqa: E402
-from src.providers.connection import AuthorizationState  # noqa: E402
+from src.providers.connection import AuthorizationState, Connection  # noqa: E402
 from src.providers.connection_factory import build_connection  # noqa: E402
 from src.providers.factory import ProviderConfigurationError, available_providers  # noqa: E402
 from src.providers.media.factory import (  # noqa: E402
@@ -363,6 +364,65 @@ HELP = """
 CONVERSATION_HISTORY_LIMIT = 6
 
 
+def _safe_connection_tools(connection: Connection) -> "list[ConnectionActionTool]":
+    """Grant a real ``ConnectionActionTool`` for every operation
+    ``connection`` declares safe - the exact missing half of Stage 16.
+
+    **The gap this closes.** ``connected_action``
+    (``src/manager/capabilities.py``) has always reached its connection
+    only through ``request.tools.invoke(tool_name_for(operation), {})``
+    - a real ``Connection`` was never enough by itself, it also had to
+    be *granted* under that name in the ToolSet Alfred's own process is
+    built with. Nothing here ever did that granting: this file's own
+    ``tools=ToolSet([...])`` below named every other collaborator
+    (``runtime.communication``, ``runtime.media``, ...) but never
+    ``runtime.connection``, so a live, authorized connection's own safe
+    read was unreachable through ordinary conversation for exactly the
+    reason ``connected_action`` would report - "the underlying
+    'connection_<op>' capability is not installed" - regardless of how
+    real, authorized or selected the connection itself was.
+
+    **Why this is the right place, not composition.py.** Building the
+    connection (``runtime.connection``) and granting a *tool* for one of
+    its operations are different questions - the same reason
+    ``runtime.communication`` is built once but
+    ``CommunicationReadTool``/``SendTool``/``CallTool`` are granted here,
+    not inside ``composition.py``. This is the one real place every
+    other governed action-tool already gets constructed from its own
+    runtime collaborator.
+
+    **Safe only - the consequential boundary stays exactly where it
+    already is.** The identical ``requires_confirmation_for`` duck-type
+    ``connected_action`` itself checks (absent entirely on a connection
+    with nothing more precise to offer, e.g. Gmail/Null, in which case
+    every declared operation is treated as safe - Gmail's own single
+    ``read_email`` already is one). A consequential operation is never
+    even constructed as a Tool here, so no future caller of
+    ``request.tools`` could reach it either, even by mistake -
+    conversation still has no confirm_token dance to offer; that stays
+    Control Center's ``services <name> execute`` alone.
+
+    Generic over the connection itself: this reads only
+    ``connection.supported_operations`` and the identical duck-typed
+    method ``connected_action`` already uses, so a future declared
+    service needs no change here at all.
+    """
+    requires_confirmation = getattr(connection, "requires_confirmation_for", None)
+    tools: "list[ConnectionActionTool]" = []
+    for operation in connection.supported_operations:
+        if requires_confirmation is not None and requires_confirmation(operation):
+            continue
+        tools.append(
+            ConnectionActionTool(
+                connection,
+                operation=operation,
+                description=f"perform the safe, already-declared '{operation}' action "
+                f"through the '{connection.name}' connection",
+            )
+        )
+    return tools
+
+
 def build(settings: Settings):
     """Assemble the system exactly as the other entry points do.
 
@@ -450,6 +510,15 @@ def build(settings: Settings):
             CommunicationReadTool(runtime.communication),
             CommunicationSendTool(runtime.communication),
             CommunicationCallTool(runtime.communication),
+            # Natural-language/live-connection integration gap closure:
+            # a real ConnectionActionTool for every one of
+            # runtime.connection's own safe operations - see
+            # _safe_connection_tools's own docstring for exactly what
+            # gap this closes and why a consequential operation is
+            # never among them. Empty for "null" (no operations at
+            # all) and unchanged for every existing caller that never
+            # configured a real connection.
+            *_safe_connection_tools(runtime.connection),
             # Stage 18: read-only access to the documents, books and notes
             # the user themselves put in runtime.knowledge's folder. It
             # sits beside live_information rather than replacing it -
