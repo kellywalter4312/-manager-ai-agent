@@ -201,6 +201,7 @@ class TestHalfBrainAndProviderIndependence:
         service touches no LLM/Brain construction anywhere."""
         source_files = (
             "src/providers/service_descriptor.py",
+            "src/providers/service_discovery.py",
             "src/services/connections/service_registry.py",
             "src/providers/declared_connection.py",
         )
@@ -218,6 +219,7 @@ class TestHalfBrainAndProviderIndependence:
 
         source_files = (
             "src/providers/service_descriptor.py",
+            "src/providers/service_discovery.py",
             "src/services/connections/service_registry.py",
             "src/providers/declared_connection.py",
         )
@@ -231,6 +233,7 @@ class TestHalfBrainAndProviderIndependence:
 
         source_files = (
             "src/providers/service_descriptor.py",
+            "src/providers/service_discovery.py",
             "src/services/connections/service_registry.py",
             "src/providers/declared_connection.py",
         )
@@ -248,6 +251,7 @@ class TestHalfBrainAndProviderIndependence:
 
         source_files = (
             "src/providers/service_descriptor.py",
+            "src/providers/service_discovery.py",
             "src/services/connections/service_registry.py",
             "src/providers/declared_connection.py",
             "src/providers/connection_factory.py",
@@ -268,6 +272,7 @@ class TestDeviceIndependence:
 
         source_files = (
             "src/providers/service_descriptor.py",
+            "src/providers/service_discovery.py",
             "src/services/connections/service_registry.py",
             "src/providers/declared_connection.py",
         )
@@ -275,3 +280,135 @@ class TestDeviceIndependence:
             text = Path(rel).read_text(encoding="utf-8").lower()
             for forbidden in ("navigator.", "getusermedia", "mediarecorder", "document."):
                 assert forbidden not in text, (rel, forbidden)
+
+
+class TestDiscoveryFlowsIntoTheExistingConnectionMechanismEndToEnd:
+    """The actual point of this checkpoint, proven as one chain: an
+    unknown service's own published metadata -> discover_service ->
+    the exact same governed 'declare' the prior checkpoint already
+    proved -> connection_factory -> the unmodified connected_action
+    capability. Never a service hand-declared through the registry
+    directly - every descriptor here originates from a real (monkey-
+    patched-network) discovery call, the same distinction this
+    checkpoint's own brief draws between 'discovery verified' and a
+    manually-registered fixture."""
+
+    def _serve_weatherstub(self, monkeypatch):
+        import json
+        import urllib.request
+
+        class _FakeResponse:
+            def __enter__(self_): return self_
+            def __exit__(self_, *a): return False
+            def read(self_, *a, **k):
+                return json.dumps({
+                    "description": "a real discovery fixture",
+                    "operations": [
+                        {"name": "ping", "method": "GET", "path": "/ping", "requires_auth": False},
+                    ],
+                }).encode("utf-8")
+
+        monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _FakeResponse())
+
+    def test_a_discovered_descriptor_is_accepted_by_the_real_declare_governance(self, monkeypatch):
+        """discover_service's own output round-trips through
+        ServiceDescriptor construction identically to a hand-typed
+        declare - proven by feeding its exact fields into declare_service,
+        the same real, governed persistence call Control Center uses."""
+        from src.providers.service_discovery import discover_service
+
+        self._serve_weatherstub(monkeypatch)
+        found = discover_service("weatherstub", "http://127.0.0.1:8901")
+
+        declare_service(found.descriptor, service_registry_module.DEFAULT_SERVICES_PATH)
+        reloaded = load_service_registry_fresh()
+        assert "weatherstub" in reloaded
+        assert reloaded["weatherstub"].operation_names == ("ping",)
+
+    def test_the_full_chain_discover_declare_select_connected_action(self, monkeypatch):
+        """The complete lifecycle in one test: an unknown URL is
+        discovered (not manually declared), the resulting descriptor is
+        persisted through the real governed declare path, the factory
+        builds a real connection from the config name alone, and the
+        unmodified connected_action capability reaches it."""
+        import urllib.request as urllib_request_module
+
+        from src.agents.tools.connection import ConnectionActionTool
+        from src.agents.tools.toolset import ToolSet
+        from src.composition import build_manager, build_runtime
+        from src.config.settings import Settings
+        from src.providers.service_discovery import discover_service
+        from src.services.email.in_memory_mailbox import InMemoryMailbox
+
+        # Step 1: DISCOVER - a real (network-substituted) fetch against
+        # an "unknown" URL this test never hand-declares anything for.
+        self._serve_weatherstub(monkeypatch)
+        found = discover_service("weatherstub", "http://127.0.0.1:8901")
+        assert found.descriptor.name == "weatherstub"  # genuinely produced by discovery, not asserted a priori
+
+        # Step 2: REPRESENT/persist - the identical governed declare_service
+        # the real 'services <name> declare' Control Center verb calls.
+        declare_service(found.descriptor, service_registry_module.DEFAULT_SERVICES_PATH)
+
+        # Step 3: CONNECT - connection_factory resolves the name alone.
+        settings = Settings.from_env(
+            env={}, log_level="CRITICAL", memory="ephemeral", connection_provider="weatherstub",
+        )
+        runtime = build_runtime(settings)
+        connection = runtime.connection
+        assert isinstance(connection, DeclaredConnection)
+        assert connection.name == "weatherstub"
+
+        # Step 4: reach it through the real, unmodified capability - a
+        # second, independent urlopen substitution proves execute()
+        # itself performs a genuine call, not merely that discovery did.
+        def fake_execute_urlopen(request, timeout):
+            class _Resp:
+                def __enter__(self_): return self_
+                def __exit__(self_, *a): return False
+                def read(self_): return b'{"conditions": "clear"}'
+            return _Resp()
+        monkeypatch.setattr(urllib_request_module, "urlopen", fake_execute_urlopen)
+
+        tools = ToolSet([
+            ConnectionActionTool(connection, operation="ping", description="Pings weatherstub.")
+        ])
+        manager = build_manager(runtime, mailbox=InMemoryMailbox(), profile=None, tools=tools)
+        manager.own_skills._connection = connection
+
+        result = manager.handle_task(CONNECTED_TASK)
+        assert result.succeeded
+        assert result.payload == {"handled_by": "connected_action", "connection": "weatherstub", "operation": "ping"}
+
+    def test_discovery_alone_never_persists_anything(self, monkeypatch):
+        """The governance boundary, proven as behaviour: calling
+        discover_service, with no declare_service call afterward, must
+        leave the real registry file exactly as empty as it started."""
+        from src.providers.service_discovery import discover_service
+
+        self._serve_weatherstub(monkeypatch)
+        discover_service("weatherstub", "http://127.0.0.1:8901")
+
+        assert load_service_registry_fresh() == {}
+
+    def test_a_second_discovery_of_the_same_service_is_idempotent(self, monkeypatch):
+        """Duplicate discovery (a person re-running discover, or
+        re-declaring after re-discovering) replaces, never
+        accumulates - the identical semantics declare_service already
+        guarantees for a hand-typed redeclare."""
+        from src.providers.service_discovery import discover_service
+
+        self._serve_weatherstub(monkeypatch)
+        first = discover_service("weatherstub", "http://127.0.0.1:8901")
+        declare_service(first.descriptor, service_registry_module.DEFAULT_SERVICES_PATH)
+        second = discover_service("weatherstub", "http://127.0.0.1:8901")
+        declare_service(second.descriptor, service_registry_module.DEFAULT_SERVICES_PATH)
+
+        registry = load_service_registry_fresh()
+        assert len(registry) == 1
+
+
+def load_service_registry_fresh():
+    from src.services.connections.service_registry import load_service_registry
+
+    return load_service_registry(service_registry_module.DEFAULT_SERVICES_PATH)

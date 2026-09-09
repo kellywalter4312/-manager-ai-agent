@@ -111,6 +111,7 @@ from src.services.credentials.account_store_file import (  # noqa: E402
     save_credential_store,
 )
 from src.providers.service_descriptor import ServiceDescriptor, ServiceOperation  # noqa: E402
+from src.providers.service_discovery import ServiceDiscoveryError, discover_service  # noqa: E402
 from src.services.connections.service_registry import (  # noqa: E402
     DEFAULT_SERVICES_PATH,
     declare_service,
@@ -256,6 +257,11 @@ HELP = """
   services                 every open-ended-discovery service declared so
                            far - name, base URL, operation count
   services <name>          one declared service's full detail
+  services <name> discover <base-url>
+                           read that service's own published
+                           .well-known/alfred-service.json and propose a
+                           declare command - writes nothing, no
+                           confirmation needed, never itself a connection
   services <name> declare <base-url> <op>:<METHOD>:<path>:<auth|open>[,...]
                            declare a legitimate new service - no code
                            change, ever, for a new company or website
@@ -1223,8 +1229,19 @@ def run_connections_command(centre: "ControlCenter", rest: str) -> str:
 #
 #     services                          -> every declared service
 #     services <name>                   -> one service's own detail
+#     services <name> discover <url>    -> read the service's own
+#                                          .well-known metadata and
+#                                          propose a declare command -
+#                                          writes nothing, requires no
+#                                          confirmation
 #     services <name> declare <url> <op>:<METHOD>:<path>:<auth|open>[,...]
 #     services <name> forget
+#
+# ``discover`` (src/providers/service_discovery.py) is the DISCOVER/
+# INSPECT/VALIDATE half of a new lifecycle this checkpoint adds ahead of
+# the REPRESENT/authorize/CONNECT half below, which is unchanged - a
+# discovered proposal still has to be reviewed and separately declared
+# by a person; discovery alone is never authorization to act.
 #
 # ``declare``/``forget`` are administrative writes - confirmed and
 # audited exactly like ``connections connect``/``provider add`` above,
@@ -1287,6 +1304,46 @@ def run_services_command(centre: "ControlCenter", rest: str) -> str:
 
     action = rest_args[0].lower()
 
+    if action == "discover":
+        # Open-ended service DISCOVERY (2026-09-09): read-only, on
+        # purpose - fetches the service's own published metadata and
+        # turns it into a *proposed* ServiceDescriptor, never a
+        # persisted one. Not classify_administrative_write-gated: unlike
+        # declare/forget, this writes nothing and changes no governed
+        # state - the same reasoning 'provider <category> validate'
+        # already applies to a real-but-inert construction attempt.
+        # Discovery alone is never authorization to act; a person still
+        # runs the real, confirmed 'declare' below to make anything of
+        # what this finds.
+        if len(rest_args) < 2:
+            return "usage: services <name> discover <base-url>"
+        base_url = rest_args[1]
+        try:
+            found = discover_service(name, base_url)
+        except ServiceDiscoveryError as exc:
+            return f"could not discover '{name}' at {base_url}: {exc}"
+        d = found.descriptor
+        dropped = found.declared_operation_count - len(d.operations)
+        op_spec = ",".join(
+            f"{op.name}:{op.method}:{op.path}:{'auth' if op.requires_auth else 'open'}"
+            for op in d.operations
+        )
+        lines = [f"DISCOVERED '{d.name}' from {found.source_url}", f"  base URL: {d.base_url}"]
+        if d.description:
+            lines.append(f"  description: {d.description}")
+        lines.append(
+            f"  {len(d.operations)} of {found.declared_operation_count} declared operation(s) "
+            f"were usable" + (f" ({dropped} malformed, dropped)" if dropped else "") + ":"
+        )
+        for op in d.operations:
+            auth = "auth required" if op.requires_auth else "open"
+            lines.append(f"    {op.name} ({op.method} {op.path}, {auth})" + (f" - {op.description}" if op.description else ""))
+        lines.append("")
+        lines.append("Nothing has been declared or connected yet - discovery only reads and validates.")
+        lines.append("Review the above, then declare it yourself (still requires confirmation) with:")
+        lines.append(f"  services {d.name} declare {d.base_url} {op_spec}")
+        return "\n".join(lines)
+
     if action == "declare":
         if len(rest_args) < 3:
             return (
@@ -1329,7 +1386,7 @@ def run_services_command(centre: "ControlCenter", rest: str) -> str:
         removed = forget_service(normalised, DEFAULT_SERVICES_PATH)
         return f"forgot '{normalised}'" if removed else f"'{name}' was not declared"
 
-    return f"unknown services action '{action}' for '{name}'. Try: declare, forget"
+    return f"unknown services action '{action}' for '{name}'. Try: discover, declare, forget"
 
 
 # ---------------------------------------------------------------------------

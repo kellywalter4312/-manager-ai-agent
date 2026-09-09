@@ -205,6 +205,58 @@ class TestTheServicesVerbUsesTheIdenticalGovernanceNoParallelSystem:
     exactly like the four verbs above - proven here the same way, not
     assumed from shared code alone."""
 
+    def test_discovering_a_service_is_never_recorded(self, _isolated_paths, monkeypatch):
+        """The DISCOVER/INSPECT/VALIDATE half added this checkpoint
+        (services <name> discover <url>) writes nothing and needs no
+        confirmation - it must create no audit entry, the identical
+        read-only guarantee 'status'/'history' already hold."""
+        import json
+        import urllib.request
+
+        class _FakeResponse:
+            def __enter__(self_): return self_
+            def __exit__(self_, *a): return False
+            def read(self_, *a, **k):
+                return json.dumps({
+                    "operations": [{"name": "ping", "method": "GET", "path": "/ping", "requires_auth": False}],
+                }).encode("utf-8")
+
+        monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _FakeResponse())
+
+        runtime, manager, channel, conversation = real_system()
+        centre = ControlCenter(runtime, manager)
+
+        result = run_command(
+            centre, "services weatherstub discover http://127.0.0.1:8901",
+            80, channel, conversation, action_log_path=_isolated_paths,
+        )
+
+        assert "DISCOVERED 'weatherstub'" in result
+        assert load_action_log(_isolated_paths) == ()
+
+        from src.services.connections.service_registry import load_service_registry
+        assert load_service_registry(control_center_module.DEFAULT_SERVICES_PATH) == {}
+
+    def test_a_failed_discovery_is_also_never_recorded(self, _isolated_paths, monkeypatch):
+        import urllib.error
+        import urllib.request
+
+        def failing_urlopen(*a, **k):
+            raise urllib.error.URLError("connection refused")
+
+        monkeypatch.setattr(urllib.request, "urlopen", failing_urlopen)
+
+        runtime, manager, channel, conversation = real_system()
+        centre = ControlCenter(runtime, manager)
+
+        result = run_command(
+            centre, "services weatherstub discover http://127.0.0.1:8901",
+            80, channel, conversation, action_log_path=_isolated_paths,
+        )
+
+        assert "could not discover" in result
+        assert load_action_log(_isolated_paths) == ()
+
     def test_declaring_a_service_is_recorded(self, _isolated_paths):
         runtime, manager, channel, conversation = real_system()
         centre = ControlCenter(runtime, manager)

@@ -75,6 +75,20 @@ class ServiceOperation:
         object.__setattr__(self, "method", method)
 
         path = str(self.path).strip() or "/"
+        # "://" would make the concatenated URL DeclaredConnection builds
+        # (base_url + path) *look* like it still targets base_url while
+        # actually embedding a second, different origin in the path
+        # component - never followed as one by urllib (string
+        # concatenation is not re-parsed), but rejected outright anyway
+        # so a malicious or malformed operation can never even be
+        # declared, not merely rendered harmless. Control characters are
+        # rejected for the identical reason: no operation path may ever
+        # smuggle a header/request-line injection into the one real
+        # network call this connection is allowed to make. Checked
+        # before, not after, normalisation - service-controlled input,
+        # not this class's own formatting.
+        if "://" in path or any(ord(c) < 0x20 for c in path):
+            raise ValueError(f"ServiceOperation.path must be a plain relative path, got {self.path!r}")
         if not path.startswith("/"):
             path = "/" + path
         object.__setattr__(self, "path", path)
