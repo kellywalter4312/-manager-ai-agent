@@ -113,6 +113,7 @@ from src.services.identity.voice_selection import (
 )
 from src.services.memory.capture import DEFAULT_PURPOSE as DEFAULT_CAPTURE_PURPOSE
 from src.services.memory.capture import build_recording, capture_intent
+from src.services.memory.query import STOPWORDS as _CONNECTED_ACTION_STOPWORDS
 from src.services.memory.calendar_items import (
     CalendarItemCandidate,
     Recurrence,
@@ -4676,13 +4677,15 @@ PERSONAL_RECURRING_EVENTS = ManagerCapability(
 #
 #     reasoning               already settled - this handler was reached
 #                              because connected_action_intent matched
-#     operation selection     _select_operation(request.task, operations)
-#                              - which declared operation the user's own
-#                              words pick out, never merely
-#                              operations[0] (see that function's own
-#                              docstring) - an honest failure here, not
-#                              a guess, when nothing matches or more
-#                              than one operation matches equally well
+#     operation selection     _select_operation(request.task, operations,
+#                              connection) - which declared operation the
+#                              user's own words pick out, from each
+#                              operation's own name *and* description
+#                              (see that function's own docstring), never
+#                              merely operations[0] - an honest failure
+#                              here, not a guess, when nothing matches or
+#                              more than one operation matches equally
+#                              well
 #     capability availability request.tools.permits(tool_name) - was this
 #                              specific operation *granted*?
 #     connection availability connection.availability - Evidence from an
@@ -4741,7 +4744,42 @@ def connected_action_intent(task: Task, participants: Sequence[str] = ()) -> boo
     return _marker_present(task.description, CONNECTED_ACTION_MARKERS)
 
 
-def _select_operation(task: Task, operations: "Sequence[str]") -> "tuple[str | None, tuple[str, ...]]":
+def _meaningful_words(text: str) -> "frozenset[str]":
+    """``tokenize(text)`` with the common English function words
+    stripped out - the identical ``STOPWORDS`` set
+    ``src/services/memory/query.py``'s own ``distinctive_terms`` already
+    uses for the same reason it states: almost any two English
+    sentences share "the" or "a", so leaving them in would make an
+    unrelated operation's *description* look relevant to nearly any
+    request. Reused rather than duplicated, exactly as that module's
+    own docstring already argues for a second package needing the
+    identical list."""
+    return tokenize(text) - _CONNECTED_ACTION_STOPWORDS
+
+
+def _operation_vocabulary(connection: "Connection", operation: str) -> "frozenset[str]":
+    """Every meaningful word this operation's own declared metadata
+    offers - its name, plus its free-text description when the
+    connection can supply one (``operation_description_for`` -
+    ``DeclaredConnection``'s own method; duck-typed exactly like
+    ``authorization_for``/``requires_confirmation_for`` already are, so
+    a connection with nothing more precise to offer, Gmail/Null, is
+    matched on its name alone, unchanged).
+
+    A technically-named operation (``fetch_state``) whose description
+    actually says what it does (e.g. "reports the account's current
+    condition") becomes findable by that meaning, not only by its bare
+    identifier - never a synonym table, never anything this file
+    invented: the words are the service's own.
+    """
+    describe = getattr(connection, "operation_description_for", None)
+    description = describe(operation) if describe is not None else ""
+    return _meaningful_words(operation) | _meaningful_words(description)
+
+
+def _select_operation(
+    task: Task, operations: "Sequence[str]", connection: "Connection"
+) -> "tuple[str | None, tuple[str, ...]]":
     """Which of ``operations`` the user actually meant - never merely
     ``operations[0]``.
 
@@ -4750,33 +4788,37 @@ def _select_operation(task: Task, operations: "Sequence[str]") -> "tuple[str | N
     any legacy or future connection that only ever declares one
     operation) behaves exactly as before - completely unaffected.
 
-    **Generic over more than one, from declared metadata alone.** The
-    one piece of metadata every ``Connection`` universally exposes for
-    each of its operations is the operation's own *name*
-    (``supported_operations``) - so that name, word-split by this
-    file's own canonical ``tokenize()`` (the identical function every
-    other word-overlap capability here already uses, e.g.
-    ``general_conversation``'s own routing), is matched against the
-    part of the user's own request that is not the routing marker
-    itself (``_after_marker`` - the same extraction ``forget_this``/
-    ``recall_memory`` already share) - never a fixed word list, never a
-    named service or industry, so a future connection with new
-    operation names needs no change here.
+    **Generic over more than one, from declared metadata alone.** Each
+    operation's combined vocabulary - its name plus whatever
+    description it declares (``_operation_vocabulary`` above), both
+    word-split by this file's own canonical ``tokenize()`` (the
+    identical function every other word-overlap capability here already
+    uses, e.g. ``general_conversation``'s own routing) with common
+    English words stripped - is matched against the part of the user's
+    own request that is not the routing marker itself (``_after_marker``
+    - the same extraction ``forget_this``/``recall_memory`` already
+    share). Name and description count equally: both are the service's
+    own declared metadata, and treating one as stronger evidence than
+    the other would be a guess this function is not in a position to
+    make. Never a fixed word list, never a named service or industry,
+    so a future connection with new operation names or descriptions
+    needs no change here.
 
     **Fails honestly rather than guessing**, in either direction:
     ``(None, ())`` when nothing in the request's own words overlaps any
-    declared operation at all, and ``(None, tied_candidates)`` when two
-    or more operations are genuinely, equally plausible. Only a single,
-    strictly-highest-scoring operation is ever returned as a real pick.
+    declared operation's vocabulary at all, and ``(None,
+    tied_candidates)`` when two or more operations are genuinely,
+    equally plausible. Only a single, strictly-highest-scoring operation
+    is ever returned as a real pick.
     """
     if len(operations) <= 1:
         return (operations[0] if operations else None, ())
 
-    intent_words = tokenize(_after_marker(task.description, CONNECTED_ACTION_MARKERS))
+    intent_words = _meaningful_words(_after_marker(task.description, CONNECTED_ACTION_MARKERS))
     if not intent_words:
         return (None, ())
 
-    scored = [(op, len(tokenize(op) & intent_words)) for op in operations]
+    scored = [(op, len(_operation_vocabulary(connection, op) & intent_words)) for op in operations]
     best = max(score for _, score in scored)
     if best == 0:
         return (None, ())
@@ -4805,7 +4847,7 @@ def connected_action(request: CapabilityRequest) -> TaskResult:
             f"The '{connection.name}' connection is configured but offers no supported actions yet.",
         )
 
-    operation, ambiguous = _select_operation(request.task, operations)
+    operation, ambiguous = _select_operation(request.task, operations, connection)
     if operation is None:
         if ambiguous:
             return TaskResult.failure(

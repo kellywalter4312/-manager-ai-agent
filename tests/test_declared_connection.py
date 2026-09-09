@@ -266,6 +266,38 @@ class TestRequiresConfirmationFor:
             conn.requires_confirmation_for("does_not_exist")
 
 
+class TestOperationDescriptionFor:
+    """Semantic operation-selection checkpoint: the one piece of
+    metadata beyond an operation's bare name a caller (_select_operation,
+    src/manager/capabilities.py) can use to tell what it actually does."""
+
+    def test_returns_the_operations_own_declared_description(self):
+        conn = DeclaredConnection(_mixed_descriptor(), None)
+        assert conn.operation_description_for("ping") == ""
+
+        described = ServiceDescriptor(
+            name="weatherstub", base_url="http://127.0.0.1:9911",
+            operations=(
+                ServiceOperation(
+                    name="ping", method="GET", path="/ping", requires_auth=False,
+                    description="reports whether the service is reachable",
+                ),
+            ),
+        )
+        assert (
+            DeclaredConnection(described, None).operation_description_for("ping")
+            == "reports whether the service is reachable"
+        )
+
+    def test_an_unknown_operation_returns_an_empty_string_not_an_exception(self):
+        """Unlike authorization_for/requires_confirmation_for, this is
+        never a hard failure for a caller merely scoring candidates -
+        an empty string is treated identically to 'nothing more to go
+        on than the name'."""
+        conn = DeclaredConnection(_mixed_descriptor(), None)
+        assert conn.operation_description_for("does_not_exist") == ""
+
+
 class TestExecuteWithParameters:
     def test_get_parameters_become_a_real_safely_escaped_query_string(self, monkeypatch):
         seen = {}

@@ -181,6 +181,22 @@ class DeclaredConnection(Connection):
             raise KeyError(f"'{self.name}' declares no operation named '{operation}'")
         return op.method not in _SAFE_METHODS
 
+    def operation_description_for(self, operation: str) -> str:
+        """The operation's own declared, free-text description - the
+        one piece of semantic metadata beyond its bare name a
+        ``ServiceOperation`` can carry, so a technically-named operation
+        (``fetch_state``) can still be found by what it actually does
+        rather than only by what it is called.
+
+        Empty for an unknown operation or one declared with no
+        description at all, never an exception - a caller scoring
+        candidates (``_select_operation``,
+        ``src/manager/capabilities.py``) treats that identically to
+        "nothing more to go on than the name," never a hard failure.
+        """
+        op = self._descriptor.operation(operation)
+        return op.description if op is not None else ""
+
     @property
     def supported_operations(self) -> "tuple[str, ...]":
         return self._descriptor.operation_names
