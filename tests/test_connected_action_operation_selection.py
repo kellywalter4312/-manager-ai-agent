@@ -48,7 +48,7 @@ from src.providers.availability import AvailabilityState
 from src.providers.connection import Connection
 from src.providers.declared_connection import DeclaredConnection
 from src.providers.null_connection import NullConnection
-from src.providers.service_descriptor import ServiceDescriptor, ServiceOperation
+from src.providers.service_descriptor import ServiceDescriptor, ServiceOperation, ServiceParameter
 
 
 def real_manager(*, tools: "ToolSet | None" = None, connection: "Connection | None" = None, **overrides):
@@ -73,7 +73,10 @@ def _connection(*operations: ServiceOperation) -> DeclaredConnection:
 
 def _manager_for(connection: DeclaredConnection) -> "object":
     tools = ToolSet([
-        ConnectionActionTool(connection, operation=op, description=f"Performs {op}.")
+        ConnectionActionTool(
+            connection, operation=op, description=f"Performs {op}.",
+            parameters=connection.parameters_for(op),
+        )
         for op in connection.supported_operations
     ])
     return real_manager(tools=tools, connection=connection)
@@ -490,3 +493,98 @@ class TestNoHardcodingWasIntroduced:
         text = self._new_mechanisms_source()
         for forbidden in ('connection.name == "', "connection.name == '", 'operation == "read_item"'):
             assert forbidden not in text, forbidden
+
+
+class TestParameterResolutionThroughConnectedAction:
+    """Data-flow-through-execution checkpoint: a declared operation's
+    real inputs are resolved only from what the request's own text
+    explicitly states - never fabricated - and reach the real HTTP
+    call through the identical governed ConnectionActionTool/ToolSet
+    boundary every other action here already crosses."""
+
+    def test_an_explicit_value_reaches_the_real_request(self):
+        connection = _connection(
+            ServiceOperation(
+                name="retrieve_details", method="GET", path="/details/{resource_key}",
+                requires_auth=False, description="retrieves details for a located resource",
+                parameters=(ServiceParameter(name="resource_key", location="path", required=True),),
+            ),
+        )
+        manager = _manager_for(connection)
+
+        result = manager.handle_task(_task("retrieve details for resource_key=abc123"))
+
+        assert result.succeeded
+        assert result.payload["operation"] == "retrieve_details"
+
+    def test_a_missing_required_parameter_refuses_honestly_naming_it(self):
+        connection = _connection(
+            ServiceOperation(
+                name="retrieve_details", method="GET", path="/details/{resource_key}",
+                requires_auth=False, description="retrieves details for a located resource",
+                parameters=(ServiceParameter(name="resource_key", location="path", required=True),),
+            ),
+        )
+        manager = _manager_for(connection)
+
+        result = manager.handle_task(_task("retrieve the details"))
+
+        assert not result.succeeded
+        assert "resource_key" in result.error
+
+    def test_an_optional_parameter_may_be_omitted_entirely(self):
+        connection = _connection(
+            ServiceOperation(
+                name="search_catalogue", method="GET", path="/search", requires_auth=False,
+                description="searches the catalogue",
+                parameters=(ServiceParameter(name="page_token", location="query", required=False),),
+            ),
+        )
+        manager = _manager_for(connection)
+
+        result = manager.handle_task(_task("search the catalogue"))
+
+        assert result.succeeded
+
+    def test_an_arbitrary_parameter_name_is_resolved_generically(self):
+        """No special case for 'id'/'key'/'resource_id' - a
+        deliberately unusual declared name is resolved identically."""
+        connection = _connection(
+            ServiceOperation(
+                name="search_catalogue", method="GET", path="/search", requires_auth=False,
+                description="searches the catalogue",
+                parameters=(
+                    ServiceParameter(name="zzz_totally_arbitrary_field_47", location="query", required=True),
+                ),
+            ),
+        )
+        manager = _manager_for(connection)
+
+        result = manager.handle_task(
+            _task("search the catalogue with zzz_totally_arbitrary_field_47=xyz"),
+        )
+
+        assert result.succeeded
+
+    def test_a_consequential_parameterized_operation_is_still_blocked_from_conversation(self):
+        connection = _connection(
+            ServiceOperation(
+                name="get_status", method="GET", path="/status", requires_auth=False,
+                description="reports the current status",
+            ),
+            ServiceOperation(
+                name="deactivate_item", method="POST", path="/deactivate", requires_auth=True,
+                description="permanently deactivates a located item",
+                parameters=(ServiceParameter(name="resource_key", location="body", required=True),),
+            ),
+        )
+        manager = _manager_for(connection)
+
+        result = manager.handle_task(_task("deactivate the item resource_key=abc123"))
+
+        assert not result.succeeded
+        # Refused before ever being attempted - governance is checked
+        # (and the tool was never even granted for this operation - see
+        # scripts/control_center.py's own _safe_connection_tools) before
+        # any parameter resolution could matter.
+        assert connection.availability.state is AvailabilityState.UNKNOWN

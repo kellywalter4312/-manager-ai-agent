@@ -22,12 +22,15 @@ already-existing service (that has never heard of Alfred, and never
 will) already describes its own API, tried at the conventional
 locations real services actually publish it
 (``/openapi.json``, ``/.well-known/openapi.json``, ``/swagger.json``).
-Not full OpenAPI parsing - path parameters, request bodies, response
-schemas and every method beyond GET/POST are deliberately out of
-scope; a legitimate operation this narrow reading cannot represent is
-skipped, not fabricated, the identical "skip what does not validate,
-never invent what would" discipline the alfred-service.json parser
-already holds itself to.
+Not full OpenAPI parsing - response schemas, headers, cookies and
+every method beyond GET/POST are deliberately out of scope. Path and
+query parameters and a JSON request body's own declared fields (the
+data-flow-through-execution checkpoint's own addition) are read where
+the document actually declares them; a legitimate operation this
+narrow reading still cannot represent (an inconsistently-declared
+path, for one) is skipped, not fabricated, the identical "skip what
+does not validate, never invent what would" discipline the
+alfred-service.json parser already holds itself to.
 
 **Untrusted input, treated as untrusted throughout, for both
 sources.** ``name`` is always the *caller's* argument, never read from
@@ -52,7 +55,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 
-from src.providers.service_descriptor import ServiceDescriptor, ServiceOperation
+from src.providers.service_descriptor import ServiceDescriptor, ServiceOperation, ServiceParameter
 
 # RFC 8615's own well-known-URI prefix, plus a name specific to this
 # project - so a service can publish Alfred's own metadata alongside
@@ -211,6 +214,30 @@ def _dedup_by_name(operations: "list[ServiceOperation]") -> "tuple[ServiceOperat
     return tuple(deduplicated)
 
 
+def _alfred_service_parameters(raw: object) -> "tuple[ServiceParameter, ...]":
+    """One operation entry's own declared ``parameters`` list, in the
+    identical flat ``{"name": ..., "location": ..., "required": ...}``
+    shape the rest of this source already uses - absent entirely, or
+    malformed, means no parameters, never a fabricated one."""
+    if not isinstance(raw, list):
+        return ()
+    parameters: "list[ServiceParameter]" = []
+    for item in raw:
+        if not isinstance(item, dict) or not item.get("name"):
+            continue
+        try:
+            parameters.append(
+                ServiceParameter(
+                    name=str(item["name"]),
+                    location=str(item.get("location", "query")),
+                    required=bool(item.get("required", True)),
+                )
+            )
+        except ValueError:
+            continue
+    return tuple(parameters)
+
+
 def _try_alfred_service(name: str, base_url: str, timeout: float) -> DiscoveryResult:
     """Source 1: ``<base_url>/.well-known/alfred-service.json`` - a
     service that specifically knows about, and publishes for, Alfred.
@@ -236,6 +263,12 @@ def _try_alfred_service(name: str, base_url: str, timeout: float) -> DiscoveryRe
                     path=str(entry.get("path", "/")),
                     requires_auth=bool(entry.get("requires_auth", True)),
                     description=str(entry.get("description", ""))[:500],
+                    # Data-flow-through-execution checkpoint: a service
+                    # that specifically publishes for Alfred can name
+                    # its own real inputs directly, in the identical
+                    # flat shape every other field on this entry already
+                    # uses - never invented when absent.
+                    parameters=_alfred_service_parameters(entry.get("parameters")),
                 )
             )
         except ValueError:
@@ -260,6 +293,51 @@ def _try_alfred_service(name: str, base_url: str, timeout: float) -> DiscoveryRe
         descriptor=descriptor, source_url=url, source_kind="alfred-service",
         declared_operation_count=len(raw_operations),
     )
+
+
+def _openapi_parameters(op_obj: dict) -> "tuple[ServiceParameter, ...]":
+    """Every real input this one OpenAPI operation entry declares -
+    read straight from its own ``parameters`` array (``in: query`` or
+    ``in: path``) and, when present, its own ``requestBody``'s JSON
+    schema (``required``/``properties``) - never a header, a cookie, or
+    anything this checkpoint's own bounded execution layer has no real
+    place to put. Nothing here is fabricated: a field absent from the
+    document simply does not appear in the result.
+    """
+    parameters: "list[ServiceParameter]" = []
+
+    raw_parameters = op_obj.get("parameters")
+    for param in raw_parameters if isinstance(raw_parameters, list) else ():
+        if not isinstance(param, dict):
+            continue
+        location = param.get("in")
+        param_name = param.get("name")
+        if location not in ("query", "path") or not param_name:
+            continue
+        # OpenAPI's own rule: every path parameter is required,
+        # regardless of what (or whether) the document's own
+        # "required" key says - a placeholder with no value can never
+        # be safely omitted from the URL it is part of.
+        required = True if location == "path" else bool(param.get("required", False))
+        parameters.append(ServiceParameter(name=str(param_name), location=location, required=required))
+
+    raw_body = op_obj.get("requestBody")
+    schema = {}
+    if isinstance(raw_body, dict):
+        content = raw_body.get("content")
+        media = content.get("application/json") if isinstance(content, dict) else None
+        schema = media.get("schema") if isinstance(media, dict) else {}
+        schema = schema if isinstance(schema, dict) else {}
+    required_body_fields = set(schema.get("required") or []) if isinstance(schema.get("required"), list) else set()
+    raw_properties = schema.get("properties")
+    for field_name in raw_properties if isinstance(raw_properties, dict) else ():
+        parameters.append(
+            ServiceParameter(
+                name=str(field_name), location="body", required=field_name in required_body_fields,
+            )
+        )
+
+    return tuple(parameters)
 
 
 def _try_openapi(name: str, base_url: str, candidate_path: str, timeout: float) -> DiscoveryResult:
@@ -298,17 +376,9 @@ def _try_openapi(name: str, base_url: str, candidate_path: str, timeout: float) 
             # Counted here, before any of the filters below - "declared"
             # means "a real GET/POST operation entry existed in the
             # document", matching this field's own docstring promise
-            # ("before any were dropped as ... parameterised ... or
-            # over the bound"), not merely "survived every filter".
+            # ("before any were dropped as ... parameterised or over the
+            # bound"), not merely "survived every filter".
             declared_count += 1
-            if "{" in path_key:
-                # A parameterised path (e.g. /orders/{id}) is a real,
-                # legitimate operation this narrow reading cannot
-                # represent yet - DeclaredConnection has no mechanism to
-                # fill in a path parameter at execution time. Skipped,
-                # not fabricated with the literal placeholder text as
-                # the path.
-                continue
             if len(operations) >= _MAX_OPENAPI_OPERATIONS:
                 continue
             op_security = op_obj.get("security", document_security)
@@ -321,6 +391,19 @@ def _try_openapi(name: str, base_url: str, candidate_path: str, timeout: float) 
                     ServiceOperation(
                         name=str(raw_name), method=method.upper(), path=path_key,
                         requires_auth=requires_auth, description=description,
+                        # Data-flow-through-execution checkpoint: a
+                        # parameterised path (e.g. /orders/{id}) is only
+                        # ever accepted when the document itself
+                        # declares a matching 'in: path' parameter for
+                        # every placeholder - ServiceOperation's own
+                        # construction enforces that both ways (see its
+                        # docstring), so an inconsistent or
+                        # under-declared path is skipped exactly the
+                        # same "invalid, not fabricated" way any other
+                        # malformed operation already is, via the
+                        # identical except ValueError below - never a
+                        # second check duplicated here.
+                        parameters=_openapi_parameters(op_obj),
                     )
                 )
             except ValueError:
@@ -328,8 +411,7 @@ def _try_openapi(name: str, base_url: str, candidate_path: str, timeout: float) 
 
     if not operations:
         raise _SourceNotFound(
-            f"'{url}' declared paths, but none were individually usable "
-            "(GET/POST only, no path parameters)"
+            f"'{url}' declared paths, but none were individually usable (GET/POST only)"
         )
 
     info = payload.get("info")

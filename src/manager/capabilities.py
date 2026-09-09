@@ -4828,6 +4828,34 @@ def _select_operation(
     return (candidates[0], ())
 
 
+_DECLARED_ARGUMENT_PATTERN = re.compile(r"\b([a-zA-Z][a-zA-Z0-9_]*)\s*[=:]\s*([^\s,;]+)")
+
+
+def _declared_argument_values(text: str) -> "dict[str, str]":
+    """Explicit ``name=value`` (or ``name: value``) pairs actually
+    stated in the request's own text - the one, conservative way a
+    parameter's real value ever reaches an operation. Never scraped or
+    inferred from surrounding prose: a value is used only when it was
+    actually written in exactly this shape.
+
+    Two genuine sources produce this shape, never a third: a person
+    typing a value directly ("...for id=item-42"), or the Brain's own
+    next-step wording in a multi-step objective
+    (``pursue_objective``, ``src/manager/objective_loop.py``), which
+    ``OBJECTIVE_SYSTEM_PROMPT`` (``src/manager/brain_prompts.py``)
+    explicitly instructs to state a value this way only when it was
+    genuinely reported in the evidence gathered so far - never
+    invented. This function performs no inference of its own.
+    """
+    values: "dict[str, str]" = {}
+    for match in _DECLARED_ARGUMENT_PATTERN.finditer(text or ""):
+        name = match.group(1).lower()
+        value = match.group(2).strip(".,;:!?")
+        if value:
+            values[name] = value
+    return values
+
+
 def connected_action(request: CapabilityRequest) -> TaskResult:
     """Attempt one governed action through Alfred's configured
     connection - see this section's own module comment for the full,
@@ -4893,7 +4921,30 @@ def connected_action(request: CapabilityRequest) -> TaskResult:
             f"The '{connection.name}' connection is not authorized yet.",
         )
 
-    outcome = request.tools.invoke(tool_name, {})
+    # Data-flow-through-execution: a value this operation genuinely
+    # needs only ever comes from what was actually, explicitly stated -
+    # by the person, or by an earlier step's real, observed output the
+    # Brain's own next-step wording carried forward (see
+    # _declared_argument_values' own docstring). Never fabricated, and
+    # never silently attempted with a required value missing - an
+    # honest, specific refusal instead. An optional value is included
+    # only when it was actually supplied; never invented to fill it.
+    parameters_for = getattr(connection, "parameters_for", None)
+    parameters = parameters_for(operation) if parameters_for is not None else ()
+    params: "dict[str, str]" = {}
+    if parameters:
+        available = _declared_argument_values(request.task.description)
+        missing = [p.name for p in parameters if p.required and p.name not in available]
+        if missing:
+            return TaskResult.failure(
+                request.task, request.own_name,
+                f"'{operation}' on '{connection.name}' needs {', '.join(missing)}, which "
+                "I don't have yet - either tell me the value(s) directly, or complete "
+                "whatever earlier step would provide them.",
+            )
+        params = {p.name: available[p.name] for p in parameters if p.name in available}
+
+    outcome = request.tools.invoke(tool_name, params)
     if not outcome.ok:
         return TaskResult.failure(
             request.task, request.own_name,

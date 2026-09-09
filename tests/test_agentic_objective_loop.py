@@ -495,3 +495,186 @@ class TestTheDiagnoseVsDecideGapCognitiveLoopWouldHaveInherited:
         _, manager, channel, conversation = real_system()
         outcome = pursue_objective(manager, Task(description="xyzzyplugh transmogrify the qux into a fnord"))
         assert outcome.steps[0].result.agent_name == "Alfred"
+
+
+# ---------------------------------------------------------------------------
+# 8. Data-flow-through-execution checkpoint: step 1's real, observed
+#    output reaching step 2's real, executed operation as an actual
+#    parameter - the central proof this checkpoint adds. Every step
+#    still runs through the unmodified pursue_objective/
+#    answer_with_collaboration/connected_action path above; only the
+#    connection layer beneath it (ServiceOperation.parameters,
+#    DeclaredConnection.execute, ConnectionActionTool) is new.
+# ---------------------------------------------------------------------------
+
+
+class TestStepToStepDataFlowThroughRealOperations:
+    """The most important part of this checkpoint: step 1 executes a
+    real, safe operation and returns a real, structured result; the
+    Brain's own next-step wording explicitly carries a value from that
+    result forward; step 2's real operation call genuinely receives it
+    as a parameter - proven by inspecting the real HTTP request the
+    fixture actually received, not merely that a TaskResult looked
+    right."""
+
+    @pytest.fixture(autouse=True)
+    def _isolated_paths(self, tmp_path, monkeypatch):
+        import scripts.control_center as control_center_module
+        import src.services.connections.service_registry as service_registry_module
+        import src.services.credentials.account_store_file as account_store_file_module
+
+        monkeypatch.setattr(control_center_module, "DEFAULT_ACCOUNTS_PATH", tmp_path / "accounts.json")
+        monkeypatch.setattr(control_center_module, "DEFAULT_CONFIG_PATH", tmp_path / "config.json")
+        monkeypatch.setattr(control_center_module, "DEFAULT_LEDGER_PATH", tmp_path / "ledger.json")
+        monkeypatch.setattr(control_center_module, "DEFAULT_SERVICES_PATH", tmp_path / "services.json")
+        monkeypatch.setattr(service_registry_module, "DEFAULT_SERVICES_PATH", tmp_path / "services.json")
+        monkeypatch.setattr(account_store_file_module, "DEFAULT_ACCOUNTS_PATH", tmp_path / "accounts.json")
+
+    def _declare(self, *, credential="genuine-secret-token"):
+        from src.providers.service_descriptor import ServiceDescriptor, ServiceOperation, ServiceParameter
+        from src.services.connections import service_registry as service_registry_module
+
+        descriptor = ServiceDescriptor(
+            name="planningfixture", base_url="http://127.0.0.1:9299",
+            operations=(
+                ServiceOperation(
+                    name="locate_item", method="GET", path="/locate", requires_auth=False,
+                    description="finds a resource and reports its key",
+                ),
+                ServiceOperation(
+                    name="retrieve_details", method="GET", path="/details/{resource_key}",
+                    requires_auth=False, description="retrieves details for a located resource",
+                    parameters=(ServiceParameter(name="resource_key", location="path", required=True),),
+                ),
+                ServiceOperation(
+                    name="deactivate_item", method="POST", path="/deactivate", requires_auth=True,
+                    description="permanently deactivates a located resource",
+                    parameters=(ServiceParameter(name="resource_key", location="body", required=True),),
+                ),
+            ),
+        )
+        service_registry_module.declare_service(descriptor, service_registry_module.DEFAULT_SERVICES_PATH)
+        if credential is not None:
+            runtime, manager, channel, conversation = real_system()
+            from src.control_center.observer import ControlCenter
+            from scripts.control_center import run_command
+
+            centre = ControlCenter(runtime, manager)
+            run_command(
+                centre, f"connections planningfixture connect testaccount {credential}",
+                80, channel, conversation,
+            )
+
+    def _wired_with_connection(self, objective_script):
+        runtime, manager, channel, conversation = real_system(connection_provider="planningfixture")
+        provider = ScriptedProvider(objective_script)
+        brain = LLMManagerBrain(provider, personality=runtime.identity.personality)
+        manager.brain = brain
+        manager.own_skills._converse = brain.converse
+        return runtime, manager, channel, conversation, provider
+
+    def _stub_http(self, monkeypatch, *, responses, calls):
+        import urllib.error
+        import urllib.request
+
+        class _Resp:
+            def __init__(self_, body):
+                self_._body = body
+
+            def __enter__(self_):
+                return self_
+
+            def __exit__(self_, *a):
+                return False
+
+            def read(self_):
+                return self_._body
+
+        def fake_urlopen(request, timeout):
+            calls.append(request.full_url)
+            for path, body in responses.items():
+                if path in request.full_url:
+                    return _Resp(body)
+            raise urllib.error.URLError(f"no stub registered for {request.full_url}")
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    def test_step_twos_real_http_request_carries_step_ones_real_value(self, monkeypatch):
+        self._declare()
+        calls: list = []
+        self._stub_http(monkeypatch, calls=calls, responses={
+            "/locate": b'{"resource_key": "res-9f2"}',
+            "/details/res-9f2": b'{"resource_key": "res-9f2", "detail": "a real observed detail"}',
+        })
+
+        _, manager, _, _, provider = self._wired_with_connection([
+            # The Brain read step 1's own real evidence
+            # ('{"resource_key": "res-9f2"}') and, per OBJECTIVE_SYSTEM_PROMPT,
+            # states the value it genuinely found as name=value.
+            '{"status":"continue","next_step":'
+            '"check my connected account: retrieve details for resource_key=res-9f2"}',
+            '{"status":"complete","final_answer":"the resources real detail was retrieved"}',
+        ])
+        outcome = pursue_objective(
+            manager, Task(description="check my connected account: locate the item then get its details"),
+        )
+
+        assert outcome.status is ObjectiveStatus.COMPLETED
+        assert len(outcome.steps) == 2
+        assert outcome.steps[0].result.payload["operation"] == "locate_item"
+        assert outcome.steps[1].result.payload["operation"] == "retrieve_details"
+        # The proof: the real second HTTP request's own URL genuinely
+        # contains the value step 1 produced - inspected independently
+        # of what the TaskResult itself claims.
+        assert calls == [
+            "http://127.0.0.1:9299/locate",
+            "http://127.0.0.1:9299/details/res-9f2",
+        ]
+        assert outcome.result.output == "the resources real detail was retrieved"
+
+    def test_a_value_nobody_ever_produced_pauses_honestly_instead_of_being_fabricated(self, monkeypatch):
+        self._declare()
+        calls: list = []
+        self._stub_http(monkeypatch, calls=calls, responses={})
+
+        _, manager, _, _, provider = self._wired_with_connection([
+            '{"status":"needs_input","question":"which resource do you mean?"}',
+        ])
+        outcome = pursue_objective(
+            manager, Task(description="check my connected account: retrieve the resource details"),
+        )
+
+        assert outcome.status is ObjectiveStatus.NEEDS_INPUT
+        assert outcome.result.output == "which resource do you mean?"
+        # retrieve_details needs resource_key - never sent without it.
+        assert calls == []
+
+    def test_the_consequential_operation_stays_blocked_even_with_its_parameter_known(self, monkeypatch):
+        self._declare()
+        calls: list = []
+        self._stub_http(monkeypatch, calls=calls, responses={
+            "/locate": b'{"resource_key": "res-9f2"}',
+        })
+
+        _, manager, _, _, provider = self._wired_with_connection([
+            '{"status":"continue","next_step":'
+            '"check my connected account: deactivate the item resource_key=res-9f2"}',
+            '{"status":"failed","final_answer":'
+            '"deactivating requires your explicit confirmation in Control Center"}',
+        ])
+        # Deliberately names only "locate" - the plan-level decision to
+        # also deactivate the item comes from the (scripted) Brain's own
+        # next_step, exactly as a real multi-step objective would work,
+        # and proves connected_action's own operation selection is not
+        # what is doing the blocking here (locate_item is genuinely
+        # unambiguous on its own).
+        outcome = pursue_objective(
+            manager, Task(description="check my connected account: locate the item"),
+        )
+
+        assert outcome.status is ObjectiveStatus.FAILED
+        # Only the safe first step ever genuinely ran - the consequential
+        # operation's own tool was never even granted (see
+        # scripts/control_center.py::_safe_connection_tools), so a
+        # correctly-resolved parameter still could not authorize it.
+        assert calls == ["http://127.0.0.1:9299/locate"]

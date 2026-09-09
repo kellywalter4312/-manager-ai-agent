@@ -28,7 +28,7 @@ import pytest
 from src.providers.availability import AvailabilityState
 from src.providers.connection import AuthorizationState, ConnectionStatus
 from src.providers.declared_connection import DeclaredConnection
-from src.providers.service_descriptor import ServiceDescriptor, ServiceOperation
+from src.providers.service_descriptor import ServiceDescriptor, ServiceOperation, ServiceParameter
 from src.services.credentials.account import ProviderAccount
 
 
@@ -389,3 +389,153 @@ class TestExecuteWithParameters:
         # The service WAS genuinely reached, even though it rejected the
         # request - that is real evidence of availability, not absence.
         assert conn.availability.state is AvailabilityState.AVAILABLE
+
+
+class _FakeResponse2:
+    def __init__(self, body: bytes):
+        self._body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self):
+        return self._body
+
+
+class TestParameterLocationExecution:
+    """Data-flow-through-execution checkpoint: a declared parameter's
+    real value is injected exactly where the service itself said it
+    goes - path, query, or JSON body - never fabricated when absent."""
+
+    def _op(self, method="GET", path="/x", **kw):
+        return ServiceOperation(name="op", method=method, path=path, requires_auth=False, **kw)
+
+    def test_a_path_parameter_is_substituted_into_the_url(self, monkeypatch):
+        op = self._op(
+            path="/warehouse/{shelf_locator}",
+            parameters=(ServiceParameter(name="shelf_locator", location="path", required=True),),
+        )
+        conn = DeclaredConnection(ServiceDescriptor(name="x", base_url="http://x.test", operations=(op,)), None)
+        seen = {}
+
+        def fake_urlopen(request, timeout):
+            seen["url"] = request.full_url
+            return _FakeResponse2(b"{}")
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        result = conn.execute("op", shelf_locator="a1-north")
+        assert result.ok
+        assert seen["url"] == "http://x.test/warehouse/a1-north"
+
+    def test_a_path_parameter_value_cannot_smuggle_an_extra_path_segment(self, monkeypatch):
+        """A value containing '/' is percent-encoded, never allowed to
+        create a new path segment - path traversal/injection stays
+        impossible regardless of what the value contains."""
+        op = self._op(
+            path="/warehouse/{shelf_locator}",
+            parameters=(ServiceParameter(name="shelf_locator", location="path", required=True),),
+        )
+        conn = DeclaredConnection(ServiceDescriptor(name="x", base_url="http://x.test", operations=(op,)), None)
+        seen = {}
+
+        def fake_urlopen(request, timeout):
+            seen["url"] = request.full_url
+            return _FakeResponse2(b"{}")
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        conn.execute("op", shelf_locator="../../etc/passwd")
+        assert "/../" not in seen["url"]
+        assert seen["url"] == "http://x.test/warehouse/..%2F..%2Fetc%2Fpasswd"
+
+    def test_a_missing_required_path_parameter_fails_honestly_with_no_http_call(self, monkeypatch):
+        op = self._op(
+            path="/warehouse/{shelf_locator}",
+            parameters=(ServiceParameter(name="shelf_locator", location="path", required=True),),
+        )
+        conn = DeclaredConnection(ServiceDescriptor(name="x", base_url="http://x.test", operations=(op,)), None)
+        called = []
+        monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: called.append(1))
+
+        result = conn.execute("op")
+        assert not result.ok
+        assert result.status is ConnectionStatus.FAILED
+        assert "shelf_locator" in result.detail
+        assert not called
+
+    def test_a_query_parameter_reaches_the_real_query_string(self, monkeypatch):
+        op = self._op(parameters=(ServiceParameter(name="keyword", location="query", required=True),))
+        conn = DeclaredConnection(ServiceDescriptor(name="x", base_url="http://x.test", operations=(op,)), None)
+        seen = {}
+
+        def fake_urlopen(request, timeout):
+            seen["url"] = request.full_url
+            return _FakeResponse2(b"{}")
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        conn.execute("op", keyword="widgets")
+        assert seen["url"] == "http://x.test/x?keyword=widgets"
+
+    def test_a_body_parameter_reaches_the_real_json_body(self, monkeypatch):
+        op = self._op(
+            method="POST",
+            parameters=(ServiceParameter(name="payload_reference", location="body", required=True),),
+        )
+        conn = DeclaredConnection(ServiceDescriptor(name="x", base_url="http://x.test", operations=(op,)), None)
+        seen = {}
+
+        def fake_urlopen(request, timeout):
+            seen["body"] = request.data
+            return _FakeResponse2(b"{}")
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        conn.execute("op", payload_reference="ref-99")
+        import json
+
+        assert json.loads(seen["body"]) == {"payload_reference": "ref-99"}
+
+    def test_an_optional_parameter_may_be_omitted(self, monkeypatch):
+        op = self._op(parameters=(ServiceParameter(name="verbose", location="query", required=False),))
+        conn = DeclaredConnection(ServiceDescriptor(name="x", base_url="http://x.test", operations=(op,)), None)
+        seen = {}
+
+        def fake_urlopen(request, timeout):
+            seen["url"] = request.full_url
+            return _FakeResponse2(b"{}")
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        conn.execute("op")
+        assert seen["url"] == "http://x.test/x"
+
+    def test_an_optional_parameter_is_used_when_explicitly_provided(self, monkeypatch):
+        op = self._op(parameters=(ServiceParameter(name="verbose", location="query", required=False),))
+        conn = DeclaredConnection(ServiceDescriptor(name="x", base_url="http://x.test", operations=(op,)), None)
+        seen = {}
+
+        def fake_urlopen(request, timeout):
+            seen["url"] = request.full_url
+            return _FakeResponse2(b"{}")
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        conn.execute("op", verbose="true")
+        assert seen["url"] == "http://x.test/x?verbose=true"
+
+    def test_an_arbitrarily_named_parameter_works_generically(self, monkeypatch):
+        """No special case for 'id'/'key' - a deliberately unusual
+        declared name works identically."""
+        op = self._op(
+            path="/x/{zzz_totally_arbitrary_field_47}",
+            parameters=(ServiceParameter(name="zzz_totally_arbitrary_field_47", location="path", required=True),),
+        )
+        conn = DeclaredConnection(ServiceDescriptor(name="x", base_url="http://x.test", operations=(op,)), None)
+        seen = {}
+
+        def fake_urlopen(request, timeout):
+            seen["url"] = request.full_url
+            return _FakeResponse2(b"{}")
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        conn.execute("op", zzz_totally_arbitrary_field_47="value-1")
+        assert seen["url"] == "http://x.test/x/value-1"

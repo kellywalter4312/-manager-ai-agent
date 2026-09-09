@@ -208,6 +208,14 @@ class ToolSpec:
     name: str
     description: str
     schema: Mapping[str, type] = field(default_factory=dict)
+    # Goal-level-planning-foundation checkpoint: a parameter a tool may
+    # accept but does not require - distinct from ``schema`` (every
+    # entry there is mandatory). Defaults to empty, so every existing
+    # Tool in this project - none of which has ever populated this -
+    # is completely unaffected; only a caller that actually declares an
+    # optional parameter (``ConnectionActionTool``, for one it genuinely
+    # declares optional) changes behaviour at all.
+    optional: Mapping[str, type] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         name = str(self.name).strip()
@@ -229,11 +237,26 @@ class ToolSpec:
                 )
         object.__setattr__(self, "schema", dict(self.schema or {}))
 
+        for parameter, expected in (self.optional or {}).items():
+            if not isinstance(expected, type):
+                raise ToolError(
+                    f"tool '{name}' declares optional parameter '{parameter}' "
+                    f"with {expected!r}, which is not a type"
+                )
+        overlap = set(self.schema) & set(self.optional or {})
+        if overlap:
+            raise ToolError(
+                f"tool '{name}' declares {sorted(overlap)} as both required and optional"
+            )
+        object.__setattr__(self, "optional", dict(self.optional or {}))
+
     def describe(self) -> str:
         """One line describing the tool and its parameters."""
-        parameters = ", ".join(
-            f"{name}: {kind.__name__}" for name, kind in sorted(self.schema.items())
-        )
+        required = [f"{name}: {kind.__name__}" for name, kind in sorted(self.schema.items())]
+        optional = [
+            f"{name}: {kind.__name__} = optional" for name, kind in sorted(self.optional.items())
+        ]
+        parameters = ", ".join(required + optional)
         return f"{self.name}({parameters}) - {self.description}"
 
     def validate(self, arguments: Mapping[str, Any]) -> str | None:
@@ -241,23 +264,27 @@ class ToolSpec:
 
         Checked before the tool runs, so a malformed request is refused rather
         than turned into an obscure TypeError from inside somebody's function.
-        Every declared parameter is required; nothing undeclared is allowed.
+        Every ``schema`` parameter is required; every ``optional`` parameter
+        may be supplied or omitted; nothing declared as neither is allowed.
         """
         if not isinstance(arguments, Mapping):
             return f"arguments must be a mapping, got {type(arguments).__name__}"
 
         supplied = set(arguments)
-        declared = set(self.schema)
+        required = set(self.schema)
+        optional = set(self.optional)
 
-        missing = sorted(declared - supplied)
+        missing = sorted(required - supplied)
         if missing:
             return f"missing required argument(s): {', '.join(missing)}"
 
-        unexpected = sorted(supplied - declared)
+        unexpected = sorted(supplied - required - optional)
         if unexpected:
             return f"unexpected argument(s): {', '.join(unexpected)}"
 
-        for parameter, expected in sorted(self.schema.items()):
+        for parameter, expected in sorted({**self.schema, **self.optional}.items()):
+            if parameter not in arguments:
+                continue  # a declared-optional parameter this call did not supply
             value = arguments[parameter]
             # bool is a subclass of int; accepting True where a number was
             # asked for would silently turn a mistake into a 1.

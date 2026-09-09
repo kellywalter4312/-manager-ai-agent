@@ -236,6 +236,52 @@ class TestMalformedOrHostileDocuments:
             discover_service("x", "http://127.0.0.1:8901")
 
 
+class TestSelfPublishedParameters:
+    """Data-flow-through-execution checkpoint: a service that
+    specifically publishes for Alfred can name its own real inputs
+    directly, in the identical flat shape every other field on an
+    operation entry already uses."""
+
+    def test_a_declared_parameter_is_captured(self, monkeypatch):
+        _serve(monkeypatch, _doc(operations=[
+            {
+                "name": "inspect_shelf", "method": "GET", "path": "/warehouse/{shelf_locator}",
+                "requires_auth": False,
+                "parameters": [{"name": "shelf_locator", "location": "path", "required": True}],
+            },
+        ]))
+        result = discover_service("x", "http://127.0.0.1:8901")
+        param = result.descriptor.operation("inspect_shelf").parameter("shelf_locator")
+        assert param.location == "path"
+        assert param.required is True
+
+    def test_an_optional_parameter_is_captured_as_optional(self, monkeypatch):
+        _serve(monkeypatch, _doc(operations=[
+            {
+                "name": "search_catalogue", "method": "GET", "path": "/search",
+                "requires_auth": False,
+                "parameters": [{"name": "page_token", "location": "query", "required": False}],
+            },
+        ]))
+        result = discover_service("x", "http://127.0.0.1:8901")
+        assert result.descriptor.operation("search_catalogue").parameter("page_token").required is False
+
+    def test_no_parameters_key_at_all_declares_none(self, monkeypatch):
+        _serve(monkeypatch, _doc())
+        result = discover_service("x", "http://127.0.0.1:8901")
+        assert result.descriptor.operation("ping").parameters == ()
+
+    def test_a_malformed_parameters_value_is_treated_as_none_not_a_hard_failure(self, monkeypatch):
+        _serve(monkeypatch, _doc(operations=[
+            {
+                "name": "ping", "method": "GET", "path": "/ping", "requires_auth": False,
+                "parameters": "not-a-list",
+            },
+        ]))
+        result = discover_service("x", "http://127.0.0.1:8901")
+        assert result.descriptor.operation("ping").parameters == ()
+
+
 class TestDuplicateOperationNames:
     def test_a_document_declaring_the_same_operation_twice_is_deduplicated_not_refused(self, monkeypatch):
         _serve(monkeypatch, _doc(operations=[

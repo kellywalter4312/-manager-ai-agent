@@ -36,6 +36,7 @@ holds itself to.
 
 from __future__ import annotations
 
+import re
 import urllib.parse
 from dataclasses import dataclass
 
@@ -47,6 +48,54 @@ from dataclasses import dataclass
 RESERVED_SERVICE_NAMES = frozenset({"null", "gmail"})
 
 _ALLOWED_METHODS: tuple[str, ...] = ("GET", "POST")
+
+# Data-flow-through-execution checkpoint: the closed, small set of places
+# a real, explicit parameter value can actually go in the one HTTP call
+# DeclaredConnection.execute makes - never an open-ended location scheme,
+# since only these three are things this project's own bounded HTTP
+# client (urllib, a fixed base_url + path) can genuinely realise safely.
+_ALLOWED_PARAMETER_LOCATIONS: tuple[str, ...] = ("path", "query", "body")
+
+_PATH_PLACEHOLDER_PATTERN = re.compile(r"\{([a-zA-Z0-9_]+)\}")
+
+
+@dataclass(frozen=True)
+class ServiceParameter:
+    """One input a declared operation genuinely needs or accepts - the
+    service's own published metadata (an OpenAPI ``parameters`` entry's
+    ``name``/``in``/``required``, or its ``requestBody`` schema's own
+    property names), never invented by this project.
+
+    ``location`` says where a real, explicit value for this parameter
+    is injected into the one HTTP request ``DeclaredConnection.execute``
+    makes: ``"path"`` (substituted into a ``{name}`` placeholder in the
+    operation's own declared path), ``"query"`` or ``"body"`` (both flow
+    through the identical GET-query-string/POST-JSON-body handling this
+    project's execution layer already has - the smaller, sufficient
+    representation this checkpoint's own brief explicitly allows, rather
+    than a separate enforced channel for query versus body that the
+    HTTP method itself does not already imply).
+    """
+
+    name: str
+    location: str = "query"
+    required: bool = True
+
+    def __post_init__(self) -> None:
+        name = " ".join(str(self.name).split()).lower().replace(" ", "_")
+        if not name:
+            raise ValueError("ServiceParameter.name must not be empty")
+        object.__setattr__(self, "name", name)
+
+        location = str(self.location).strip().lower()
+        if location not in _ALLOWED_PARAMETER_LOCATIONS:
+            raise ValueError(
+                f"ServiceParameter.location must be one of {_ALLOWED_PARAMETER_LOCATIONS}, "
+                f"got {location!r}"
+            )
+        object.__setattr__(self, "location", location)
+
+        object.__setattr__(self, "required", bool(self.required))
 
 
 @dataclass(frozen=True)
@@ -60,6 +109,11 @@ class ServiceOperation:
     path: str = "/"
     requires_auth: bool = True
     description: str = ""
+    # Data-flow-through-execution checkpoint: every input this operation
+    # declares, each carrying its own real location - empty by default,
+    # so every operation declared before this field existed keeps
+    # working completely unchanged.
+    parameters: "tuple[ServiceParameter, ...]" = ()
 
     def __post_init__(self) -> None:
         name = " ".join(str(self.name).split()).lower().replace(" ", "_")
@@ -94,6 +148,42 @@ class ServiceOperation:
         object.__setattr__(self, "path", path)
 
         object.__setattr__(self, "description", " ".join(str(self.description or "").split()))
+
+        parameters = tuple(self.parameters)
+        names = [p.name for p in parameters]
+        if len(names) != len(set(names)):
+            raise ValueError("ServiceOperation.parameters must have unique names")
+
+        # A "path" parameter is only ever meaningful alongside a real
+        # {name} placeholder the service itself put in this operation's
+        # own path - and a placeholder with nothing declared for it
+        # could never be filled without fabricating a value, so it is
+        # refused here rather than silently sent as the literal text
+        # "{name}". Both directions checked, never assumed consistent.
+        placeholders = set(_PATH_PLACEHOLDER_PATTERN.findall(path))
+        path_parameter_names = {p.name for p in parameters if p.location == "path"}
+        if path_parameter_names - placeholders:
+            raise ValueError(
+                f"ServiceOperation declares path parameter(s) "
+                f"{sorted(path_parameter_names - placeholders)} with no matching "
+                f"'{{name}}' placeholder in path {path!r}"
+            )
+        if placeholders - path_parameter_names:
+            raise ValueError(
+                f"ServiceOperation path {path!r} names placeholder(s) "
+                f"{sorted(placeholders - path_parameter_names)} with no matching declared "
+                "path parameter"
+            )
+
+        object.__setattr__(self, "parameters", parameters)
+
+    def parameter(self, name: str) -> "ServiceParameter | None":
+        normalised = " ".join(str(name).split()).lower().replace(" ", "_")
+        return next((p for p in self.parameters if p.name == normalised), None)
+
+    @property
+    def required_parameters(self) -> "tuple[str, ...]":
+        return tuple(p.name for p in self.parameters if p.required)
 
 
 @dataclass(frozen=True)

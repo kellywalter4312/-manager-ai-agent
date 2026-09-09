@@ -181,6 +181,15 @@ class DeclaredConnection(Connection):
             raise KeyError(f"'{self.name}' declares no operation named '{operation}'")
         return op.method not in _SAFE_METHODS
 
+    def parameters_for(self, operation: str) -> "tuple":
+        """Every real input this operation declares
+        (``ServiceOperation.parameters``) - empty for an unknown
+        operation or one declared with none, never an exception, the
+        identical "nothing more to go on" treatment
+        ``operation_description_for`` already gives."""
+        op = self._descriptor.operation(operation)
+        return op.parameters if op is not None else ()
+
     def operation_description_for(self, operation: str) -> str:
         """The operation's own declared, free-text description - the
         one piece of semantic metadata beyond its bare name a
@@ -233,17 +242,42 @@ class DeclaredConnection(Connection):
                     executed_at=utc_now(),
                 )
 
-        url = self._descriptor.base_url + op.path
+        # Data-flow-through-execution checkpoint: a declared "path"
+        # parameter is substituted into its own {name} placeholder
+        # first - quoted with safe="" so a value can never smuggle an
+        # extra "/" (or anything else) into a new path segment, the
+        # identical "the value cannot become part of the URL's own
+        # structure" discipline the query-string encoding below already
+        # holds itself to. Never a guess: a path parameter with no real
+        # value supplied is an honest failure, not a literal "{name}"
+        # sent to the real service.
+        path = op.path
+        remaining_params = dict(params)
+        for parameter in op.parameters:
+            if parameter.location != "path":
+                continue
+            if parameter.name not in remaining_params:
+                return ConnectionResult(
+                    operation=operation,
+                    status=ConnectionStatus.FAILED,
+                    detail=f"'{operation}' on '{self.name}' needs '{parameter.name}', which was not supplied",
+                    source=self.name,
+                    executed_at=utc_now(),
+                )
+            value = remaining_params.pop(parameter.name)
+            path = path.replace("{" + parameter.name + "}", urllib.parse.quote(str(value), safe=""))
+
+        url = self._descriptor.base_url + path
         headers = {"User-Agent": _USER_AGENT}
         if op.requires_auth and self._account is not None:
             headers["Authorization"] = f"Bearer {self._account.credential}"
 
         body: "bytes | None" = None
         if op.method == "GET":
-            if params:
-                url = url + "?" + urllib.parse.urlencode(params)
+            if remaining_params:
+                url = url + "?" + urllib.parse.urlencode(remaining_params)
         else:
-            body = json.dumps(params).encode("utf-8")
+            body = json.dumps(remaining_params).encode("utf-8")
             headers["Content-Type"] = "application/json"
 
         request = urllib.request.Request(url, data=body, method=op.method, headers=headers)

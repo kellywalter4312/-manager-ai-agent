@@ -19,6 +19,21 @@ connection added later needs no new Tool subclass, only a new
 ``ConnectionActionTool(connection, operation=..., description=...)``
 constructed wherever tools are granted (see ``scripts/control_center.py``
 for the identical precedent Stage 14/15 already set).
+
+**Data-flow-through-execution checkpoint: real arguments now actually
+reach the connection.** Every earlier caller passed ``{}`` and this
+tool used to silently discard even that, always calling
+``execute(operation)`` with no parameters at all - harmless while
+nothing ever supplied any, but a hard blocker for a step that
+genuinely needs to pass along a value (its own, or one an earlier step
+produced). ``parameters`` (the operation's own declared
+``ServiceParameter`` list) becomes this Tool's declared schema - every
+required parameter in ``ToolSpec.schema``, every optional one in
+``ToolSpec.optional`` - so ``ToolSet.invoke``, the one real governance
+boundary every tool call already crosses, accepts exactly those names
+(rejecting anything undeclared) while still allowing an optional one to
+be omitted. Defaults to empty, so every existing caller that never
+passes it is completely unaffected.
 """
 
 from __future__ import annotations
@@ -38,17 +53,30 @@ def tool_name_for(operation: str) -> str:
 class ConnectionActionTool(Tool):
     """One governed action through one Connection."""
 
-    def __init__(self, connection: Connection, *, operation: str, description: str) -> None:
+    def __init__(
+        self,
+        connection: Connection,
+        *,
+        operation: str,
+        description: str,
+        parameters: "tuple" = (),
+    ) -> None:
         self._connection = connection
         self._operation = operation
         self._description = description
+        self._parameters = tuple(parameters)
 
     @property
     def spec(self) -> ToolSpec:
-        return ToolSpec(name=tool_name_for(self._operation), description=self._description, schema={})
+        schema = {p.name: str for p in self._parameters if p.required}
+        optional = {p.name: str for p in self._parameters if not p.required}
+        return ToolSpec(
+            name=tool_name_for(self._operation), description=self._description,
+            schema=schema, optional=optional,
+        )
 
     def run(self, **arguments: object) -> str:
-        result = self._connection.execute(self._operation)
+        result = self._connection.execute(self._operation, **arguments)
         if not result.ok:
             raise RuntimeError(result.detail or f"{self._operation} did not succeed")
         return result.detail or f"{self._operation} succeeded"

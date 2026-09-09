@@ -771,6 +771,13 @@ OBJECTIVE_SYSTEM_PROMPT = (
     "language, and must never name a specific person, agent or "
     "specialist to do it - deciding who or how is not your job here, "
     "only what should happen next. "
+    "If completing the next step genuinely requires a specific value "
+    "(an identifier, a name, a number) that the evidence already "
+    "reports, state it explicitly in the next step's own wording as "
+    "name=value, using the exact value already reported - never a "
+    "value you are guessing at. If no such value has actually been "
+    "reported yet, do not invent one; say the objective needs input "
+    "from the person instead. "
     "Reply with a single JSON object and nothing else."
 )
 

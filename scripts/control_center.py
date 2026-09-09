@@ -408,6 +408,7 @@ def _safe_connection_tools(connection: Connection) -> "list[ConnectionActionTool
     service needs no change here at all.
     """
     requires_confirmation = getattr(connection, "requires_confirmation_for", None)
+    parameters_for = getattr(connection, "parameters_for", None)
     tools: "list[ConnectionActionTool]" = []
     for operation in connection.supported_operations:
         if requires_confirmation is not None and requires_confirmation(operation):
@@ -418,6 +419,13 @@ def _safe_connection_tools(connection: Connection) -> "list[ConnectionActionTool
                 operation=operation,
                 description=f"perform the safe, already-declared '{operation}' action "
                 f"through the '{connection.name}' connection",
+                # Data-flow-through-execution checkpoint: the operation's
+                # own declared inputs (empty for a connection with
+                # nothing more precise to offer, Gmail/Null -
+                # unchanged), so a real, explicit value a step genuinely
+                # has can actually reach the connection, never merely a
+                # decision about which operation to call.
+                parameters=parameters_for(operation) if parameters_for is not None else (),
             )
         )
     return tools
@@ -1356,6 +1364,20 @@ def run_connections_command(centre: "ControlCenter", rest: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _format_parameters(op: "ServiceOperation") -> str:
+    """One operation's own declared inputs, rendered for a person to
+    read - the identical real metadata ``connected_action``
+    (``src/manager/capabilities.py``) and ``DeclaredConnection.execute``
+    actually resolve values against, never a separate description of
+    it. Empty for an operation that declares none."""
+    if not op.parameters:
+        return ""
+    parts = [
+        f"{p.name} ({p.location}{'' if p.required else ', optional'})" for p in op.parameters
+    ]
+    return " [" + ", ".join(parts) + "]"
+
+
 def run_services_command(centre: "ControlCenter", rest: str) -> str:
     """Decide what to answer for the ``services`` verb - declare,
     forget, or list what open-ended service discovery has registered so
@@ -1397,7 +1419,10 @@ def run_services_command(centre: "ControlCenter", rest: str) -> str:
             lines.append(descriptor.description)
         for op in descriptor.operations:
             auth = "auth required" if op.requires_auth else "open"
-            lines.append(f"  {op.name} ({op.method} {op.path}, {auth})" + (f" - {op.description}" if op.description else ""))
+            lines.append(
+                f"  {op.name} ({op.method} {op.path}, {auth}){_format_parameters(op)}"
+                + (f" - {op.description}" if op.description else "")
+            )
         return "\n".join(lines)
 
     action = rest_args[0].lower()
@@ -1443,7 +1468,10 @@ def run_services_command(centre: "ControlCenter", rest: str) -> str:
         )
         for op in d.operations:
             auth = "auth required" if op.requires_auth else "open"
-            lines.append(f"    {op.name} ({op.method} {op.path}, {auth})" + (f" - {op.description}" if op.description else ""))
+            lines.append(
+                f"    {op.name} ({op.method} {op.path}, {auth}){_format_parameters(op)}"
+                + (f" - {op.description}" if op.description else "")
+            )
         lines.append("")
         lines.append("Nothing has been declared or connected yet - discovery only reads and validates.")
         lines.append("Review the above, then declare it yourself (still requires confirmation) with:")

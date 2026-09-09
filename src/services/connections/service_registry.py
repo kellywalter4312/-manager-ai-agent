@@ -26,7 +26,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from src.providers.service_descriptor import ServiceDescriptor, ServiceOperation
+from src.providers.service_descriptor import ServiceDescriptor, ServiceOperation, ServiceParameter
 
 # Its own file, alongside credentials' own two - one axis's declared
 # state never shares a file with another's, the identical per-concern
@@ -72,6 +72,19 @@ def load_service_registry(path: "Path | str" = DEFAULT_SERVICES_PATH) -> "dict[s
                     path=op.get("path", "/"),
                     requires_auth=bool(op.get("requires_auth", True)),
                     description=op.get("description", ""),
+                    # Data-flow-through-execution checkpoint: absent
+                    # entirely in a file this project wrote before this
+                    # field existed, which round-trips as "declares no
+                    # parameters" - never a crash, never a fabricated
+                    # requirement.
+                    parameters=tuple(
+                        ServiceParameter(
+                            name=param["name"],
+                            location=param.get("location", "query"),
+                            required=bool(param.get("required", True)),
+                        )
+                        for param in op.get("parameters", [])
+                    ),
                 )
                 for op in entry.get("operations", [])
             )
@@ -109,6 +122,10 @@ def save_service_registry(
                         "path": op.path,
                         "requires_auth": op.requires_auth,
                         "description": op.description,
+                        "parameters": [
+                            {"name": p.name, "location": p.location, "required": p.required}
+                            for p in op.parameters
+                        ],
                     }
                     for op in descriptor.operations
                 ],

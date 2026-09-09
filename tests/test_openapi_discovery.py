@@ -113,7 +113,15 @@ class TestOpenApi3Discovery:
 
 
 class TestOpenApiUnsupportedShapesAreSkippedNotFabricated:
-    def test_a_parameterised_path_is_skipped_not_represented_literally(self, monkeypatch):
+    def test_an_undeclared_parameterised_path_is_skipped_not_represented_literally(self, monkeypatch):
+        """A {id}-style placeholder with no matching 'in: path'
+        parameter declared for it is refused by ServiceOperation's own
+        construction (see test_service_descriptor.py) - caught here by
+        the identical except ValueError every other malformed operation
+        already goes through, never fabricated as the literal text
+        '{id}'. (Data-flow-through-execution checkpoint: a *properly*
+        declared path parameter is genuinely captured now - see
+        TestParameterExtraction below.)"""
         _serve_at(monkeypatch, {OPENAPI_URL: _openapi3_doc(paths={
             "/orders/{id}": {"get": {"operationId": "get_order"}},
             "/ping": {"get": {"operationId": "ping"}},
@@ -175,6 +183,142 @@ class TestAuthorizationExtraction:
         _serve_at(monkeypatch, {OPENAPI_URL: _openapi3_doc()})
         result = discover_service("x", BASE)
         assert result.descriptor.operation("ping").requires_auth is False
+
+
+class TestParameterExtraction:
+    """Data-flow-through-execution checkpoint: real inputs an OpenAPI
+    document declares for an operation - query, path, and JSON request
+    body fields - become that operation's own ``parameters``, read
+    straight from the document, never invented and never a special
+    case for a particular name."""
+
+    def test_a_required_query_parameter_is_captured(self, monkeypatch):
+        _serve_at(monkeypatch, {OPENAPI_URL: _openapi3_doc(paths={
+            "/search": {"get": {
+                "operationId": "search_catalogue",
+                "parameters": [{"name": "keyword", "in": "query", "required": True}],
+            }},
+        })})
+        result = discover_service("x", BASE)
+        param = result.descriptor.operation("search_catalogue").parameter("keyword")
+        assert param.location == "query"
+        assert param.required is True
+
+    def test_an_optional_query_parameter_is_captured_as_optional(self, monkeypatch):
+        _serve_at(monkeypatch, {OPENAPI_URL: _openapi3_doc(paths={
+            "/search": {"get": {
+                "operationId": "search_catalogue",
+                "parameters": [{"name": "page_token", "in": "query", "required": False}],
+            }},
+        })})
+        result = discover_service("x", BASE)
+        param = result.descriptor.operation("search_catalogue").parameter("page_token")
+        assert param.required is False
+
+    def test_a_properly_declared_path_parameter_is_now_genuinely_captured(self, monkeypatch):
+        """The other half of TestOpenApiUnsupportedShapesAreSkippedNotFabricated
+        above: a {placeholder} the document *does* explain, via a real
+        'in: path' parameter entry, is no longer dropped."""
+        _serve_at(monkeypatch, {OPENAPI_URL: _openapi3_doc(paths={
+            "/warehouse/{shelf_locator}": {"get": {
+                "operationId": "inspect_shelf",
+                "parameters": [{"name": "shelf_locator", "in": "path", "required": True}],
+            }},
+        })})
+        result = discover_service("x", BASE)
+        assert result.descriptor.operation_names == ("inspect_shelf",)
+        param = result.descriptor.operation("inspect_shelf").parameter("shelf_locator")
+        assert param.location == "path"
+        assert param.required is True
+
+    def test_a_path_parameter_is_required_regardless_of_a_false_required_flag(self, monkeypatch):
+        """OpenAPI's own rule: every path parameter is required, no
+        matter what (or whether) the document's own 'required' key
+        says - a placeholder can never be safely left empty."""
+        _serve_at(monkeypatch, {OPENAPI_URL: _openapi3_doc(paths={
+            "/warehouse/{shelf_locator}": {"get": {
+                "operationId": "inspect_shelf",
+                "parameters": [{"name": "shelf_locator", "in": "path", "required": False}],
+            }},
+        })})
+        result = discover_service("x", BASE)
+        assert result.descriptor.operation("inspect_shelf").parameter("shelf_locator").required is True
+
+    def test_a_required_request_body_field_is_captured_as_body(self, monkeypatch):
+        _serve_at(monkeypatch, {OPENAPI_URL: _openapi3_doc(paths={
+            "/entries": {"post": {
+                "operationId": "create_entry",
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "required": ["payload_reference"],
+                                "properties": {"payload_reference": {"type": "string"}},
+                            },
+                        },
+                    },
+                },
+            }},
+        })})
+        result = discover_service("x", BASE)
+        param = result.descriptor.operation("create_entry").parameter("payload_reference")
+        assert param.location == "body"
+        assert param.required is True
+
+    def test_a_request_body_field_absent_from_required_is_captured_as_optional(self, monkeypatch):
+        _serve_at(monkeypatch, {OPENAPI_URL: _openapi3_doc(paths={
+            "/entries": {"post": {
+                "operationId": "create_entry",
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "required": ["payload_reference"],
+                                "properties": {
+                                    "payload_reference": {"type": "string"},
+                                    "note": {"type": "string"},
+                                },
+                            },
+                        },
+                    },
+                },
+            }},
+        })})
+        result = discover_service("x", BASE)
+        assert result.descriptor.operation("create_entry").parameter("note").required is False
+
+    def test_a_header_parameter_is_never_captured(self, monkeypatch):
+        """Only query and path are read from 'parameters' - a header or
+        cookie is a real OpenAPI location this bounded execution layer
+        has no safe place to put, so it is simply absent, never
+        fabricated as something it is not."""
+        _serve_at(monkeypatch, {OPENAPI_URL: _openapi3_doc(paths={
+            "/ping": {"get": {
+                "operationId": "ping",
+                "parameters": [{"name": "X-Trace-Id", "in": "header", "required": True}],
+            }},
+        })})
+        result = discover_service("x", BASE)
+        assert result.descriptor.operation("ping").parameters == ()
+
+    def test_an_operation_with_no_parameters_declares_none(self, monkeypatch):
+        _serve_at(monkeypatch, {OPENAPI_URL: _openapi3_doc()})
+        result = discover_service("x", BASE)
+        assert result.descriptor.operation("ping").parameters == ()
+
+    def test_an_arbitrary_parameter_name_works_generically(self, monkeypatch):
+        """No special case for 'id'/'key'/'resource_id' - any name the
+        document itself declares is captured identically."""
+        _serve_at(monkeypatch, {OPENAPI_URL: _openapi3_doc(paths={
+            "/search": {"get": {
+                "operationId": "search_catalogue",
+                "parameters": [{"name": "zzz_totally_arbitrary_field_47", "in": "query", "required": True}],
+            }},
+        })})
+        result = discover_service("x", BASE)
+        assert result.descriptor.operation("search_catalogue").parameter(
+            "zzz_totally_arbitrary_field_47"
+        ).required is True
 
 
 class TestUntrustedOpenApiContent:

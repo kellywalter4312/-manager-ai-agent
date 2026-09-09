@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 
-from src.providers.service_descriptor import ServiceDescriptor, ServiceOperation
+from src.providers.service_descriptor import ServiceDescriptor, ServiceOperation, ServiceParameter
 from src.services.connections.service_registry import (
     declare_service,
     forget_service,
@@ -116,3 +116,82 @@ class TestSaveOverwritesWhole:
         save_service_registry({"b": _descriptor("b")}, path)
         registry = load_service_registry(path)
         assert set(registry) == {"b"}
+
+
+class TestParameterRoundTrip:
+    """Data-flow-through-execution checkpoint: a real bug this
+    checkpoint's own live verification caught - ServiceOperation's new
+    ``parameters`` field was silently dropped on save/load, which broke
+    a path-parameterised operation the moment it was reloaded (its own
+    {placeholder} then had no matching declared parameter at all).
+    Every declared parameter must survive a real file round trip."""
+
+    def test_a_path_parameter_survives_a_real_round_trip(self, tmp_path):
+        path = tmp_path / "services.json"
+        descriptor = ServiceDescriptor(
+            name="x", base_url="http://x.test",
+            operations=(
+                ServiceOperation(
+                    name="inspect_shelf", method="GET", path="/warehouse/{shelf_locator}",
+                    requires_auth=False,
+                    parameters=(ServiceParameter(name="shelf_locator", location="path", required=True),),
+                ),
+            ),
+        )
+        declare_service(descriptor, path)
+
+        reloaded = load_service_registry(path)["x"].operation("inspect_shelf")
+        assert reloaded.parameter("shelf_locator").location == "path"
+        assert reloaded.parameter("shelf_locator").required is True
+
+    def test_an_optional_query_parameter_survives_a_real_round_trip(self, tmp_path):
+        path = tmp_path / "services.json"
+        descriptor = ServiceDescriptor(
+            name="x", base_url="http://x.test",
+            operations=(
+                ServiceOperation(
+                    name="search_catalogue", method="GET", path="/search", requires_auth=False,
+                    parameters=(ServiceParameter(name="page_token", location="query", required=False),),
+                ),
+            ),
+        )
+        declare_service(descriptor, path)
+
+        reloaded = load_service_registry(path)["x"].operation("search_catalogue")
+        assert reloaded.parameter("page_token").required is False
+
+    def test_a_body_parameter_survives_a_real_round_trip(self, tmp_path):
+        path = tmp_path / "services.json"
+        descriptor = ServiceDescriptor(
+            name="x", base_url="http://x.test",
+            operations=(
+                ServiceOperation(
+                    name="create_entry", method="POST", path="/entries", requires_auth=True,
+                    parameters=(ServiceParameter(name="payload_reference", location="body", required=True),),
+                ),
+            ),
+        )
+        declare_service(descriptor, path)
+
+        reloaded = load_service_registry(path)["x"].operation("create_entry")
+        assert reloaded.parameter("payload_reference").location == "body"
+
+    def test_an_operation_declared_before_this_field_existed_still_loads(self, tmp_path):
+        """A file with no 'parameters' key at all on an operation - the
+        exact shape every file this project wrote before this
+        checkpoint has - still loads, with no parameters, never a
+        crash."""
+        path = tmp_path / "services.json"
+        path.write_text(
+            json.dumps({
+                "services": [
+                    {
+                        "name": "x", "base_url": "http://x.test",
+                        "operations": [{"name": "ping", "method": "GET", "path": "/ping"}],
+                    },
+                ],
+            }),
+            encoding="utf-8",
+        )
+        reloaded = load_service_registry(path)["x"].operation("ping")
+        assert reloaded.parameters == ()

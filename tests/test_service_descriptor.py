@@ -17,6 +17,7 @@ from src.providers.service_descriptor import (
     RESERVED_SERVICE_NAMES,
     ServiceDescriptor,
     ServiceOperation,
+    ServiceParameter,
 )
 
 
@@ -114,3 +115,83 @@ class TestServiceDescriptorValidation:
         d = ServiceDescriptor(name="x", base_url="http://x", operations=(self._op(),))
         with pytest.raises(Exception):
             d.name = "y"  # type: ignore[misc]
+
+
+class TestServiceParameterValidation:
+    """Data-flow-through-execution checkpoint: the small, closed
+    representation of one real input an operation declares - name,
+    where it goes (path/query/body), and whether it is required."""
+
+    def test_defaults_to_query_and_required(self):
+        p = ServiceParameter(name="anything_at_all")
+        assert p.location == "query"
+        assert p.required is True
+
+    def test_name_is_normalised_like_an_operation_name(self):
+        p = ServiceParameter(name="Resource Key")
+        assert p.name == "resource_key"
+
+    def test_an_unrecognised_location_is_refused(self):
+        with pytest.raises(ValueError):
+            ServiceParameter(name="x", location="header")
+
+    def test_optional_is_respected(self):
+        p = ServiceParameter(name="x", required=False)
+        assert p.required is False
+
+    def test_parameters_are_frozen(self):
+        p = ServiceParameter(name="x")
+        with pytest.raises(Exception):
+            p.name = "y"  # type: ignore[misc]
+
+
+class TestServiceOperationParameters:
+    """ServiceOperation's own bookkeeping over its declared parameters -
+    empty by default (every operation declared before this field
+    existed is unaffected), and consistent with its own path."""
+
+    def test_empty_by_default(self):
+        op = ServiceOperation(name="x")
+        assert op.parameters == ()
+        assert op.required_parameters == ()
+
+    def test_a_path_parameter_requires_a_matching_placeholder(self):
+        with pytest.raises(ValueError):
+            ServiceOperation(
+                name="x", path="/items",
+                parameters=(ServiceParameter(name="widget_id", location="path"),),
+            )
+
+    def test_a_placeholder_requires_a_matching_declared_path_parameter(self):
+        with pytest.raises(ValueError):
+            ServiceOperation(name="x", path="/items/{widget_id}", parameters=())
+
+    def test_an_arbitrarily_named_path_parameter_works_generically(self):
+        """No special case for 'id' - any declared name that matches
+        its own placeholder is accepted."""
+        op = ServiceOperation(
+            name="x", path="/warehouses/{shelf_locator}",
+            parameters=(ServiceParameter(name="shelf_locator", location="path"),),
+        )
+        assert op.parameter("shelf_locator").location == "path"
+
+    def test_duplicate_parameter_names_are_refused(self):
+        with pytest.raises(ValueError):
+            ServiceOperation(
+                name="x",
+                parameters=(ServiceParameter(name="a"), ServiceParameter(name="a")),
+            )
+
+    def test_required_parameters_property_excludes_optional_ones(self):
+        op = ServiceOperation(
+            name="x",
+            parameters=(
+                ServiceParameter(name="required_one", required=True),
+                ServiceParameter(name="optional_one", required=False),
+            ),
+        )
+        assert op.required_parameters == ("required_one",)
+
+    def test_parameter_lookup_is_honest_absence_for_an_unknown_name(self):
+        op = ServiceOperation(name="x")
+        assert op.parameter("does_not_exist") is None
