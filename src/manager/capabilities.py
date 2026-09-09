@@ -4933,7 +4933,14 @@ def connected_action(request: CapabilityRequest) -> TaskResult:
     parameters = parameters_for(operation) if parameters_for is not None else ()
     params: "dict[str, str]" = {}
     if parameters:
-        available = _declared_argument_values(request.task.description)
+        # Only the request's own intent text, never the routing marker
+        # itself (the identical exclusion _select_operation's own
+        # intent-word scoring already applies) - otherwise a service
+        # that happened to declare a required parameter literally named
+        # e.g. "account" could be silently "satisfied" by the marker's
+        # own boilerplate ("...connected account: ...") rather than
+        # anything the person or an earlier step actually supplied.
+        available = _declared_argument_values(_after_marker(request.task.description, CONNECTED_ACTION_MARKERS))
         missing = [p.name for p in parameters if p.required and p.name not in available]
         if missing:
             return TaskResult.failure(

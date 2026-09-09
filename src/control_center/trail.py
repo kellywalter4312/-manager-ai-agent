@@ -150,12 +150,20 @@ def observe(
     # overwhelming majority of ordinary requests) leaves the trail exactly
     # as it was before this checkpoint existed.
     if objective_outcome is not None and len(objective_outcome.steps) > 1:
+        # Goal-level planning checkpoint: the same summary as before,
+        # with the real planned-step detail ObjectiveOutcome.step_summaries()
+        # now derives appended - which operation each step reached, and
+        # (the genuine dependency evidence) whether it carried forward a
+        # value an earlier step's own real output actually produced.
+        # Nothing here is re-derived independently; it is read straight
+        # from the identical ObjectiveOutcome this call already produced.
+        plan = " -> ".join(objective_outcome.step_summaries())
         steps.append(
             TrailStep(
                 label="Objective pursuit",
                 detail=(
                     f"{objective_outcome.status.label} after "
-                    f"{len(objective_outcome.steps)} step(s)"
+                    f"{len(objective_outcome.steps)} step(s): {plan}"
                 ),
                 actor=_manager_name(manager),
             )

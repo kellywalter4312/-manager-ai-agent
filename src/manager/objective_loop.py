@@ -103,13 +103,47 @@ class ObjectiveStatus(str, Enum):
 class ObjectiveStep:
     """One attempt within the loop: the task it was given, and the real
     result that came back - never collapsed into a summary, so a caller
-    that wants the full story can read every step exactly as it ran."""
+    that wants the full story can read every step exactly as it ran.
+
+    **Goal-level planning checkpoint: two read-only views, never a
+    second store.** Both properties below are *derived*, purely for
+    observability (Control Center, a caller trying to understand what a
+    pursuit actually did) - neither one changes what
+    ``pursue_objective`` decides or executes, and neither duplicates a
+    rule that already exists elsewhere. ``operation`` reads the
+    identical payload ``connected_action`` (``src/manager/
+    capabilities.py``) already populates; ``declared_values`` reuses
+    the identical, single explicit-value extraction
+    ``connected_action`` itself resolves a real operation parameter
+    from (``_declared_argument_values``) - imported lazily, the same
+    reason every other cross-module import in this file already is.
+    """
 
     task: Task
     result: TaskResult
 
     def describe(self) -> str:
         return f"{self.task.description!r} -> {self.result.status.value}"
+
+    @property
+    def operation(self) -> "str | None":
+        """Which discovered operation this step actually reached, if
+        any - ``None`` for a step ``connected_action`` never answered
+        (handled by a different capability, or refused before ever
+        selecting one)."""
+        payload = self.result.payload or {}
+        operation = payload.get("operation")
+        return operation if isinstance(operation, str) else None
+
+    @property
+    def declared_values(self) -> "dict[str, str]":
+        """Every explicit ``name=value`` this step's own request text
+        stated - read here only for observability, never a second
+        extraction rule and never used to decide anything this class
+        itself does."""
+        from src.manager.capabilities import _declared_argument_values
+
+        return _declared_argument_values(self.task.description)
 
 
 @dataclass(frozen=True)
@@ -130,6 +164,34 @@ class ObjectiveOutcome:
 
     def describe(self) -> str:
         return f"objective={self.status.value} steps={len(self.steps)}"
+
+    def step_summaries(self) -> "tuple[str, ...]":
+        """One line per step: the operation it reached (or
+        "conversation" for a step that reached something else), and -
+        the genuine dependency evidence this checkpoint adds - whether
+        any value it explicitly declared actually appeared in an
+        *earlier* step's own real output. Built entirely from what each
+        step already recorded; nothing here is re-executed, inferred
+        from wording, or guessed. A step with no operation and nothing
+        carried forward reports just its own label - the identical
+        shape a genuinely simple, one-step pursuit already has.
+        """
+        summaries: "list[str]" = []
+        for index, step in enumerate(self.steps):
+            label = step.operation or "conversation"
+            carried = [
+                f"{name}={value}"
+                for name, value in step.declared_values.items()
+                if any(
+                    value and value in (earlier.result.output or "")
+                    for earlier in self.steps[:index]
+                )
+            ]
+            if carried:
+                summaries.append(f"{label} (using {', '.join(carried)} from an earlier step)")
+            else:
+                summaries.append(label)
+        return tuple(summaries)
 
 
 def _agent_name(manager: ManagerAgent) -> str:

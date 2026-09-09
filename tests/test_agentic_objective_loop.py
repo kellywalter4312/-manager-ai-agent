@@ -551,6 +551,16 @@ class TestStepToStepDataFlowThroughRealOperations:
                     description="permanently deactivates a located resource",
                     parameters=(ServiceParameter(name="resource_key", location="body", required=True),),
                 ),
+                # Goal-level planning checkpoint: a third safe hop, so a
+                # genuine A -> B -> C chain (every step safe) can be
+                # proven complete end to end, not merely two steps -
+                # confirm_activity needs a value only retrieve_details'
+                # own real response ever produces.
+                ServiceOperation(
+                    name="confirm_activity", method="GET", path="/confirm",
+                    requires_auth=False, description="confirms a recorded activity entry",
+                    parameters=(ServiceParameter(name="activity_id", location="query", required=True),),
+                ),
             ),
         )
         service_registry_module.declare_service(descriptor, service_registry_module.DEFAULT_SERVICES_PATH)
@@ -565,8 +575,8 @@ class TestStepToStepDataFlowThroughRealOperations:
                 80, channel, conversation,
             )
 
-    def _wired_with_connection(self, objective_script):
-        runtime, manager, channel, conversation = real_system(connection_provider="planningfixture")
+    def _wired_with_connection(self, objective_script, *, connection_provider="planningfixture"):
+        runtime, manager, channel, conversation = real_system(connection_provider=connection_provider)
         provider = ScriptedProvider(objective_script)
         brain = LLMManagerBrain(provider, personality=runtime.identity.personality)
         manager.brain = brain
@@ -678,3 +688,182 @@ class TestStepToStepDataFlowThroughRealOperations:
         # scripts/control_center.py::_safe_connection_tools), so a
         # correctly-resolved parameter still could not authorize it.
         assert calls == ["http://127.0.0.1:9299/locate"]
+
+
+# ---------------------------------------------------------------------------
+# 9. Goal-level planning across discovered operations - deliberately
+#    pursuing a multi-step goal, using the real parameter/data-flow
+#    mechanism from the prior checkpoint. No second planner: every test
+#    below still runs through the unmodified pursue_objective while
+#    loop, reusing TestStepToStepDataFlowThroughRealOperations' own
+#    fixture and helpers - only ObjectiveStep/ObjectiveOutcome gained
+#    two small, derived, purely observational additions (operation,
+#    declared_values, step_summaries()), never a parallel
+#    representation.
+# ---------------------------------------------------------------------------
+
+
+class TestGoalLevelPlanning(TestStepToStepDataFlowThroughRealOperations):
+    def test_a_one_step_goal_does_not_manufacture_extra_steps(self, monkeypatch):
+        self._declare()
+        calls: list = []
+        self._stub_http(monkeypatch, calls=calls, responses={"/locate": b'{"resource_key": "res-9f2"}'})
+
+        _, manager, _, _, provider = self._wired_with_connection([
+            '{"status":"complete","final_answer":"the item was located, nothing more was needed"}',
+        ])
+        outcome = pursue_objective(manager, Task(description="check my connected account: locate the item"))
+
+        assert outcome.status is ObjectiveStatus.COMPLETED
+        assert len(outcome.steps) == 1
+        assert outcome.step_summaries() == ("locate_item",)
+        assert calls == ["http://127.0.0.1:9299/locate"]
+
+    def test_a_genuine_three_step_chain_completes_with_real_data_flow_at_each_hop(self, monkeypatch):
+        """The central proof of this checkpoint: a goal that genuinely
+        needs three operations, in order, each one's real output
+        feeding the next one's real request - not merely two."""
+        self._declare()
+        calls: list = []
+        self._stub_http(monkeypatch, calls=calls, responses={
+            "/locate": b'{"resource_key": "res-9f2"}',
+            "/details/res-9f2": b'{"resource_key": "res-9f2", "activity_id": "act-501"}',
+            "/confirm": b'{"activity_id": "act-501", "confirmed": true}',
+        })
+
+        _, manager, _, _, provider = self._wired_with_connection([
+            '{"status":"continue","next_step":'
+            '"check my connected account: retrieve details for resource_key=res-9f2"}',
+            '{"status":"continue","next_step":'
+            '"check my connected account: confirm the activity for activity_id=act-501"}',
+            '{"status":"complete","final_answer":"the whole chain was completed and confirmed"}',
+        ])
+        outcome = pursue_objective(manager, Task(description="check my connected account: locate the item"))
+
+        assert outcome.status is ObjectiveStatus.COMPLETED
+        assert len(outcome.steps) == 3
+        # Ordering: operation A ran, then B, then C - never any other order.
+        assert [step.operation for step in outcome.steps] == [
+            "locate_item", "retrieve_details", "confirm_activity",
+        ]
+        # Dependency, proven as behaviour at every hop: each real HTTP
+        # request genuinely carried the previous step's real value.
+        assert calls == [
+            "http://127.0.0.1:9299/locate",
+            "http://127.0.0.1:9299/details/res-9f2",
+            "http://127.0.0.1:9299/confirm?activity_id=act-501",
+        ]
+        assert outcome.step_summaries() == (
+            "locate_item",
+            "retrieve_details (using resource_key=res-9f2 from an earlier step)",
+            "confirm_activity (using activity_id=act-501 from an earlier step)",
+        )
+        assert outcome.result.output == "the whole chain was completed and confirmed"
+
+    def test_an_ambiguous_next_step_does_not_arbitrarily_pick_an_operation(self, monkeypatch):
+        """Goal-level planning must not paper over an ambiguity
+        _select_operation itself already refuses to guess at -
+        connected_action's own honest refusal becomes this step's real
+        evidence, and the Brain (scripted here, but reachable by a real
+        one identically) honestly asks rather than the loop silently
+        choosing one for it."""
+        runtime, manager, channel, conversation = real_system()
+        from src.control_center.observer import ControlCenter
+        from scripts.control_center import run_command
+
+        centre = ControlCenter(runtime, manager)
+        run_command(
+            centre,
+            "services ambiguousfixture declare http://127.0.0.1:9299 "
+            "get_status:GET:/a:open,set_status:GET:/b:open",
+            80, channel, conversation,
+        )
+        calls: list = []
+        self._stub_http(monkeypatch, calls=calls, responses={})
+
+        _, manager2, _, _, provider2 = self._wired_with_connection(
+            ['{"status":"needs_input","question":"which status action do you mean?"}'],
+            connection_provider="ambiguousfixture",
+        )
+        outcome = pursue_objective(manager2, Task(description="check my connected account: status"))
+
+        assert outcome.status is ObjectiveStatus.NEEDS_INPUT
+        assert calls == []
+
+    def test_an_impossible_goal_is_reported_honestly_not_invented(self, monkeypatch):
+        self._declare()
+        calls: list = []
+        self._stub_http(monkeypatch, calls=calls, responses={})
+
+        _, manager, _, _, provider = self._wired_with_connection([
+            '{"status":"failed","final_answer":'
+            '"none of the available actions can compose a symphony"}',
+        ])
+        outcome = pursue_objective(
+            manager, Task(description="check my connected account: compose a symphony about the item"),
+        )
+
+        assert outcome.status is ObjectiveStatus.FAILED
+        # No operation was ever invented or attempted for a request
+        # nothing declared could satisfy.
+        assert calls == []
+
+    def test_a_governed_consequential_step_still_records_the_correct_result_and_audit_state(
+        self, monkeypatch, tmp_path,
+    ):
+        """The other half of the consequential-governance test above:
+        planning correctly identifies the step is needed and correctly
+        refuses to run it - but the identical operation still succeeds
+        for real, and is still correctly audited, through the one
+        governed path that can actually run it."""
+        self._declare()
+        calls: list = []
+        self._stub_http(monkeypatch, calls=calls, responses={
+            "/locate": b'{"resource_key": "res-9f2"}',
+            "/deactivate": b'{"deactivated": "res-9f2"}',
+        })
+
+        _, manager, _, _, provider = self._wired_with_connection([
+            '{"status":"continue","next_step":'
+            '"check my connected account: deactivate the item resource_key=res-9f2"}',
+            '{"status":"failed","final_answer":'
+            '"deactivating requires your explicit confirmation in Control Center"}',
+        ])
+        outcome = pursue_objective(manager, Task(description="check my connected account: locate the item"))
+        assert outcome.status is ObjectiveStatus.FAILED
+
+        # The plan named the right operation - it just could not run it
+        # through conversation. Now run the identical operation for
+        # real, through Control Center's own confirmed, audited path.
+        from scripts.serve_ui import route_command
+        import json as jsonlib
+
+        action_log_path = tmp_path / "action_log.json"
+        system = _live_system(*real_system(connection_provider="planningfixture"))
+        command = "services planningfixture execute deactivate_item resource_key=res-9f2"
+        _, pending_body, _ = route_command(command, None, system, action_log_path=action_log_path)
+        token = jsonlib.loads(pending_body)["confirm_token"]
+        status, confirmed_body, _ = route_command(command, token, system, action_log_path=action_log_path)
+
+        assert status == 200
+        confirmed = jsonlib.loads(confirmed_body)
+        assert confirmed["requires_confirmation"] is False
+        assert "succeeded" in confirmed["result"]
+        assert calls[-1] == "http://127.0.0.1:9299/deactivate"
+
+        from src.services.audit.action_log import load_action_log
+
+        entries = load_action_log(action_log_path)
+        assert entries[-1].succeeded is True
+        assert entries[-1].capability == "admin.services"
+
+
+def _live_system(runtime, manager, channel, conversation):
+    from scripts.serve_ui import LiveSystem
+    from src.control_center.observer import ControlCenter
+    import threading
+
+    return LiveSystem(
+        runtime=runtime, manager=manager, channel=channel, conversation=conversation,
+        centre=ControlCenter(runtime, manager), lock=threading.Lock(),
+    )

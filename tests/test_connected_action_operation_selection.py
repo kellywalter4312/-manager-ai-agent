@@ -517,6 +517,27 @@ class TestParameterResolutionThroughConnectedAction:
         assert result.succeeded
         assert result.payload["operation"] == "retrieve_details"
 
+    def test_the_routing_markers_own_wording_never_falsely_satisfies_a_parameter(self):
+        """A real correctness gap found and fixed during the goal-level
+        planning checkpoint: every CONNECTED_ACTION_MARKERS phrase
+        itself contains 'account:' - a service that happens to declare
+        a required parameter literally named 'account' must never have
+        it silently 'satisfied' by that boilerplate rather than
+        anything the person (or an earlier step) actually supplied."""
+        connection = _connection(
+            ServiceOperation(
+                name="check_balance", method="GET", path="/balance", requires_auth=False,
+                description="reports a balance for a named account",
+                parameters=(ServiceParameter(name="account", location="query", required=True),),
+            ),
+        )
+        manager = _manager_for(connection)
+
+        result = manager.handle_task(Task(description="check my connected account: check the balance"))
+
+        assert not result.succeeded
+        assert "account" in result.error
+
     def test_a_missing_required_parameter_refuses_honestly_naming_it(self):
         connection = _connection(
             ServiceOperation(
