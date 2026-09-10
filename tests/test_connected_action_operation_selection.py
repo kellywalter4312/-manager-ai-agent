@@ -49,6 +49,7 @@ from src.providers.connection import Connection
 from src.providers.declared_connection import DeclaredConnection
 from src.providers.null_connection import NullConnection
 from src.providers.service_descriptor import ServiceDescriptor, ServiceOperation, ServiceParameter
+from src.services.credentials.account import ProviderAccount
 
 
 def real_manager(*, tools: "ToolSet | None" = None, connection: "Connection | None" = None, **overrides):
@@ -64,11 +65,15 @@ def real_manager(*, tools: "ToolSet | None" = None, connection: "Connection | No
     return manager
 
 
-def _connection(*operations: ServiceOperation) -> DeclaredConnection:
+def _connection(*operations: ServiceOperation, authorized: bool = False) -> DeclaredConnection:
     descriptor = ServiceDescriptor(
         name="genericfixture", base_url="http://127.0.0.1:9199", operations=operations,
     )
-    return DeclaredConnection(descriptor, None)
+    account = (
+        ProviderAccount(provider="genericfixture", account_id="test", credential="genuine-secret-token")
+        if authorized else None
+    )
+    return DeclaredConnection(descriptor, account)
 
 
 def _manager_for(connection: DeclaredConnection) -> "object":
@@ -380,26 +385,34 @@ class TestAnUnmatchedRequestFailsHonestly:
 
 class TestConsequentialOperationsStayBlockedFromConversation:
     """Requirement 5: correctly *identifying* a consequential operation
-    by intent is not the same as being allowed to run it through
-    conversation - the existing confirmation boundary still applies to
-    whatever intent-driven selection picks."""
+    by intent is not the same as being allowed to run it *immediately*
+    through conversation - whatever intent-driven selection picks still
+    goes through the identical explicit-confirmation gate (Phase 6,
+    real-world services & transactions) every other consequential
+    action in this project already requires, rather than executing on
+    the strength of one remark alone."""
 
-    def test_a_matched_consequential_operation_is_refused_with_the_confirmation_message(self):
+    def test_a_matched_consequential_operation_raises_a_confirmation_not_an_immediate_execution(self):
         connection = _connection(
             ServiceOperation(name="get_status", method="GET", path="/status", requires_auth=False),
             ServiceOperation(name="reset_counter", method="POST", path="/counter", requires_auth=True),
+            authorized=True,
         )
         manager = _manager_for(connection)
 
         result = manager.handle_task(_task("reset the counter"))
 
-        assert not result.succeeded
-        assert "confirmation" in result.error.lower()
-        assert "control center" in result.error.lower()
-        assert "services genericfixture execute reset_counter" in result.error
+        # A real pending confirmation was raised - not an immediate
+        # execution, and not the old outright refusal either.
+        assert result.succeeded
+        assert result.payload["awaiting"] == "confirmation"
+        assert result.payload["operation"] == "reset_counter"
+        assert "(yes/no)" in result.output
+        # The real invariant this whole class exists to prove: nothing
+        # was actually attempted against the real service yet.
         assert connection.availability.state is AvailabilityState.UNKNOWN
 
-    def test_a_consequential_operation_matched_only_through_its_description_is_still_blocked(self):
+    def test_a_consequential_operation_matched_only_through_its_description_also_raises_a_confirmation(self):
         """Selection now has a second way to find a consequential
         operation - through its description rather than its name - so
         the governance boundary must hold there too, not merely for a
@@ -413,15 +426,34 @@ class TestConsequentialOperationsStayBlockedFromConversation:
                 name="op_reset", method="POST", path="/reset", requires_auth=True,
                 description="permanently clears the stored counter value",
             ),
+            authorized=True,
         )
         manager = _manager_for(connection)
 
         result = manager.handle_task(_task("clear the stored counter value"))
 
+        assert result.succeeded
+        assert result.payload["awaiting"] == "confirmation"
+        assert result.payload["operation"] == "op_reset"
+        assert "(yes/no)" in result.output
+        assert connection.availability.state is AvailabilityState.UNKNOWN
+
+    def test_an_unauthorized_consequential_operation_is_refused_before_any_confirmation_is_offered(self):
+        """Confirming something that cannot run anyway would be
+        pointless and misleading - authorization is checked first, so
+        an unauthorized consequential operation is refused outright,
+        the identical honest refusal a safe operation already gets."""
+        connection = _connection(
+            ServiceOperation(name="get_status", method="GET", path="/status", requires_auth=False),
+            ServiceOperation(name="reset_counter", method="POST", path="/counter", requires_auth=True),
+            authorized=False,
+        )
+        manager = _manager_for(connection)
+
+        result = manager.handle_task(_task("reset the counter"))
+
         assert not result.succeeded
-        assert "confirmation" in result.error.lower()
-        assert "control center" in result.error.lower()
-        assert "services genericfixture execute op_reset" in result.error
+        assert "not authorized" in result.error.lower()
         assert connection.availability.state is AvailabilityState.UNKNOWN
 
 
@@ -587,7 +619,7 @@ class TestParameterResolutionThroughConnectedAction:
 
         assert result.succeeded
 
-    def test_a_consequential_parameterized_operation_is_still_blocked_from_conversation(self):
+    def test_an_unauthorized_consequential_parameterized_operation_is_refused_before_parameters_matter(self):
         connection = _connection(
             ServiceOperation(
                 name="get_status", method="GET", path="/status", requires_auth=False,
@@ -598,14 +630,41 @@ class TestParameterResolutionThroughConnectedAction:
                 description="permanently deactivates a located item",
                 parameters=(ServiceParameter(name="resource_key", location="body", required=True),),
             ),
+            authorized=False,
         )
         manager = _manager_for(connection)
 
         result = manager.handle_task(_task("deactivate the item resource_key=abc123"))
 
         assert not result.succeeded
-        # Refused before ever being attempted - governance is checked
-        # (and the tool was never even granted for this operation - see
-        # scripts/control_center.py's own _safe_connection_tools) before
-        # any parameter resolution could matter.
+        # Refused before ever being attempted - authorization is checked
+        # before parameter resolution, so a correctly-resolved parameter
+        # still could not authorize it.
+        assert "not authorized" in result.error.lower()
+        assert connection.availability.state is AvailabilityState.UNKNOWN
+
+    def test_an_authorized_consequential_parameterized_operation_raises_a_confirmation_carrying_the_real_value(self):
+        """The real, explicit parameter value the person actually gave
+        must reach the confirmation itself - never merely the operation
+        name - so a person confirming a real-world booking/order/
+        cancellation is confirming the actual thing about to happen."""
+        connection = _connection(
+            ServiceOperation(
+                name="get_status", method="GET", path="/status", requires_auth=False,
+                description="reports the current status",
+            ),
+            ServiceOperation(
+                name="deactivate_item", method="POST", path="/deactivate", requires_auth=True,
+                description="permanently deactivates a located item",
+                parameters=(ServiceParameter(name="resource_key", location="body", required=True),),
+            ),
+            authorized=True,
+        )
+        manager = _manager_for(connection)
+
+        result = manager.handle_task(_task("deactivate the item resource_key=abc123"))
+
+        assert result.succeeded
+        assert result.payload["awaiting"] == "confirmation"
+        assert "resource_key=abc123" in result.output
         assert connection.availability.state is AvailabilityState.UNKNOWN

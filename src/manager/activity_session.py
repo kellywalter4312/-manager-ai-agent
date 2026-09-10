@@ -97,27 +97,39 @@ class PendingConfirmation:
     role ``PendingClarification`` already plays for an unresolved
     ambiguity.
 
-    ``operation``/``party``/``content`` are exactly what was about to be
+    Two real shapes share this one mechanism, never a parallel one:
+    ``party``/``content`` (a communication send/call - Phase 4's own
+    original shape) or ``connection``/``params`` (Phase 6, real-world
+    services & transactions: a consequential operation on a governed
+    ``Connection``, generalizing this identically to the same yes/no
+    gate rather than inventing a second confirmation mechanism just
+    because the thing being confirmed is now a booking, a purchase or
+    a cancellation instead of a message). Exactly one of ``party`` or
+    ``connection`` is ever set for a given instance - which one tells
+    ``guided_interaction.py``'s own resolver what a confirmed "yes"
+    actually does. Every field here is exactly what was about to be
     attempted - never re-derived from the confirming reply itself, the
     same "read back, never resolved against anything new" discipline
-    ``PendingClarification`` already holds itself to. ``description`` is
-    the question actually shown to the person, kept alongside the raw
-    fields so a caller never has to reconstruct it to check what was
-    asked.
+    ``PendingClarification`` already holds itself to. ``description``
+    is the question actually shown to the person, kept alongside the
+    raw fields so a caller never has to reconstruct it to check what
+    was asked.
     """
 
     operation: str
-    party: str
-    content: str
     description: str
+    party: str = ""
+    content: str = ""
+    connection: str = ""
+    params: "dict[str, str]" = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not str(self.operation).strip():
             raise ValueError("a PendingConfirmation must name its operation")
-        if not str(self.party).strip():
-            raise ValueError("a PendingConfirmation must name its party")
         if not str(self.description).strip():
             raise ValueError("a PendingConfirmation must have a description")
+        if not str(self.party).strip() and not str(self.connection).strip():
+            raise ValueError("a PendingConfirmation must name its party or its connection")
 
 
 @dataclass

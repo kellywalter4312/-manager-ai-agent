@@ -539,7 +539,7 @@ class TestStepToStepDataFlowThroughRealOperations:
             operations=(
                 ServiceOperation(
                     name="locate_item", method="GET", path="/locate", requires_auth=False,
-                    description="finds a resource and reports its key",
+                    description="finds an item and returns its unique identifier",
                 ),
                 ServiceOperation(
                     name="retrieve_details", method="GET", path="/details/{resource_key}",
@@ -659,7 +659,7 @@ class TestStepToStepDataFlowThroughRealOperations:
         # retrieve_details needs resource_key - never sent without it.
         assert calls == []
 
-    def test_the_consequential_operation_stays_blocked_even_with_its_parameter_known(self, monkeypatch):
+    def test_the_consequential_operation_pauses_for_confirmation_instead_of_running_mid_objective(self, monkeypatch):
         self._declare()
         calls: list = []
         self._stub_http(monkeypatch, calls=calls, responses={
@@ -669,8 +669,8 @@ class TestStepToStepDataFlowThroughRealOperations:
         _, manager, _, _, provider = self._wired_with_connection([
             '{"status":"continue","next_step":'
             '"check my connected account: deactivate the item resource_key=res-9f2"}',
-            '{"status":"failed","final_answer":'
-            '"deactivating requires your explicit confirmation in Control Center"}',
+            '{"status":"needs_input","question":'
+            '"deactivating needs your explicit yes/no confirmation - say yes to proceed"}',
         ])
         # Deliberately names only "locate" - the plan-level decision to
         # also deactivate the item comes from the (scripted) Brain's own
@@ -682,12 +682,44 @@ class TestStepToStepDataFlowThroughRealOperations:
             manager, Task(description="check my connected account: locate the item"),
         )
 
-        assert outcome.status is ObjectiveStatus.FAILED
-        # Only the safe first step ever genuinely ran - the consequential
-        # operation's own tool was never even granted (see
-        # scripts/control_center.py::_safe_connection_tools), so a
-        # correctly-resolved parameter still could not authorize it.
+        assert outcome.status is ObjectiveStatus.NEEDS_INPUT
+        # A real pending confirmation was raised for step 2 (Phase 6,
+        # real-world services & transactions) - not the old outright
+        # refusal, and not an execution either: only the safe first step
+        # ever genuinely reached the real service.
+        assert outcome.steps[1].result.succeeded
+        assert outcome.steps[1].result.payload["awaiting"] == "confirmation"
         assert calls == ["http://127.0.0.1:9299/locate"]
+
+    def test_confirming_the_paused_step_on_the_very_next_remark_actually_runs_it(self, monkeypatch):
+        """The other half of the pause above: pursue_objective itself
+        never sends a confirming "yes" (it has no concept of one) - the
+        person does, on an ordinary next turn, through the identical
+        conversational path a communication send/call already
+        confirms through. Proves the objective loop's own pause is
+        genuinely resolvable, not a dead end."""
+        self._declare()
+        calls: list = []
+        self._stub_http(monkeypatch, calls=calls, responses={
+            "/locate": b'{"resource_key": "res-9f2"}',
+            "/deactivate": b'{"deactivated": "res-9f2"}',
+        })
+
+        _, manager, _, _, provider = self._wired_with_connection([
+            '{"status":"continue","next_step":'
+            '"check my connected account: deactivate the item resource_key=res-9f2"}',
+            '{"status":"needs_input","question":"say yes to confirm"}',
+        ])
+        outcome = pursue_objective(
+            manager, Task(description="check my connected account: locate the item"),
+        )
+        assert outcome.status is ObjectiveStatus.NEEDS_INPUT
+        assert calls == ["http://127.0.0.1:9299/locate"]
+
+        confirmed = manager.handle_task(Task(description="yes"))
+        assert confirmed.succeeded
+        assert confirmed.payload["operation"] == "deactivate_item"
+        assert calls == ["http://127.0.0.1:9299/locate", "http://127.0.0.1:9299/deactivate"]
 
 
 # ---------------------------------------------------------------------------
@@ -811,11 +843,14 @@ class TestGoalLevelPlanning(TestStepToStepDataFlowThroughRealOperations):
     def test_a_governed_consequential_step_still_records_the_correct_result_and_audit_state(
         self, monkeypatch, tmp_path,
     ):
-        """The other half of the consequential-governance test above:
-        planning correctly identifies the step is needed and correctly
-        refuses to run it - but the identical operation still succeeds
-        for real, and is still correctly audited, through the one
-        governed path that can actually run it."""
+        """A second, independent proof the pause above is genuinely
+        resolvable: planning correctly identifies the step is needed and
+        pauses for confirmation rather than running it immediately - and
+        the identical operation still succeeds for real, and is still
+        correctly audited, through Control Center's own separate,
+        equally governed typed-command path (never the only way to run
+        it any more - see TestGoalLevelPlanning's own conversational
+        confirm/cancel tests for the other one)."""
         self._declare()
         calls: list = []
         self._stub_http(monkeypatch, calls=calls, responses={
@@ -826,15 +861,15 @@ class TestGoalLevelPlanning(TestStepToStepDataFlowThroughRealOperations):
         _, manager, _, _, provider = self._wired_with_connection([
             '{"status":"continue","next_step":'
             '"check my connected account: deactivate the item resource_key=res-9f2"}',
-            '{"status":"failed","final_answer":'
-            '"deactivating requires your explicit confirmation in Control Center"}',
+            '{"status":"needs_input","question":"say yes to confirm deactivating"}',
         ])
         outcome = pursue_objective(manager, Task(description="check my connected account: locate the item"))
-        assert outcome.status is ObjectiveStatus.FAILED
+        assert outcome.status is ObjectiveStatus.NEEDS_INPUT
 
-        # The plan named the right operation - it just could not run it
-        # through conversation. Now run the identical operation for
-        # real, through Control Center's own confirmed, audited path.
+        # The plan named the right operation and correctly paused for
+        # confirmation. Now run the identical operation for real,
+        # through Control Center's own confirmed, audited path instead
+        # of confirming conversationally.
         from scripts.serve_ui import route_command
         import json as jsonlib
 

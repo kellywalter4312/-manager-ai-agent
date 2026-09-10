@@ -317,12 +317,24 @@ class TestNoExecutionOutsideTheGovernedPath:
     def test_connected_action_never_calls_execute_directly(self):
         """Structural: the capability handler must reach a Connection
         only through request.tools.invoke() - never call .execute()
-        itself, which would bypass ToolSet's own governance boundary."""
+        itself, which would bypass ToolSet's own governance boundary.
+        Phase 6 (real-world services & transactions) factored the one
+        real invocation out into ``_execute_connected_operation`` -
+        shared with the confirmed-execution path in
+        guided_interaction.py - so that is where ``request.tools.invoke``
+        itself now literally appears; ``connected_action`` calls it
+        (immediately, or after a confirmation), never ``.execute()``."""
         import src.manager.capabilities as capabilities_module
 
-        source = inspect.getsource(capabilities_module.connected_action)
-        assert ".execute(" not in source
-        assert "request.tools.invoke(" in source
+        connected_action_source = inspect.getsource(capabilities_module.connected_action)
+        execute_helper_source = inspect.getsource(capabilities_module._execute_connected_operation)
+        confirm_helper_source = inspect.getsource(capabilities_module._raise_connected_action_confirmation)
+
+        assert ".execute(" not in connected_action_source
+        assert ".execute(" not in execute_helper_source
+        assert ".execute(" not in confirm_helper_source
+        assert "_execute_connected_operation(" in connected_action_source
+        assert "request.tools.invoke(" in execute_helper_source
 
     def test_the_tool_is_the_only_thing_that_calls_execute(self):
         for path in CONNECTION_FILES:
@@ -802,7 +814,11 @@ class TestConnectedActionUsesOperationLevelAuthorizationWhenAvailable:
         """The user's own words clearly ask for place_order - proving
         the refusal is about the operation genuinely chosen by intent,
         not merely present somewhere on the connection or first in
-        declaration order (ping is declared first here)."""
+        declaration order (ping is declared first here). Unauthorized
+        (no credential on file), so it is refused outright rather than
+        offered a confirmation it could never actually run - see this
+        class's own sibling test for the authorized case, where a real
+        confirmation is raised instead."""
         from src.providers.declared_connection import DeclaredConnection
         from src.providers.service_descriptor import ServiceDescriptor, ServiceOperation
 
@@ -822,10 +838,41 @@ class TestConnectedActionUsesOperationLevelAuthorizationWhenAvailable:
         result = manager.handle_task(Task(description="check my connected account: place my order"))
 
         assert not result.succeeded
-        assert "confirmation" in result.error.lower()
-        assert "control center" in result.error.lower()
-        assert "services weatherstub execute place_order" in result.error
+        assert "not authorized" in result.error.lower()
         # Never actually reached the network - refused before invoke().
+        assert connection.availability.state is AvailabilityState.UNKNOWN
+
+    def test_an_authorized_consequential_operation_raises_a_real_confirmation_through_natural_language(self):
+        """The other half: once genuinely authorized, the identical
+        matched operation is no longer refused outright - it is
+        described back and a real, resolvable confirmation is raised
+        (Phase 6, real-world services & transactions), never executed
+        on the strength of one remark alone."""
+        from src.providers.declared_connection import DeclaredConnection
+        from src.providers.service_descriptor import ServiceDescriptor, ServiceOperation
+        from src.services.credentials.account import ProviderAccount
+
+        descriptor = ServiceDescriptor(
+            name="weatherstub", base_url="http://127.0.0.1:9911",
+            operations=(
+                ServiceOperation(name="ping", method="GET", path="/ping", requires_auth=False),
+                ServiceOperation(name="place_order", method="POST", path="/orders", requires_auth=True),
+            ),
+        )
+        account = ProviderAccount(provider="weatherstub", account_id="test", credential="genuine-secret-token")
+        connection = DeclaredConnection(descriptor, account)
+        tools = ToolSet([
+            ConnectionActionTool(connection, operation="place_order", description="Places an order."),
+            ConnectionActionTool(connection, operation="ping", description="Pings weatherstub."),
+        ])
+        manager = real_manager(tools=tools, connection=connection)
+        result = manager.handle_task(Task(description="check my connected account: place my order"))
+
+        assert result.succeeded
+        assert result.payload["awaiting"] == "confirmation"
+        assert result.payload["operation"] == "place_order"
+        assert "(yes/no)" in result.output
+        # Still never actually reached the network - only described.
         assert connection.availability.state is AvailabilityState.UNKNOWN
 
     def test_a_scripted_connection_with_no_new_methods_still_behaves_exactly_as_before(self):

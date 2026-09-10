@@ -4717,21 +4717,28 @@ PERSONAL_RECURRING_EVENTS = ManagerCapability(
 # actually attempted is whatever ``connection.supported_operations``
 # itself declares, so a future connection needs no new branch here.
 #
-# **Operation-level authorization + confirmation (this checkpoint).**
+# **Operation-level authorization + confirmation.**
 # A duck-typed check, the identical "ask for it, accept UNKNOWN/False
 # when a component cannot answer" shape ``availability_of`` already
 # uses: ``authorization_for``/``requires_confirmation_for`` are read
 # only if the connection actually offers them (DeclaredConnection does;
 # Gmail/Null do not and are completely unaffected). A consequential
 # operation (today, read from the same operation's own declared HTTP
-# method - GET is safe, anything else is not) is never executed through
-# natural language at all - conversation has no confirm_token dance to
-# offer, so the honest answer is to name what is needed and point at
-# the one surface that already has one: Control Center's own
-# ``services <name> execute`` (scripts/control_center.py), reusing the
-# identical confirmed, audited administrative-write path
-# ``declare``/``forget`` already go through - never a second
-# confirmation mechanism invented here.
+# method - GET is safe, anything else is not) is never executed on the
+# strength of one remark alone: it is described back and a
+# ``PendingConfirmation`` is raised - the identical, generalized
+# mechanism (Phase 6, real-world services & transactions)
+# ``_raise_communication_confirmation`` already uses for a send/call,
+# resolved deterministically on the very next remark by
+# ``guided_interaction.py``'s own confirmation check, never executed
+# here. Only a genuinely clear yes ever reaches real execution
+# (``_execute_connected_operation`` below) - conversation is no longer
+# without a confirm_token dance of its own, it now has the identical
+# one every other consequential action already goes through. Control
+# Center's own ``services <name> execute`` (scripts/control_center.py)
+# remains a second, equally real, typed-command path to the identical
+# governed execution - administrative, audited, confirmed by its own
+# confirm_token - never replaced or bypassed by this one.
 
 
 CONNECTED_ACTION_MARKERS: tuple[str, ...] = (
@@ -4856,10 +4863,107 @@ def _declared_argument_values(text: str) -> "dict[str, str]":
     return values
 
 
+def _execute_connected_operation(
+    request: CapabilityRequest, connection: "Connection", operation: str, params: "dict[str, str]"
+) -> TaskResult:
+    """The one real place a governed connection operation is actually
+    invoked - reused for an operation safe enough to run immediately
+    (``connected_action``'s own tail, below) and for one that needed
+    explicit confirmation first (``_try_resolve_confirmation``,
+    ``src/manager/guided_interaction.py``), so the real invocation -
+    the identical governed ``ToolSet`` boundary every other
+    consequential action in this file already crosses - happens in
+    exactly one place regardless of which path reached it. Re-checks
+    tool permission itself rather than trusting a caller's earlier
+    check, the identical defensive re-check
+    ``_communication_call``/``_communication_send`` already perform for
+    the same reason: this may run on a later turn than the one that
+    raised the confirmation.
+    """
+    tool_name = tool_name_for(operation)
+    if not request.tools.permits(tool_name):
+        equipped = ", ".join(request.tools.names()) or "none"
+        return TaskResult.failure(
+            request.task, request.own_name,
+            f"I can't do that yet - the underlying '{tool_name}' capability "
+            f"is not installed. Currently equipped: {equipped}.",
+        )
+    outcome = request.tools.invoke(tool_name, params)
+    if not outcome.ok:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            f"the '{tool_name}' capability failed: {outcome.error}",
+        )
+    return TaskResult.success(
+        request.task, request.own_name, outcome.output,
+        payload={"handled_by": "connected_action", "connection": connection.name, "operation": operation},
+    )
+
+
+def _raise_connected_action_confirmation(
+    request: CapabilityRequest, connection: "Connection", operation: str, params: "dict[str, str]"
+) -> TaskResult:
+    """Phase 6 (real-world services & transactions): a consequential
+    connection operation - one that changes something on a real,
+    external service, a booking, an order, a cancellation, whatever a
+    future service declares - is never performed on the strength of
+    one remark alone. This describes exactly what is about to happen
+    and raises a ``PendingConfirmation`` instead of executing, resolved
+    on the very next remark by ``guided_interaction.py``'s own
+    confirmation check - the identical mechanism
+    ``_raise_communication_confirmation`` already uses for a send/call,
+    generalized (never duplicated) to name a connection and its real,
+    already-gathered parameters instead of a communication party and
+    its content.
+
+    Tool permission is checked *before* raising anything, the identical
+    reason ``_raise_communication_confirmation`` already does: an
+    unauthorized Manager must refuse outright, never engage with
+    confirming an action it cannot perform regardless of the answer.
+    """
+    tool_name = tool_name_for(operation)
+    if not request.tools.permits(tool_name):
+        equipped = ", ".join(request.tools.names()) or "none"
+        return TaskResult.failure(
+            request.task, request.own_name,
+            f"I can't do that yet - the underlying '{tool_name}' capability "
+            f"is not installed. Currently equipped: {equipped}.",
+        )
+    if request.activity_sessions is None:
+        # No session tracking reaches this request (a bare construction,
+        # an older caller) - fail safe rather than ever executing an
+        # unconfirmed consequential action.
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "I can't confirm consequential actions in this context, so I "
+            "would rather not attempt it than act without asking.",
+        )
+
+    detail = f" with {', '.join(f'{k}={v}' for k, v in params.items())}" if params else ""
+    description = (
+        f"'{operation}' on '{connection.name}'{detail} will change something on the "
+        "real service. Proceed? (yes/no)"
+    )
+    request.activity_sessions.raise_confirmation(
+        request.own_name,
+        PendingConfirmation(
+            operation=operation, description=description,
+            connection=connection.name, params=dict(params),
+        ),
+    )
+    return TaskResult.success(
+        request.task, request.own_name, description,
+        payload={
+            "handled_by": "connected_action", "connection": connection.name,
+            "operation": operation, "awaiting": "confirmation",
+        },
+    )
+
+
 def connected_action(request: CapabilityRequest) -> TaskResult:
     """Attempt one governed action through Alfred's configured
-    connection - see this section's own module comment for the full,
-    six-fact flow this function walks through in order.
+    connection - see this section's own module comment for the full
+    flow this function walks through in order.
     """
     connection = request.connection
     if connection is None:
@@ -4896,21 +5000,6 @@ def connected_action(request: CapabilityRequest) -> TaskResult:
             request.task, request.own_name,
             f"I can't do that yet - the underlying '{tool_name}' capability "
             f"is not installed. Currently equipped: {equipped}.",
-        )
-
-    # Consequential operations never run through conversation - see this
-    # section's own module comment. Checked before authorization: a
-    # consequential operation is refused the same way regardless of
-    # whether a credential happens to be on file, because the missing
-    # thing is confirmation, not authorization.
-    requires_confirmation = getattr(connection, "requires_confirmation_for", None)
-    if requires_confirmation is not None and requires_confirmation(operation):
-        return TaskResult.failure(
-            request.task, request.own_name,
-            f"'{operation}' on '{connection.name}' changes something on the real "
-            "service, so it needs your explicit confirmation - use Control "
-            f"Center's 'services {connection.name} execute {operation}' rather "
-            "than asking in conversation.",
         )
 
     authorization_for = getattr(connection, "authorization_for", None)
@@ -4951,17 +5040,17 @@ def connected_action(request: CapabilityRequest) -> TaskResult:
             )
         params = {p.name: available[p.name] for p in parameters if p.name in available}
 
-    outcome = request.tools.invoke(tool_name, params)
-    if not outcome.ok:
-        return TaskResult.failure(
-            request.task, request.own_name,
-            f"the '{tool_name}' capability failed: {outcome.error}",
-        )
+    # Consequential operations are never performed on the strength of
+    # one remark alone - see this section's own module comment. Checked
+    # last, after authorization and parameter resolution, so the
+    # confirmation actually describes the real operation about to run
+    # (with its real, already-gathered values) rather than an abstract
+    # one that might still fail for an unrelated reason.
+    requires_confirmation = getattr(connection, "requires_confirmation_for", None)
+    if requires_confirmation is not None and requires_confirmation(operation):
+        return _raise_connected_action_confirmation(request, connection, operation, params)
 
-    return TaskResult.success(
-        request.task, request.own_name, outcome.output,
-        payload={"handled_by": "connected_action", "connection": connection.name, "operation": operation},
-    )
+    return _execute_connected_operation(request, connection, operation, params)
 
 
 CONNECTED_ACTION = ManagerCapability(

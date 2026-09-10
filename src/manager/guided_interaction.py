@@ -93,24 +93,47 @@ def _try_resolve_confirmation(
     no, the identical "did not match, may be saying something else
     first" fall-through ``guided_interaction_response`` already applies
     to an unresolved clarification.
+
+    Two real shapes share this one resolver (see ``PendingConfirmation``'s
+    own docstring): ``pending.connection`` names a governed connection
+    operation (Phase 6, real-world services & transactions) when set,
+    otherwise this is Phase 4's original communication send/call -
+    never two resolvers, one dispatch on which real thing is pending.
     """
     reply = " ".join(str(request.task.description or "").split()).strip().lower()
     if not reply:
         return None
 
+    target = pending.connection or pending.party
+
     if any(word in reply for word in _CANCEL_WORDS):
         sessions.clear_confirmation(agent_key)
         return TaskResult.success(
             request.task, request.own_name,
-            f"Okay, I won't {pending.operation} {pending.party}.",
+            f"Okay, I won't {pending.operation} on {target}." if pending.connection
+            else f"Okay, I won't {pending.operation} {pending.party}.",
             payload={
-                "handled_by": "communication", "operation": pending.operation,
-                "party": pending.party, "confirmed": False,
+                "handled_by": "connected_action" if pending.connection else "communication",
+                "operation": pending.operation, "confirmed": False,
+                **({"connection": pending.connection} if pending.connection else {"party": pending.party}),
             },
         )
 
     if any(word in reply for word in _CONFIRM_WORDS):
         sessions.clear_confirmation(agent_key)
+
+        if pending.connection:
+            from src.manager.capabilities import _execute_connected_operation
+
+            connection = request.connection
+            if connection is None or connection.name != pending.connection:
+                return TaskResult.failure(
+                    request.task, request.own_name,
+                    f"'{pending.connection}' is no longer the configured connection, "
+                    f"so I can't complete '{pending.operation}' - nothing was executed.",
+                )
+            return _execute_connected_operation(request, connection, pending.operation, pending.params)
+
         from src.manager.capabilities import _communication_call, _communication_send
 
         if pending.operation == "call":

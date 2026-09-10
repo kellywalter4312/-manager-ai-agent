@@ -500,21 +500,29 @@ class TestGenericOperationExecutionEndToEnd:
 
         write_result = manager.handle_task(Task(description="check my connected account: write the item"))
         assert not write_result.succeeded
-        assert "confirmation" in write_result.error.lower()
-        assert "control center" in write_result.error.lower()
+        # No credential was ever connected for this service - refused
+        # for lack of authorization, checked before whether the
+        # operation would also need a confirmation (see
+        # test_stage16_connections.py's own authorized/consequential
+        # pair for that separate boundary).
+        assert "not authorized" in write_result.error.lower()
 
     def test_the_write_operation_succeeds_once_genuinely_authorized(self, monkeypatch):
         """The other half of the pair: write_item is never reachable
-        through conversation (proven above), but *is* genuinely
-        executable once a real credential exists for it - discovered,
-        declared, credentialed, operation-authorized, and executed, all
-        through the real provider/connection layer. The confirm_token/
-        audit-log dance this same call goes through when reached via
-        Control Center is separately, thoroughly proven in
+        through conversation *without a credential on file* (proven
+        above), but *is* genuinely executable once a real credential
+        exists for it - discovered, declared, credentialed,
+        operation-authorized, and executed, all through the real
+        provider/connection layer. The confirm_token/audit-log dance
+        this same call goes through when reached via Control Center is
+        separately, thoroughly proven in
         tests/test_administrative_write_audit.py -
-        TestOperationLevelExecutionGovernance; this test's own job is
-        the discovery-to-execution chain itself, not re-proving that
-        gate a second time.
+        TestOperationLevelExecutionGovernance; the identical operation's
+        own confirm/execute dance reached through ordinary conversation
+        (Phase 6, real-world services & transactions) is proven in
+        tests/test_natural_language_live_connection_integration.py.
+        This test's own job is the discovery-to-execution chain itself,
+        not re-proving either confirmation gate a second time.
         """
         self._serve_generic_service(monkeypatch)
 

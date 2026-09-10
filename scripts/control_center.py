@@ -111,7 +111,7 @@ from src.services.credentials.account_store_file import (  # noqa: E402
     load_credential_store,
     save_credential_store,
 )
-from src.providers.service_descriptor import ServiceDescriptor, ServiceOperation  # noqa: E402
+from src.providers.service_descriptor import ServiceDescriptor, ServiceOperation, ServiceParameter  # noqa: E402
 from src.providers.service_discovery import ServiceDiscoveryError, discover_service  # noqa: E402
 from src.services.connections.service_registry import (  # noqa: E402
     DEFAULT_SERVICES_PATH,
@@ -364,21 +364,21 @@ HELP = """
 CONVERSATION_HISTORY_LIMIT = 6
 
 
-def _safe_connection_tools(connection: Connection) -> "list[ConnectionActionTool]":
+def _connection_tools(connection: Connection) -> "list[ConnectionActionTool]":
     """Grant a real ``ConnectionActionTool`` for every operation
-    ``connection`` declares safe - the exact missing half of Stage 16.
+    ``connection`` declares - the exact missing half of Stage 16.
 
     **The gap this closes.** ``connected_action``
     (``src/manager/capabilities.py``) has always reached its connection
-    only through ``request.tools.invoke(tool_name_for(operation), {})``
+    only through ``request.tools.invoke(tool_name_for(operation), ...)``
     - a real ``Connection`` was never enough by itself, it also had to
     be *granted* under that name in the ToolSet Alfred's own process is
     built with. Nothing here ever did that granting: this file's own
     ``tools=ToolSet([...])`` below named every other collaborator
     (``runtime.communication``, ``runtime.media``, ...) but never
-    ``runtime.connection``, so a live, authorized connection's own safe
-    read was unreachable through ordinary conversation for exactly the
-    reason ``connected_action`` would report - "the underlying
+    ``runtime.connection``, so a live, authorized connection's own
+    operation was unreachable through ordinary conversation for exactly
+    the reason ``connected_action`` would report - "the underlying
     'connection_<op>' capability is not installed" - regardless of how
     real, authorized or selected the connection itself was.
 
@@ -391,33 +391,28 @@ def _safe_connection_tools(connection: Connection) -> "list[ConnectionActionTool
     other governed action-tool already gets constructed from its own
     runtime collaborator.
 
-    **Safe only - the consequential boundary stays exactly where it
-    already is.** The identical ``requires_confirmation_for`` duck-type
-    ``connected_action`` itself checks (absent entirely on a connection
-    with nothing more precise to offer, e.g. Gmail/Null, in which case
-    every declared operation is treated as safe - Gmail's own single
-    ``read_email`` already is one). A consequential operation is never
-    even constructed as a Tool here, so no future caller of
-    ``request.tools`` could reach it either, even by mistake -
-    conversation still has no confirm_token dance to offer; that stays
-    Control Center's ``services <name> execute`` alone.
-
-    Generic over the connection itself: this reads only
-    ``connection.supported_operations`` and the identical duck-typed
-    method ``connected_action`` already uses, so a future declared
-    service needs no change here at all.
+    **Every operation is granted, safe or consequential - the identical
+    shape ``CommunicationSendTool``/``CallTool`` already have.** Those
+    two tools have always been granted unconditionally even though a
+    send/call is consequential; what makes that safe is that
+    ``communication()`` never invokes them on the strength of one
+    remark alone, it raises a ``PendingConfirmation`` first (Phase 4).
+    Phase 6 (real-world services & transactions) gives ``connected_action``
+    the identical governed confirm path for a consequential connection
+    operation (a booking, an order, a cancellation), so the tool-grant
+    boundary and the safety boundary can be the same one place they
+    already are for communication: capability logic, never which tools
+    happen to exist. A future connection needs no change here either
+    way - this reads only ``connection.supported_operations``.
     """
-    requires_confirmation = getattr(connection, "requires_confirmation_for", None)
     parameters_for = getattr(connection, "parameters_for", None)
     tools: "list[ConnectionActionTool]" = []
     for operation in connection.supported_operations:
-        if requires_confirmation is not None and requires_confirmation(operation):
-            continue
         tools.append(
             ConnectionActionTool(
                 connection,
                 operation=operation,
-                description=f"perform the safe, already-declared '{operation}' action "
+                description=f"perform the already-declared '{operation}' action "
                 f"through the '{connection.name}' connection",
                 # Data-flow-through-execution checkpoint: the operation's
                 # own declared inputs (empty for a connection with
@@ -520,13 +515,16 @@ def build(settings: Settings):
             CommunicationCallTool(runtime.communication),
             # Natural-language/live-connection integration gap closure:
             # a real ConnectionActionTool for every one of
-            # runtime.connection's own safe operations - see
-            # _safe_connection_tools's own docstring for exactly what
-            # gap this closes and why a consequential operation is
-            # never among them. Empty for "null" (no operations at
-            # all) and unchanged for every existing caller that never
-            # configured a real connection.
-            *_safe_connection_tools(runtime.connection),
+            # runtime.connection's own operations, safe or
+            # consequential - see _connection_tools's own docstring for
+            # exactly what gap this closes and why granting a
+            # consequential operation's tool is safe (the identical
+            # confirm-before-execute boundary CommunicationSendTool/
+            # CallTool already rely on, never the tool grant itself).
+            # Empty for "null" (no operations at all) and unchanged for
+            # every existing caller that never configured a real
+            # connection.
+            *_connection_tools(runtime.connection),
             # Stage 18: read-only access to the documents, books and notes
             # the user themselves put in runtime.knowledge's folder. It
             # sits beside live_information rather than replacing it -
@@ -1378,6 +1376,42 @@ def _format_parameters(op: "ServiceOperation") -> str:
     return " [" + ", ".join(parts) + "]"
 
 
+def _op_spec(op: "ServiceOperation") -> str:
+    """One operation, round-tripped through the identical compact text
+    shape ``run_services_command``'s own ``declare`` action parses back
+    - the real, machine-usable form ``_format_parameters`` above is the
+    human-readable one for.
+
+    **The gap this closes.** ``discover``'s own suggested follow-up
+    command used to build this from only ``name:METHOD:path:auth|open``
+    - the identical four fields ``declare`` has only ever accepted -
+    which meant a real, discovered parameter (a booking's date, an
+    order's item, anything the Data-flow-through-execution checkpoint
+    exists for) was silently dropped the moment a person actually ran
+    the command discovery itself suggested. A service with no
+    consequential operation that needs a real value never noticed; any
+    real-world transaction (a reservation, a purchase, an appointment)
+    always would have.
+
+    **Encoding, never ambiguous with what already exists.** A fifth,
+    optional field, appended after the existing four with one more
+    ``:`` - so an op-spec with no parameters is byte-for-byte what
+    ``declare`` already accepted, and every existing caller/test is
+    unaffected. Multiple parameters on one operation join with ``|``
+    (never ``,``, which already separates *operations* in the outer
+    list - see ``declare``'s own parsing) - each one itself
+    ``name:location:required|optional``, mirroring the outer shape at a
+    smaller scale rather than inventing a different one.
+    """
+    base = f"{op.name}:{op.method}:{op.path}:{'auth' if op.requires_auth else 'open'}"
+    if not op.parameters:
+        return base
+    params = "|".join(
+        f"{p.name}:{p.location}:{'required' if p.required else 'optional'}" for p in op.parameters
+    )
+    return f"{base}:{params}"
+
+
 def run_services_command(centre: "ControlCenter", rest: str) -> str:
     """Decide what to answer for the ``services`` verb - declare,
     forget, or list what open-ended service discovery has registered so
@@ -1399,7 +1433,8 @@ def run_services_command(centre: "ControlCenter", rest: str) -> str:
             return (
                 "no services declared yet.\n"
                 "declare one with: services <name> declare <base-url> "
-                "<op-name>:<METHOD>:<path>:<auth|open>[,<op2>...]"
+                "<op-name>:<METHOD>:<path>:<auth|open>[:<param>:<location>:<required|optional>"
+                "[|<param2>...]][,<op2>...]"
             )
         lines = ["DECLARED SERVICES (open-ended discovery)", ""]
         for name, descriptor in sorted(registry.items()):
@@ -1447,10 +1482,7 @@ def run_services_command(centre: "ControlCenter", rest: str) -> str:
             return f"could not discover '{name}' at {base_url}: {exc}"
         d = found.descriptor
         dropped = found.declared_operation_count - len(d.operations)
-        op_spec = ",".join(
-            f"{op.name}:{op.method}:{op.path}:{'auth' if op.requires_auth else 'open'}"
-            for op in d.operations
-        )
+        op_spec = ",".join(_op_spec(op) for op in d.operations)
         source_label = {
             "alfred-service": "a real .well-known/alfred-service.json this service published for Alfred",
             "openapi": "a real OpenAPI/Swagger document this service already publishes for anyone",
@@ -1482,24 +1514,52 @@ def run_services_command(centre: "ControlCenter", rest: str) -> str:
         if len(rest_args) < 3:
             return (
                 "usage: services <name> declare <base-url> "
-                "<op-name>:<METHOD>:<path>:<auth|open>[,<op2>...]"
+                "<op-name>:<METHOD>:<path>:<auth|open>[:<param>:<location>:<required|optional>"
+                "[|<param2>:<location>:<required|optional>...]][,<op2>...]"
             )
         base_url = rest_args[1]
         op_specs = rest_args[2].split(",")
         operations: "list[ServiceOperation]" = []
         for spec in op_specs:
-            fields = spec.split(":")
-            if len(fields) != 4:
+            # maxsplit=4: a fifth field (real, declared parameters - see
+            # _op_spec's own docstring for exactly what gap this closes)
+            # is optional and, when present, carries its own "|"/":"
+            # structure intact rather than being re-split by this outer
+            # ":" - an op-spec with no fifth field is byte-for-byte the
+            # original four-field shape, so every existing caller is
+            # unaffected.
+            fields = spec.split(":", 4)
+            if len(fields) < 4:
                 return (
                     f"could not declare '{name}': operation '{spec}' must have the "
                     "shape name:METHOD:path:auth|open"
                 )
-            op_name, method, path, auth_word = fields
+            op_name, method, path, auth_word = fields[:4]
+            parameters: "list[ServiceParameter]" = []
+            if len(fields) == 5 and fields[4]:
+                for param_spec in fields[4].split("|"):
+                    param_fields = param_spec.split(":")
+                    if len(param_fields) != 3:
+                        return (
+                            f"could not declare '{name}': parameter '{param_spec}' on "
+                            f"'{op_name}' must have the shape name:location:required|optional"
+                        )
+                    param_name, param_location, param_required_word = param_fields
+                    try:
+                        parameters.append(
+                            ServiceParameter(
+                                name=param_name, location=param_location,
+                                required=(param_required_word.strip().lower() == "required"),
+                            )
+                        )
+                    except ValueError as exc:
+                        return f"could not declare '{name}': {exc}"
             try:
                 operations.append(
                     ServiceOperation(
                         name=op_name, method=method, path=path,
                         requires_auth=(auth_word.strip().lower() == "auth"),
+                        parameters=tuple(parameters),
                     )
                 )
             except ValueError as exc:
