@@ -59,12 +59,15 @@ from dataclasses import dataclass, field
 from typing import Callable, Sequence
 
 from src.agents.tools.toolset import ToolSet
+from src.core.contracts import tokenize
 from src.manager.memory_policy import MemoryCategory
 from src.services.memory.memory import MemoryRecord
 from src.services.memory.personal_context import (
     STATUS_DISCONTINUED,
+    PersonalContextRecord,
     all_current_personal_context,
 )
+from src.services.memory.query import STOPWORDS
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -93,6 +96,15 @@ LEARNING_RECALL_LIMIT = 3
 # a full transcript of everything the user has ever taught Alfred about
 # themselves.
 PERSONAL_CONTEXT_RECALL_LIMIT = 10
+
+# How many of the user's own current topics are even considered before
+# relevance narrows them down to PERSONAL_CONTEXT_RECALL_LIMIT - the
+# identical bound the Control Center's own "show me everything" view
+# (ControlCenter.personal_context) already uses for "the whole current
+# state", so relevance selection below genuinely chooses from
+# everything currently true, not merely whatever was touched most
+# recently.
+_PERSONAL_CONTEXT_RESOLVE_LIMIT = 200
 
 # The inert line that stops settled evidence being read as current. Phrased
 # as a statement *about the evidence* rather than as an instruction, because
@@ -134,6 +146,53 @@ class KnowledgeEvidence:
         if not self.notes:
             return ()
         return self.notes + (SETTLED_KNOWLEDGE_NOTE,)
+
+
+def _relevant_personal_context(
+    items: "tuple[PersonalContextRecord, ...]", query: str, *, limit: int
+) -> "tuple[PersonalContextRecord, ...]":
+    """Which of ``items`` (every topic's own current state - already
+    resolved, never re-derived here) are actually worth answering
+    ``query`` with, rather than merely whichever were touched most
+    recently.
+
+    **Governed personal-context intelligence checkpoint.** Scored by
+    the identical literal-token-overlap relevance ``Memory.recall``'s
+    own ``query`` parameter already provides - the exact mechanism the
+    ``LEARNING_CONTEXT`` branch just above already uses - reused here
+    rather than duplicated. ``all_current_personal_context`` itself
+    cannot take a relevance-ranked ``query`` directly: a relevance sort
+    could return an older, superseded record for a topic ahead of its
+    own newer replacement, silently breaking the "always the current
+    statement" guarantee ``personal_context.py``'s own docstring makes.
+    Resolving *what is current* and judging *what is relevant* must
+    therefore stay two separate steps - this function is only the
+    second one.
+
+    Falls back to the existing "most recently touched" order, bounded
+    the same way, when nothing has any real lexical overlap with the
+    query at all - a genuinely broad remark should still be answered
+    with *something*, the identical honest default this function's own
+    caller already had before relevance scoring existed, never a
+    silently emptied result for an ordinary open-ended question.
+
+    Generic by construction: nothing here reads a topic name, a
+    category, or any fixed vocabulary - only the words the user's own
+    stored content and the current query actually share.
+    """
+    words = tokenize(query) - STOPWORDS
+    if not words:
+        return items[:limit]
+
+    scored = [
+        (item, len((tokenize(item.topic) | tokenize(item.content)) & words))
+        for item in items
+    ]
+    if not any(score > 0 for _, score in scored):
+        return items[:limit]
+
+    ranked = sorted(scored, key=lambda pair: pair[1], reverse=True)
+    return tuple(item for item, score in ranked if score > 0)[:limit]
 
 
 def gather_knowledge_evidence(
@@ -211,7 +270,8 @@ def gather_knowledge_evidence(
         )
     else:
         try:
-            personal = all_current_personal_context(recall=recall, limit=PERSONAL_CONTEXT_RECALL_LIMIT)
+            personal = all_current_personal_context(recall=recall, limit=_PERSONAL_CONTEXT_RESOLVE_LIMIT)
+            personal = _relevant_personal_context(personal, text, limit=PERSONAL_CONTEXT_RECALL_LIMIT)
         except Exception as exc:  # noqa: BLE001 - deliberate boundary catch
             logger.warning("could not recall personal context: %s", exc)
             unavailable.append(f"{PERSONAL_CONTEXT}: memory could not be read")
