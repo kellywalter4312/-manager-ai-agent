@@ -39,6 +39,7 @@ from src.manager.brain import (
     ActivityAnswerVerdict,
     BrainAction,
     BrainDecision,
+    GovernanceBrainVerdict,
     ManagerBrain,
     ObjectiveVerdict,
 )
@@ -48,6 +49,7 @@ from src.manager.brain_prompts import (
     ACTIVITY_START_SYSTEM_PROMPT,
     AMBIGUITY_SYSTEM_PROMPT,
     BRAIN_SYSTEM_PROMPT,
+    GOVERNANCE_SYSTEM_PROMPT,
     OBJECTIVE_SYSTEM_PROMPT,
     RETENTION_SYSTEM_PROMPT,
     build_activity_answer_prompt,
@@ -55,12 +57,14 @@ from src.manager.brain_prompts import (
     build_activity_start_prompt,
     build_ambiguity_prompt,
     build_deliberation_prompt,
+    build_governance_prompt,
     build_objective_prompt,
     build_retention_prompt,
     parse_activity_answer_or_unavailable,
     parse_activity_start_or_unknown,
     parse_ambiguity_or_unknown,
     parse_decision_or_unknown,
+    parse_governance_or_unavailable,
     parse_objective_or_unavailable,
     parse_retention_or_unknown,
 )
@@ -149,6 +153,12 @@ class LLMManagerBrain(ManagerBrain):
         # code (a status, a next step, a question to relay), never a reply
         # the person reads as this agent's own voice.
         self._objective_system_prompt = OBJECTIVE_SYSTEM_PROMPT
+        # Never personality-flavoured, for the identical reason
+        # objective/retention/ambiguity are not: a structured
+        # ALLOW/CLARIFY/REQUIRE_CONFIRMATION/RESTRICT/REFUSE judgement
+        # consumed by code, never a reply the person reads as this
+        # agent's own voice.
+        self._governance_system_prompt = GOVERNANCE_SYSTEM_PROMPT
         # This one is the exception among the four guided-activity/
         # ambiguity prompts: the composed question is read by the person
         # directly, exactly as a converse() reply is, so it earns the
@@ -559,6 +569,33 @@ class LLMManagerBrain(ManagerBrain):
         if completion.is_empty:
             return ObjectiveVerdict.unavailable(source=self._source(completion))
         return parse_objective_or_unavailable(completion.text, source=self._source(completion))
+
+    def assess_governance(self, task: Task, notes: Sequence[str] = ()) -> GovernanceBrainVerdict:
+        """Judge one attempted action's real legitimacy via the same
+        provider every other narrow question here uses. See
+        ``ManagerBrain.assess_governance``'s own docstring for the
+        question this answers and the shape of a decided verdict.
+        """
+        log = task_logger(logger, task.id)
+        prompt = build_governance_prompt(task, notes)
+        try:
+            completion = self._provider.complete(prompt, system=self._governance_system_prompt)
+        except Exception as exc:  # noqa: BLE001 - deliberate boundary catch
+            self._availability = Availability(
+                state=AvailabilityState.UNAVAILABLE,
+                reason=str(exc) or type(exc).__name__,
+                error_type=type(exc).__name__,
+            )
+            log.exception(
+                "provider '%s' failed while assessing governance: %s",
+                self.provider_name, type(exc).__name__,
+            )
+            return GovernanceBrainVerdict.unavailable(source=self.name)
+
+        self._availability = Availability(state=AvailabilityState.AVAILABLE, reason="a call succeeded")
+        if completion.is_empty:
+            return GovernanceBrainVerdict.unavailable(source=self._source(completion))
+        return parse_governance_or_unavailable(completion.text, source=self._source(completion))
 
     def _source(self, completion) -> str:
         """Provenance for the decision, taken from the completion.

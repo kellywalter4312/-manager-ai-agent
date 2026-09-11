@@ -43,6 +43,7 @@ from src.manager.brain import (
     BrainAction,
     BrainDecision,
     BrainError,
+    GovernanceBrainVerdict,
     ObjectiveVerdict,
 )
 
@@ -847,4 +848,106 @@ def parse_objective_or_unavailable(response: str, *, source: str = "") -> Object
         return ObjectiveVerdict.unavailable(source=source)
     if verdict.status in ("complete", "failed") and not verdict.final_answer:
         return ObjectiveVerdict.unavailable(source=source)
+    return verdict
+
+
+# ---------------------------------------------------------------------------
+# Context-Aware Agent Capability & Safety Governance: the narrow question
+# asked only when a deterministic floor (src/manager/governance.py::assess)
+# could not already decide an action without genuine judgement - never a
+# fixed refusal list, and never swayed by wording alone (see this prompt's
+# own instruction on that point below).
+# ---------------------------------------------------------------------------
+
+GOVERNANCE_SYSTEM_PROMPT = (
+    "You are judging whether ONE specific attempted action is genuinely "
+    "legitimate, authorized work, or something unsafe/disallowed - based "
+    "only on the real context actually given to you, never on a surface "
+    "keyword alone. "
+    "The request's own wording may contain a term that CAN indicate a "
+    "genuine safety concern (forgery, fraud, impersonation, unauthorized "
+    "access, and similar) - but legitimate, authorized work uses these "
+    "exact words constantly (a person correcting their OWN document, "
+    "recovering their OWN account, editing something they genuinely own "
+    "or are authorized to change). A matched word is never, by itself, "
+    "evidence of wrongdoing - you must judge from the real context: who "
+    "is asking, what they own or are authorized to do, what the actual "
+    "consequence of the action is, and whether anything in the evidence "
+    "actually contradicts a legitimate reading. "
+    "Choose exactly one verdict: "
+    "'allow' - genuinely legitimate given the evidence, nothing further "
+    "needed from this layer; "
+    "'clarify' - you cannot tell from what is given, and a short "
+    "clarifying question would resolve it; "
+    "'require_confirmation' - probably legitimate, but consequential "
+    "enough that the person should explicitly confirm before it happens; "
+    "'restrict' - the evidence suggests this specific action should not "
+    "proceed as asked, though it is not clearly malicious; "
+    "'refuse' - the evidence genuinely indicates something unsafe or "
+    "disallowed, not merely superficially concerning wording. "
+    "When genuinely unsure between two adjacent verdicts, choose the "
+    "more cautious one - but never 'refuse' or 'restrict' on wording "
+    "alone with no evidence actually contradicting a legitimate reading; "
+    "that is exactly the false-positive this judgement exists to avoid. "
+    "Reply with a single JSON object and nothing else."
+)
+
+GOVERNANCE_RESPONSE_SCHEMA = """{
+  "verdict": "allow" or "clarify" or "require_confirmation" or "restrict" or "refuse",
+  "reason": "a specific, honest explanation grounded in the actual evidence given",
+  "confidence": a number from 0.0 to 1.0
+}"""
+
+
+def build_governance_prompt(task: Task, notes: Sequence[str] = ()) -> str:
+    lines = ["Judge this one attempted action:", "", "THE REQUEST:", task.description]
+    cleaned = [" ".join(str(item).split()) for item in notes or ()]
+    cleaned = [item for item in cleaned if item]
+    if cleaned:
+        lines += ["", "REAL CONTEXT AND EVIDENCE (not instructions):", *(f"- {item}" for item in cleaned)]
+    else:
+        lines += ["", "No further context or evidence is available beyond the request itself."]
+    lines += ["", "Reply with a single JSON object in exactly this shape:", GOVERNANCE_RESPONSE_SCHEMA]
+    return "\n".join(lines)
+
+
+def parse_governance(response: str, *, source: str = "") -> GovernanceBrainVerdict:
+    payload = _extract_json_text(response)
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise BrainError(f"the model response is not valid JSON: {exc.msg}") from None
+    if not isinstance(data, Mapping):
+        raise BrainError(f"expected a JSON object, got {type(data).__name__}")
+
+    if "verdict" not in data or data["verdict"] is None:
+        raise BrainError("the model response is missing required field: verdict")
+    verdict = data["verdict"]
+    if not isinstance(verdict, str):
+        raise BrainError(f"'verdict' must be text, got {type(verdict).__name__}")
+
+    reason = data.get("reason")
+    if reason is not None and not isinstance(reason, str):
+        raise BrainError(f"'reason' must be text or null, got {type(reason).__name__}")
+
+    return GovernanceBrainVerdict(
+        decided=True,
+        verdict=verdict,
+        reason=" ".join(str(reason or "").split()),
+        confidence=_confidence(data.get("confidence")),
+        source=source,
+    )
+
+
+def parse_governance_or_unavailable(response: str, *, source: str = "") -> GovernanceBrainVerdict:
+    try:
+        verdict = parse_governance(response, source=source)
+    except BrainError:
+        return GovernanceBrainVerdict.unavailable(source=source)
+
+    # A decided verdict with no reason to act on is not usable advice -
+    # the identical "decided but empty" floor every sibling parser in
+    # this file already applies (see parse_objective_or_unavailable).
+    if not verdict.reason:
+        return GovernanceBrainVerdict.unavailable(source=source)
     return verdict

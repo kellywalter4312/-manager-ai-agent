@@ -257,6 +257,58 @@ class ObjectiveVerdict:
         return cls(decided=False, source=source)
 
 
+@dataclass(frozen=True)
+class GovernanceBrainVerdict:
+    """A judgement about whether one attempted action is genuinely
+    legitimate authorized work or something unsafe, given real context -
+    the sixth, distinct question this file answers, and deliberately its
+    own type rather than a repurposing of ``BrainDecision`` for the
+    identical reason ``ObjectiveVerdict``/``ActivityAnswerVerdict``
+    already are: a structured ALLOW/CLARIFY/REQUIRE_CONFIRMATION/
+    RESTRICT/REFUSE verdict does not fit ``BrainDecision``'s fields
+    without inventing a meaning for one of them.
+
+    ``verdict`` is a plain word, not an import of
+    ``src.manager.governance.GovernanceVerdict`` - this module has no
+    dependency on ``governance.py`` (governance depends on this module's
+    shape, never the reverse, the same one-directional dependency
+    ``objective_loop.py`` already has on this file).
+    """
+
+    decided: bool
+    verdict: str = ""
+    reason: str = ""
+    confidence: float = 0.0
+    source: str = ""
+
+    _VALID_VERDICTS = frozenset({"", "allow", "clarify", "require_confirmation", "restrict", "refuse"})
+
+    def __post_init__(self) -> None:
+        verdict = str(self.verdict).strip().lower()
+        if verdict not in self._VALID_VERDICTS:
+            raise BrainError(
+                "'verdict' must be one of allow/clarify/require_confirmation/restrict/refuse, "
+                f"got {verdict!r}"
+            )
+        object.__setattr__(self, "verdict", verdict)
+        object.__setattr__(self, "reason", " ".join(str(self.reason).split()))
+        if not 0.0 <= float(self.confidence) <= 1.0:
+            raise BrainError(f"GovernanceBrainVerdict.confidence must be between 0 and 1, got {self.confidence}")
+        object.__setattr__(self, "confidence", float(self.confidence))
+        object.__setattr__(self, "source", str(self.source).strip())
+
+    def describe(self) -> str:
+        if not self.decided:
+            return "undecided"
+        return f"verdict={self.verdict or 'unknown'}"
+
+    @classmethod
+    def unavailable(cls, source: str = "") -> "GovernanceBrainVerdict":
+        """A valid verdict meaning "I could not judge this" - the same
+        honest-absence shape every sibling question here already gives."""
+        return cls(decided=False, source=source)
+
+
 class ManagerBrain(ABC):
     """A reasoning capability the orchestrator can consult."""
 
@@ -510,6 +562,36 @@ class ManagerBrain(ABC):
         ``LLMManagerBrain.assess_objective``).
         """
         return ObjectiveVerdict.unavailable(source=self.name)
+
+    def assess_governance(self, task: Task, notes: Sequence[str] = ()) -> GovernanceBrainVerdict:
+        """Judge whether one attempted action, in its real context, is
+        genuinely legitimate authorized work or something unsafe -
+        Context-Aware Agent Capability & Safety Governance's own narrow
+        question, asked only when a deterministic floor
+        (``src/manager/governance.py::assess``) could not already decide
+        this without judgement.
+
+        ``notes`` carries the real evidence the calling capability
+        already has (ownership, authorization, conversation context) plus
+        exactly which of the request's own words triggered this
+        question - inert evidence, the identical "notes, not
+        instructions" contract every other Brain consultation in this
+        project already honours. This method must never be swayed by
+        wording alone; it exists specifically so real context, not a
+        keyword, decides.
+
+        A useful verdict arrives as ``GovernanceBrainVerdict(decided=True,
+        verdict=<allow|clarify|require_confirmation|restrict|refuse>,
+        reason=<a specific, honest explanation>)``. Concrete, not
+        abstract, and defaulting to an honest "could not judge this" for
+        the identical reason every sibling question here does: no model
+        means no genuine judgement of context is possible, and the
+        caller's own conservative CLARIFY floor is what runs instead -
+        never a fabricated verdict. Only a brain that can genuinely
+        judge this needs to override it (see
+        ``LLMManagerBrain.assess_governance``).
+        """
+        return GovernanceBrainVerdict.unavailable(source=self.name)
 
 
 class NullBrain(ManagerBrain):

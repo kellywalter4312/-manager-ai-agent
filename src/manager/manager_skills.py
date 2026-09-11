@@ -36,7 +36,7 @@ from src.services.identity.personality import AgentPersonality, default_personal
 from src.services.identity.voice import VoiceActivation, VoiceProfile, default_activation, default_voice
 from src.core.contracts import AgentSpec, Task, TaskResult
 from src.manager.activity_session import ActivityBrainOps, ActivitySessions
-from src.manager.brain import BrainDecision
+from src.manager.brain import BrainDecision, GovernanceBrainVerdict
 from src.manager.capabilities import (
     MANAGER_CAPABILITIES,
     OPEN_CONVERSATION,
@@ -45,6 +45,7 @@ from src.manager.capabilities import (
     offered_capabilities,
     select_capability,
 )
+from src.manager.governance import GovernanceLog
 from src.manager.recognition import Recognition, recognise
 from src.providers.celebration import CelebrationProvider, CelebrationReaction
 from src.providers.connection import Connection
@@ -86,6 +87,8 @@ class ManagerSkills(BaseAgent):
         discover_voices: "Callable[[], tuple[Any, ...]] | None" = None,
         interface: "InterfaceDescriptor | None" = None,
         recording_sessions: "RecordingSessionRegistry | None" = None,
+        governance_log: "GovernanceLog | None" = None,
+        assess_governance: "Callable[[Task, Sequence[str]], GovernanceBrainVerdict] | None" = None,
     ) -> None:
         """``roster`` supplies the currently registered agents.
 
@@ -252,10 +255,37 @@ class ManagerSkills(BaseAgent):
         # report honestly that no recording capability is available,
         # rather than crashing.
         self._recording_sessions = recording_sessions
+        # Context-Aware Agent Capability & Safety Governance: the real,
+        # per-agent record of recent governance decisions - the
+        # identical "constructed once here, never per turn, genuinely
+        # in-process" lifetime ``ActivitySessions`` already has just
+        # above, and for the same reason: two agents' own governance
+        # history must stay genuinely independent, never a shared
+        # module-level singleton. Control Center reads this same object
+        # (ManagerSkills.governance_log below) - never a second,
+        # disconnected registry.
+        self._governance_log = governance_log if governance_log is not None else GovernanceLog()
+        # A bound way to reach the Brain's own narrow governance
+        # judgement - never the brain object itself, the identical
+        # narrowing ``converse``/``activity_brain`` already live under.
+        # None by default, the same honest-refusal shape every sibling
+        # collaborator already has: governance.assess() itself already
+        # degrades honestly (CLARIFY, never a guess) when this is None.
+        self._assess_governance = assess_governance
 
     @property
     def interface(self) -> "InterfaceDescriptor | None":
         return self._interface
+
+    @property
+    def governance_log(self) -> "GovernanceLog":
+        """The real, per-agent record of recent governance decisions -
+        read by Control Center, written by every capability that calls
+        through ``src/manager/governance.py::assess`` for this agent.
+        Never empty-by-construction-elsewhere: always the same
+        ``GovernanceLog`` instance this agent's own capability handlers
+        write to."""
+        return self._governance_log
 
     def bind_conversation_history(self, history: "Callable[[], Sequence[str]]") -> None:
         """Wire the real conversation's recent history in, once the room
@@ -563,5 +593,7 @@ class ManagerSkills(BaseAgent):
                 activity_brain=self._activity_brain,
                 discover_voices=self._discover_voices,
                 recording_sessions=self._recording_sessions,
+                governance_log=self._governance_log,
+                assess_governance=self._assess_governance,
             )
         )

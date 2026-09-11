@@ -65,7 +65,8 @@ from src.manager.activity_session import (
     PendingClarification,
     PendingConfirmation,
 )
-from src.manager.brain import BrainDecision
+from src.manager.brain import BrainDecision, GovernanceBrainVerdict
+from src.manager.governance import GovernanceLog
 from src.manager.guided_interaction import guided_interaction_response
 from src.services.identity.recording_session import RecordingSessionRegistry
 from src.manager.knowledge import (
@@ -402,6 +403,24 @@ class CapabilityRequest:
     # start_recording/stop_recording report honestly that recording is
     # unavailable, rather than crashing.
     recording_sessions: "RecordingSessionRegistry | None" = None
+    # Context-Aware Agent Capability & Safety Governance: the real,
+    # per-agent record of recent governance decisions - handed through
+    # whole (the same "already narrow enough" shape ``activity_sessions``
+    # already has: a handler only ever calls ``.record()``/``.recent()``
+    # on it, never reaches anything else through it), and read by
+    # Control Center from the identical object a handler wrote to -
+    # never a second, disconnected registry. None when no log reaches
+    # this request (a bare construction, or an older caller) - governed
+    # capabilities simply skip recording, exactly as they already skip
+    # retaining memory when ``retain`` is None.
+    governance_log: "GovernanceLog | None" = None
+    # A bound way to reach the Brain's own narrow governance judgement -
+    # never the brain object itself, the identical narrowing
+    # ``converse``/``activity_brain`` already live under. None by
+    # default, the same honest-refusal shape every sibling collaborator
+    # already has: ``governance.assess()`` itself already degrades
+    # honestly (CLARIFY, never a guess) when this is None.
+    assess_governance: "Callable[[Task, Sequence[str]], GovernanceBrainVerdict] | None" = None
 
     @property
     def knows_the_user(self) -> bool:
@@ -2315,6 +2334,27 @@ def revise_artifact(request: CapabilityRequest) -> TaskResult:
         return TaskResult.failure(
             request.task, request.own_name, f"I couldn't find that handout to revise: {current.error}",
         )
+
+    # Context-Aware Agent Capability & Safety Governance's real
+    # integration point for the existing document-artifact capability -
+    # never a PDF-specific mechanism, the identical generic
+    # ``_governance_check`` ``connected_action`` above already uses.
+    # Real evidence, not invented here: the artifact was just found in
+    # THIS agent's own document store (``current.ok``), which is
+    # genuine ownership evidence a keyword match alone could never
+    # provide - exactly what lets legitimate authorized editing (of a
+    # document whose surface wording might otherwise look concerning)
+    # be told apart from something genuinely unsafe.
+    paused = _governance_check(
+        request, capability="revise_artifact", operation="revise_document", action_kind="write",
+        notes=(
+            f"This document (artifact {artifact_id}) already exists in the requesting agent's own, "
+            "governed document store, found there just now - it is not a document belonging to, or "
+            "reached from, anyone else.",
+        ),
+    )
+    if paused is not None:
+        return paused
 
     new_content = _parse_document_content(text)
     if new_content is None:
@@ -4960,6 +5000,52 @@ def _raise_connected_action_confirmation(
     )
 
 
+def _governance_check(
+    request: CapabilityRequest, *, capability: str, operation: str, action_kind: str,
+    authorized: bool = True, notes: "Sequence[str]" = (),
+) -> "TaskResult | None":
+    """Context-Aware Agent Capability & Safety Governance's one real
+    entry point from a capability handler: consult
+    ``src/manager/governance.py::assess`` with whatever real evidence
+    this handler already has, record the decision to this agent's own
+    ``governance_log`` (Control Center's own observability surface -
+    never a second, disconnected registry), and translate the verdict
+    into what the handler should do next.
+
+    Returns ``None`` for ALLOW or REQUIRE_CONFIRMATION - both mean
+    "proceed" here: REQUIRE_CONFIRMATION never executes anything itself,
+    it only means the caller's own existing consequential-action
+    confirmation path (already about to run, or already run, for a
+    genuinely consequential operation) must not be skipped - this layer
+    never invents a second confirmation mechanism. Returns a real,
+    honest ``TaskResult`` for CLARIFY (an honest pause, nothing
+    attempted) or RESTRICT/REFUSE (a genuine, specific refusal) -
+    the caller returns this directly rather than proceeding.
+    """
+    from src.manager.governance import GovernanceContext, GovernanceVerdict, assess
+
+    context = GovernanceContext(
+        task=request.task, agent_name=request.own_name, capability=capability,
+        operation=operation, action_kind=action_kind, authorized=authorized, notes=tuple(notes),
+    )
+    decision = assess(context, ask_brain=request.assess_governance)
+    if request.governance_log is not None:
+        request.governance_log.record(
+            decision, agent_name=request.own_name, capability=capability, operation=operation,
+        )
+
+    if decision.verdict in (GovernanceVerdict.ALLOW, GovernanceVerdict.REQUIRE_CONFIRMATION):
+        return None
+    if decision.verdict is GovernanceVerdict.CLARIFY:
+        return TaskResult.success(
+            request.task, request.own_name, decision.reason,
+            payload={"handled_by": "governance", "verdict": decision.verdict.value, "capability": capability},
+        )
+    return TaskResult.failure(
+        request.task, request.own_name, f"[{decision.verdict.label}] {decision.reason}",
+    )
+
+
 def connected_action(request: CapabilityRequest) -> TaskResult:
     """Attempt one governed action through Alfred's configured
     connection - see this section's own module comment for the full
@@ -5040,14 +5126,31 @@ def connected_action(request: CapabilityRequest) -> TaskResult:
             )
         params = {p.name: available[p.name] for p in parameters if p.name in available}
 
+    requires_confirmation = getattr(connection, "requires_confirmation_for", None)
+    is_consequential = requires_confirmation is not None and requires_confirmation(operation)
+
+    # Context-Aware Agent Capability & Safety Governance: one more,
+    # additive layer beyond the existing authorization/confirmation
+    # checks above - never a replacement for either. Checked after both,
+    # so governance reasons about the real, fully-resolved action (the
+    # actual operation, its actual gathered values) rather than an
+    # abstract one that might still fail for an unrelated reason.
+    paused = _governance_check(
+        request, capability="connected_action", operation=operation,
+        action_kind="consequential" if is_consequential else "read",
+        authorized=op_authorization.grants_access,
+        notes=(f"'{operation}' is performed through the governed '{connection.name}' connection.",),
+    )
+    if paused is not None:
+        return paused
+
     # Consequential operations are never performed on the strength of
     # one remark alone - see this section's own module comment. Checked
-    # last, after authorization and parameter resolution, so the
-    # confirmation actually describes the real operation about to run
-    # (with its real, already-gathered values) rather than an abstract
-    # one that might still fail for an unrelated reason.
-    requires_confirmation = getattr(connection, "requires_confirmation_for", None)
-    if requires_confirmation is not None and requires_confirmation(operation):
+    # last, after authorization, parameter resolution and governance,
+    # so the confirmation actually describes the real operation about to
+    # run (with its real, already-gathered values) rather than an
+    # abstract one that might still fail for an unrelated reason.
+    if is_consequential:
         return _raise_connected_action_confirmation(request, connection, operation, params)
 
     return _execute_connected_operation(request, connection, operation, params)

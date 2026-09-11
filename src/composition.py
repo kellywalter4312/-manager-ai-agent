@@ -708,6 +708,11 @@ def build_manager(
         # ActivityBrainOps's own docstring for why this is four bound
         # callables rather than the brain.
         activity_brain=ActivityBrainOps.from_brain(runtime.manager_brain),
+        # Context-Aware Agent Capability & Safety Governance: the same
+        # canonical Brain's own narrow governance judgement, bound the
+        # identical way - never a second Brain, never the brain object
+        # itself.
+        assess_governance=runtime.manager_brain.assess_governance,
         # Stage 12: the exact same store ManagerAgent itself uses
         # below - never a second memory.
         recall=manager_memory.recall,
