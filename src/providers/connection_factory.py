@@ -104,11 +104,16 @@ def build_connection(
         if declared is not None:
             logger.info("connection ready: %s (declared service)", declared.name)
             return declared
+        site = _build_site(settings.connection_provider)
+        if site is not None:
+            logger.info("connection ready: %s (declared site)", site.name)
+            return site
         raise ValueError(
             f"Unknown connection provider {settings.connection_provider!r}. "
             f"Available built-in: {', '.join(available_connection_providers())}. "
             "A name not listed there must first be registered with "
-            "'services <name> declare ...' (see Control Center)."
+            "'services <name> declare ...' or 'sites <name> declare ...' "
+            "(see Control Center)."
         ) from None
 
     connection = builder(settings, adapter_version)
@@ -146,3 +151,34 @@ def _build_declared(name: str) -> "Connection | None":
     )
     account = store.active(descriptor.name)
     return DeclaredConnection(descriptor, account)
+
+
+def _build_site(name: str) -> "Connection | None":
+    """``name`` as a declared website, built into a real
+    ``WebsiteConnection`` with whatever credential is already on file
+    for it - or ``None`` if nothing was ever declared under that name.
+    Tried only after ``_build_declared`` finds nothing (a name is
+    either a declared REST service or a declared site, never both -
+    ``ServiceDescriptor``/``SiteDescriptor`` each reserve "null"/
+    "gmail" for the same reason, and a person declaring the identical
+    name under both registries gets the REST one, deterministically,
+    never an ambiguity surfaced mid-conversation). Imported locally,
+    the identical reason ``_build_declared`` imports its own
+    dependencies only when selected: a plain "null"/"gmail" run - or
+    one selecting a declared REST service - never touches the browser
+    backend or the site registry file at all.
+    """
+    from src.providers.site_descriptor import SiteDescriptor  # noqa: F401 - documents the real shape read below
+    from src.providers.website_connection import WebsiteConnection
+    from src.services.connections import site_registry as site_registry_module
+    from src.services.credentials import account_store_file as account_store_file_module
+
+    registry = site_registry_module.load_site_registry(site_registry_module.DEFAULT_SITES_PATH)
+    descriptor = registry.get(name)
+    if descriptor is None:
+        return None
+    store = account_store_file_module.load_credential_store(
+        account_store_file_module.DEFAULT_ACCOUNTS_PATH
+    )
+    account = store.active(descriptor.name)
+    return WebsiteConnection(descriptor, account)

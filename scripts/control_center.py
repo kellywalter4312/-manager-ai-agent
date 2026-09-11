@@ -119,6 +119,13 @@ from src.services.connections.service_registry import (  # noqa: E402
     forget_service,
     load_service_registry,
 )
+from src.providers.site_descriptor import SiteDescriptor  # noqa: E402
+from src.services.connections.site_registry import (  # noqa: E402
+    DEFAULT_SITES_PATH,
+    declare_site,
+    forget_site,
+    load_site_registry,
+)
 from src.services.ecosystem.registry_factory import build_ecosystem_registry  # noqa: E402
 from src.evolution import RiskLevel  # noqa: E402
 from src.services.evolution import ecosystem_evolution  # noqa: E402
@@ -286,6 +293,38 @@ HELP = """
   above) and is selected with MANAGER_CONNECTION_PROVIDER=<name> on the
   next start - the same "declared, credentialed, then selected" shape
   gmail already follows, generalised to any name.
+
+  sites                     every declared website - name, origin,
+                             whether it needs a session credential
+  sites <name>               one declared site's full detail
+  sites <name> declare <base-url> [auth-cookie-name]
+                             declare a legitimate new website - no code
+                             change, ever, for a new site. Its usable
+                             fields/controls are never declared up
+                             front: they are discovered live, every
+                             visit, by the real, JS-capable browser
+                             backend itself. auth-cookie-name is
+                             optional - omit it for a site that needs
+                             no login at all.
+  sites <name> execute <operation> [key=value ...]
+                             run one already-declared, already-
+                             connected browser operation for real,
+                             through the actual Chromium engine -
+                             navigate/read_page/fill_field/click, the
+                             identical fixed vocabulary every declared
+                             site shares. navigate/read_page/fill_field
+                             need no confirmation; click - the one
+                             operation that can have a real effect on
+                             the real site - needs the identical
+                             confirm_token dance every other
+                             consequential write here already requires.
+  sites <name> forget        remove a declared site permanently
+
+  A declared site becomes a real, usable connection (reachable through
+  'talk', the identical 'connected account' capability every other
+  connection already uses) the identical "declared, credentialed where
+  needed, then selected" way a declared service does -
+  MANAGER_CONNECTION_PROVIDER=<name> on the next start.
 
   RELOAD / RESTART REQUIRED: 'provider ... add/select/revoke' and
   'connections ... connect/disconnect' persist to disk immediately, but
@@ -1637,6 +1676,142 @@ def run_services_command(centre: "ControlCenter", rest: str) -> str:
     return f"unknown services action '{action}' for '{name}'. Try: discover, declare, execute, forget"
 
 
+def run_sites_command(centre: "ControlCenter", rest: str) -> str:
+    """Decide what to answer for the ``sites`` verb - literal website
+    interaction's own declare/execute/forget/list, the direct
+    counterpart to ``run_services_command`` above for a browser-backed
+    connection instead of a REST one.
+
+    **Why there is no ``discover`` here, unlike ``services``.** A REST
+    service's own operations are worth discovering and previewing
+    ahead of time because they are fixed and declared once. A
+    website's usable fields and controls are not - they exist only on
+    the page, discovered live, every visit, by ``WebsiteConnection``
+    itself the moment ``read_page`` actually runs. There is nothing
+    meaningful to preview at declare time; declaring a site is just
+    naming it and its one fixed origin.
+
+    Reads/writes ``DEFAULT_SITES_PATH`` by the identical explicit-
+    argument shape ``run_services_command`` already threads
+    ``DEFAULT_SERVICES_PATH`` through, for the identical reason: a test
+    can monkeypatch this module's own ``DEFAULT_SITES_PATH`` and have
+    every call below honour it.
+    """
+    args = rest.split()
+    if not args:
+        registry = load_site_registry(DEFAULT_SITES_PATH)
+        if not registry:
+            return (
+                "no sites declared yet.\n"
+                "declare one with: sites <name> declare <base-url> [auth-cookie-name]"
+            )
+        lines = ["DECLARED SITES (literal website interaction)", ""]
+        for name, descriptor in sorted(registry.items()):
+            auth = "session credential required" if descriptor.requires_auth else "open"
+            lines.append(f"{name}: {descriptor.base_url} ({auth})")
+        return "\n".join(lines)
+
+    name, *rest_args = args
+    normalised = name.strip().lower()
+
+    if not rest_args:
+        registry = load_site_registry(DEFAULT_SITES_PATH)
+        descriptor = registry.get(normalised)
+        if descriptor is None:
+            return f"'{name}' is not a declared site. Try: sites (to list all)"
+        lines = [f"{descriptor.name}: {descriptor.base_url}"]
+        if descriptor.description:
+            lines.append(descriptor.description)
+        auth = f"session credential required (cookie '{descriptor.auth_cookie_name}')" if descriptor.requires_auth else "open - no credential needed"
+        lines.append(f"  authorization: {auth}")
+        from src.providers.website_connection import SUPPORTED_OPERATIONS, _CONSEQUENTIAL_OPERATIONS
+
+        for op in SUPPORTED_OPERATIONS:
+            kind = "consequential - needs confirmation" if op in _CONSEQUENTIAL_OPERATIONS else "safe"
+            lines.append(f"  {op} ({kind})")
+        return "\n".join(lines)
+
+    action = rest_args[0].lower()
+
+    if action == "declare":
+        if len(rest_args) < 2:
+            return "usage: sites <name> declare <base-url> [auth-cookie-name]"
+        base_url = rest_args[1]
+        auth_cookie_name = rest_args[2] if len(rest_args) >= 3 else ""
+        try:
+            descriptor = SiteDescriptor(name=name, base_url=base_url, auth_cookie_name=auth_cookie_name)
+        except ValueError as exc:
+            return f"could not declare '{name}': {exc}"
+        declare_site(descriptor, DEFAULT_SITES_PATH)
+        credential_note = (
+            f" Add a credential with 'connections {descriptor.name} connect <account-id> <credential>' "
+            f"- it will be sent as the '{auth_cookie_name}' session cookie."
+            if descriptor.requires_auth else " No credential is needed - this site is open."
+        )
+        return (
+            f"declared '{descriptor.name}' at {descriptor.base_url}.{credential_note} "
+            f"Select it with MANAGER_CONNECTION_PROVIDER={descriptor.name} on the next start."
+        )
+
+    if action == "execute":
+        # The identical DISCOVER(live) -> EXECUTE -> VERIFY -> RECORD
+        # lifecycle 'services <name> execute' already gives a REST
+        # operation, reusing the identical governance mechanisms -
+        # never a second confirm_token dance, never a second audit
+        # path - now reaching a real, JS-capable browser instead of a
+        # REST client. navigate/read_page/fill_field need no more
+        # confirmation than a plain read already does; click - the one
+        # operation that can have a real effect on the real site - is
+        # gated exactly like every other consequential write here
+        # already is (see classify_administrative_write's own 'sites
+        # ... execute' clause, which this command is reached through).
+        if len(rest_args) < 2:
+            return "usage: sites <name> execute <operation> [key=value ...]"
+        operation = rest_args[1]
+        params: "dict[str, str]" = {}
+        for raw_param in rest_args[2:]:
+            if "=" not in raw_param:
+                return f"could not execute '{operation}' on '{name}': '{raw_param}' must be key=value"
+            key, _, value = raw_param.partition("=")
+            if not key:
+                return f"could not execute '{operation}' on '{name}': a parameter name must not be empty"
+            params[key] = value
+
+        registry = load_site_registry(DEFAULT_SITES_PATH)
+        descriptor = registry.get(normalised)
+        if descriptor is None:
+            return f"'{name}' is not a declared site - declare it first."
+
+        from src.providers.website_connection import SUPPORTED_OPERATIONS, WebsiteConnection
+        from src.services.credentials.account_store_file import load_credential_store
+
+        if operation not in SUPPORTED_OPERATIONS:
+            return f"'{name}' has no operation named '{operation}'. Declared: {', '.join(SUPPORTED_OPERATIONS)}"
+
+        store = load_credential_store(DEFAULT_ACCOUNTS_PATH)
+        account = store.active(descriptor.name)
+        connection = WebsiteConnection(descriptor, account)
+
+        auth_state = connection.authorization_for(operation)
+        if not auth_state.grants_access:
+            return (
+                f"'{operation}' on '{name}' is not authorized - no credential is on file. "
+                f"Add one with 'connections {name} connect <account-id> <credential>' first."
+            )
+
+        result = connection.execute(operation, **params)
+        connection.close()
+        if not result.ok:
+            return f"'{operation}' on '{name}' did not succeed ({result.status.value}): {result.detail}"
+        return f"'{operation}' on '{name}' succeeded:\n{result.detail}"
+
+    if action == "forget":
+        removed = forget_site(normalised, DEFAULT_SITES_PATH)
+        return f"forgot '{normalised}'" if removed else f"'{name}' was not declared"
+
+    return f"unknown sites action '{action}' for '{name}'. Try: declare, execute, forget"
+
+
 # ---------------------------------------------------------------------------
 # Full Alfred OS Ecosystem Evolution: a real, governed management surface
 # spanning the whole ecosystem - providers, connections, specialists,
@@ -1949,6 +2124,30 @@ def classify_administrative_write(command: str) -> "tuple[bool, str]":
             return False, ""
         return True, f"execute the operation '{operation_name}' on the connected service '{service_name}'"
 
+    if verb == "sites" and len(parts) >= 3 and parts[2].lower() in ("declare", "forget"):
+        action = parts[2].lower()
+        if action == "declare":
+            return True, f"declare a new website connection '{parts[1]}'"
+        return True, f"forget the declared site '{parts[1]}'"
+
+    if verb == "sites" and len(parts) >= 4 and parts[2].lower() == "execute":
+        # Literal-website-interaction counterpart to 'services ...
+        # execute' above: the identical operation-level, not
+        # connection-level, classification - navigate/read_page/
+        # fill_field need no more confirmation than a plain read
+        # already does; click genuinely changes state on the real
+        # site. Read from WebsiteConnection's own fixed, universal
+        # classification directly (never a second, hand-maintained
+        # copy of "which operation is consequential" kept in sync by
+        # hand) - importing the one real constant that already governs
+        # every other path to the identical fact.
+        from src.providers.website_connection import _CONSEQUENTIAL_OPERATIONS
+
+        operation_name = parts[3].lower()
+        if operation_name not in _CONSEQUENTIAL_OPERATIONS:
+            return False, ""
+        return True, f"execute the operation '{operation_name}' on the connected site '{parts[1]}'"
+
     if (
         verb == "ecosystem" and len(parts) >= 5
         and parts[2].lower() in ("run", "rollback")
@@ -1986,7 +2185,7 @@ def _administrative_write_succeeded(verb: str, result: str) -> bool:
         return text.startswith("added ") or " is now active." in text or text.startswith("revoked ")
     if verb == "connections":
         return text.startswith("connected ") or text.startswith("disconnected ")
-    if verb == "services":
+    if verb in ("services", "sites"):
         return text.startswith("declared ") or text.startswith("forgot ") or "' succeeded:" in text
     if verb == "capabilities":
         return " is now enabled " in text or " is now disabled " in text
@@ -2578,6 +2777,11 @@ def run_command(
 
     if verb == "services":
         result = run_services_command(centre, rest)
+        _record_if_administrative_write(command, result, action_log_path)
+        return result
+
+    if verb == "sites":
+        result = run_sites_command(centre, rest)
         _record_if_administrative_write(command, result, action_log_path)
         return result
 

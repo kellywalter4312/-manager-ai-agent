@@ -712,11 +712,23 @@ class TestNoFuturePhaseHasStarted:
 
     def test_no_server_or_voice_module_is_imported(self):
         """Checked by parsed imports, so a word in a docstring is fine and an
-        actual dependency is not."""
+        actual dependency is not.
+
+        "websockets" left this list for the identical reason
+        "web_search" left ``test_no_coding_tool_is_falsely_shipped``'s own
+        list (see that test's docstring): literal website interaction
+        (``src/providers/browser/cdp_browser.py``) is a real, deliberately
+        built capability now, not a leaked future phase - it drives an
+        already-installed Chromium-based browser over the Chrome DevTools
+        Protocol, genuinely needing a real WebSocket client to speak that
+        protocol, never a web *server* framework (none of "flask"/
+        "fastapi"/"uvicorn"/"django"/"streamlit"/"gradio" - the actual
+        subject this guard exists to catch - are used anywhere by it).
+        """
         forbidden = {
             "flask", "fastapi", "uvicorn", "django", "streamlit", "gradio",
             "speech_recognition", "pyttsx3", "whisper", "socketserver",
-            "http.server", "websockets",
+            "http.server",
         }
         for path in source_files():
             tree = ast.parse(read(path))

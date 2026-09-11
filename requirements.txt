@@ -58,5 +58,15 @@ python-pptx>=0.6
 # than relied on by accident.
 cryptography>=41.0
 
+# Optional - only needed for literal website interaction
+# (MANAGER_CONNECTION_PROVIDER=<a declared site> - see
+# src/providers/browser/cdp_browser.py). Speaks the Chrome DevTools
+# Protocol to an already-installed, real Chromium-based browser (Edge or
+# Chrome) - no browser binary is bundled or downloaded, and no browser-
+# automation framework (Playwright/Selenium) is depended on. Imported
+# lazily; the project, and every other connection kind, run without it
+# installed.
+websockets>=12.0
+
 # Development dependencies:
 pytest>=8.0
