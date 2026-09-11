@@ -128,7 +128,17 @@ _OPERATION_DESCRIPTIONS: "dict[str, str]" = {
     # sibling operation's name would make an unrelated request look
     # equally plausible for both and turn a genuinely unambiguous
     # request into a manufactured tie.
-    "navigate": "loads a different location within this website's own origin",
+    #
+    # Also deliberately free of any possessive apostrophe ("website's"):
+    # tokenize()'s own word pattern (``[a-z0-9]+``) does not include
+    # apostrophes, so "website's" silently becomes two tokens,
+    # "website" and a stray single-letter "s" - which then collides
+    # with ANY possessive phrase in a real request ("someone else's
+    # account", "my own account's settings"), the identical
+    # manufactured-tie failure a shared operation name already causes,
+    # found by exactly that scenario during this checkpoint's own
+    # governance test.
+    "navigate": "loads a different location while staying on this same website",
     "read_page": "inspects what is currently rendered on screen and lists the real, usable fields, controls and links found there",
     "fill_field": "enters a real value into a control that was already found and identified - a local change only, nothing is sent yet",
     "click": "activates a button or link that was already found and identified - a consequential action on the real site",

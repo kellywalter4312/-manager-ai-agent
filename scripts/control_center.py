@@ -85,6 +85,7 @@ from src.control_center.render import (  # noqa: E402
     render_overview,
     render_calendar,
     render_experiences,
+    render_governance,
     render_personal_context,
     render_recordings,
     render_workspaces,
@@ -192,6 +193,12 @@ HELP = """
   unresolved               personal facts Alfred knows only as uncertainty
   personal                 self-declared personal context taught in conversation
                            (skills, schedules, ...) - current state, per topic
+  governance               the real, most-recent Context-Aware Agent Capability
+                           & Safety Governance decisions - what was attempted,
+                           by which capability/agent, and why it was allowed,
+                           paused for clarification, sent through confirmation,
+                           restricted, or refused. Read-only: a decision is
+                           made only when a real governed action is attempted.
   calendar                 real, structured calendar items taught in conversation -
                            current state, per item
   experience               genuinely due events and the real visual/animation
@@ -2309,6 +2316,15 @@ def run_command(
         # like every other view here: teaching happens through ordinary
         # conversation, not from this screen.
         return render_personal_context(centre.personal_context(), columns)
+
+    if verb == "governance":
+        # Context-Aware Agent Capability & Safety Governance: the real,
+        # most-recent decisions Alfred's own governed capabilities
+        # actually made - never decorative, never a second registry.
+        # Read-only, like every other view here: a decision is made only
+        # when a real governed action is actually attempted, never from
+        # this screen.
+        return render_governance(centre.governance(), columns)
 
     if verb == "calendar":
         # Generalized Personal Organization/Calendar checkpoint: real,

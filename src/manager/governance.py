@@ -38,11 +38,14 @@ degrades honestly (CLARIFY, never a guess) when no Brain is configured -
 the same rule every other narrow Brain question in this project already
 holds itself to.
 
-**A verdict can only ever be escalated by evidence, never a confirmation
-requirement silently removed.** A consequential action's own floor
-(``REQUIRE_CONFIRMATION``) is what ``assess`` returns unless something
-makes it *more* restrictive - it is never downgraded to ``ALLOW`` merely
-because reasoning judged the wording itself unconcerning. This is what
+**A confirmation requirement can never be silently removed by a
+favourable content judgement.** A consequential action's own floor
+(``REQUIRE_CONFIRMATION``) is what ``assess`` returns unless reasoning
+names something at least as protective - it is never downgraded all
+the way to ``ALLOW`` merely because reasoning judged the wording itself
+unconcerning. CLARIFY/RESTRICT/REFUSE are each already at least as
+protective as requiring confirmation (none of them lets anything
+execute), so none of those is overridden - only ALLOW is. This is what
 keeps this layer additive to, never a replacement for, the existing
 ``requires_confirmation_for``/``PendingConfirmation`` boundary.
 
@@ -72,9 +75,21 @@ def utc_now() -> datetime:
 
 class GovernanceVerdict(str, Enum):
     """The five governed outcomes - never more, never fewer, and never a
-    per-capability variant of one of these. Ordered by severity
-    (``_SEVERITY`` below): a caller-established floor can only ever be
-    raised by reasoning, never lowered."""
+    per-capability variant of one of these.
+
+    Deliberately NOT a single linear severity scale. CLARIFY, RESTRICT
+    and REFUSE are each a genuinely different KIND of caution
+    (respectively: "not enough is known yet", "this specific action
+    should not proceed as asked", "this is genuinely unsafe"), not
+    degrees of one thing - a CLARIFY is not "weaker" than a
+    REQUIRE_CONFIRMATION merely because a consequential action's own
+    floor happens to be REQUIRE_CONFIRMATION; pausing for clarification
+    is at least as protective as pausing for a yes/no. The one real
+    invariant ``assess`` enforces (see its own floor-preservation
+    comment) is narrower and does not need a total order: a
+    consequential action's own floor may never be silently downgraded
+    all the way to ALLOW.
+    """
 
     ALLOW = "allow"
     CLARIFY = "clarify"
@@ -91,15 +106,6 @@ class GovernanceVerdict(str, Enum):
             "restrict": "RESTRICT",
             "refuse": "REFUSE",
         }[self.value]
-
-
-_SEVERITY: "dict[GovernanceVerdict, int]" = {
-    GovernanceVerdict.ALLOW: 0,
-    GovernanceVerdict.CLARIFY: 1,
-    GovernanceVerdict.REQUIRE_CONFIRMATION: 2,
-    GovernanceVerdict.RESTRICT: 3,
-    GovernanceVerdict.REFUSE: 4,
-}
 
 # Valid values for GovernanceContext.action_kind - a generic classification
 # of what kind of effect the action has, never a capability name. "read"
@@ -287,10 +293,14 @@ def assess(
                 source=brain_verdict.source, confidence=brain_verdict.confidence,
             )
 
-    if _SEVERITY[decision.verdict] < _SEVERITY[floor]:
+    if floor is GovernanceVerdict.REQUIRE_CONFIRMATION and decision.verdict is GovernanceVerdict.ALLOW:
         # Reasoning judged the content fine, but the action was already
         # consequential regardless of content - the existing confirmation
         # boundary is never bypassed by a favourable content judgement.
+        # Every OTHER verdict (CLARIFY, REQUIRE_CONFIRMATION itself,
+        # RESTRICT, REFUSE) is already at least as protective as
+        # requiring confirmation would be, so none of them is overridden
+        # here - only a silent downgrade all the way to ALLOW is.
         decision = GovernanceDecision(floor, decision.reason, source=decision.source, confidence=decision.confidence)
     return decision
 

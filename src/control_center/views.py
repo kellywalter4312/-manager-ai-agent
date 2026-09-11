@@ -197,6 +197,25 @@ class PersonalContextTopicView:
 
 
 @dataclass(frozen=True)
+class GovernanceDecisionView:
+    """One real, past Context-Aware Agent Capability & Safety Governance
+    decision - read-only, genuinely live: this is one
+    ``GovernanceRecord`` (``src/manager/governance.py``'s own per-agent,
+    in-process log), never a decorative example and never a second
+    governance registry. ``at`` is pre-rendered (ISO-8601) the same way
+    every other timestamp-carrying view in this file already is, so a
+    renderer needs no knowledge of ``datetime`` formatting."""
+
+    at: str
+    agent_name: str
+    capability: str
+    operation: str
+    verdict: str
+    reason: str
+    source: str
+
+
+@dataclass(frozen=True)
 class CalendarItemView:
     """One real, structured calendar item's current state - read-only,
     and genuinely live: this is one ``CalendarItemRecord``

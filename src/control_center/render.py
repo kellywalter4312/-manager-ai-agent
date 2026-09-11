@@ -31,6 +31,7 @@ from src.control_center.views import (
     CalendarItemView,
     ConversationTurn,
     ExperienceView,
+    GovernanceDecisionView,
     HistoryView,
     OverviewView,
     PersonalContextTopicView,
@@ -521,6 +522,32 @@ def render_personal_context(
         marker = "[ended]" if topic.status == "discontinued" else "[current]"
         out.append(f"  {marker} {topic.topic} ({topic.category})")
         out.append(f"    {topic.content}")
+    return "\n".join(out)
+
+
+def render_governance(decisions: tuple[GovernanceDecisionView, ...], columns: int | None = None) -> str:
+    """The real, most-recent Context-Aware Agent Capability & Safety
+    Governance decisions - most recent first, one block per decision,
+    naming exactly what was attempted, by which capability, and why it
+    was allowed, paused for clarification, sent through confirmation,
+    restricted, or refused. Read-only: a decision is made only when a
+    real governed capability handler actually attempts an action, never
+    from this screen."""
+    columns = columns if columns is not None else width()
+    out: list[str] = []
+    out += _heading("governance", columns)
+
+    if not decisions:
+        out.append("")
+        out.append("  no governance decisions recorded yet")
+        return "\n".join(out)
+
+    for decision in decisions:
+        out.append("")
+        operation = f":{decision.operation}" if decision.operation else ""
+        out.append(f"  [{decision.verdict}] {decision.agent_name}/{decision.capability}{operation}")
+        out.append(f"    {decision.reason}")
+        out.append(f"    at {decision.at} (source={decision.source})")
     return "\n".join(out)
 
 

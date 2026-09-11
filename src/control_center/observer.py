@@ -46,6 +46,7 @@ from src.control_center.views import (
     CalendarItemView,
     CapabilityView,
     ExperienceView,
+    GovernanceDecisionView,
     HeartbeatView,
     HistoryEvent,
     HistoryView,
@@ -587,6 +588,39 @@ class ControlCenter:
                 noted_by=item.noted_by,
             )
             for item in resolved
+        )
+
+    def governance(self, limit: int = 20) -> tuple[GovernanceDecisionView, ...]:
+        """The real, most-recent Context-Aware Agent Capability & Safety
+        Governance decisions - most recent first, never a raw, unbounded
+        dump and never a decorative example. Read-only: a decision is
+        made only when a governed capability handler actually attempts
+        an action (``_governance_check``, ``src/manager/
+        capabilities.py``); this only presents what already, genuinely
+        happened, from this Manager's own ``governance_log`` - the
+        identical object every governed handler already wrote to,
+        never a second, disconnected registry. Empty for an agent with
+        no own_skills (a bare construction) or one that has not yet
+        attempted anything governed - an honest absence, never
+        fabricated.
+        """
+        own_skills = self._manager.own_skills
+        if own_skills is None:
+            return ()
+        log = getattr(own_skills, "governance_log", None)
+        if log is None:
+            return ()
+        return tuple(
+            GovernanceDecisionView(
+                at=record.at.isoformat(),
+                agent_name=record.agent_name,
+                capability=record.capability,
+                operation=record.operation,
+                verdict=record.verdict.value,
+                reason=record.reason,
+                source=record.source,
+            )
+            for record in log.recent(limit)
         )
 
     def calendar_items(self) -> tuple[CalendarItemView, ...]:
