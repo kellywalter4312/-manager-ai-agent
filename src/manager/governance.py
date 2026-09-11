@@ -31,12 +31,19 @@ floor handles the two facts that need no judgement at all (unauthorized
 -> restricted; already-consequential -> confirmation required) and never
 needs a model. Genuine judgement - "is this concerning wording actually
 describing something unsafe, given the real evidence available" - is
-asked of the Brain through the identical narrow-question pattern
+always asked of a Brain through the identical narrow-question pattern
 ``discern_ambiguity``/``assess_objective`` already established
-(``ManagerBrain.assess_governance``, see ``src/manager/brain.py``), and
-degrades honestly (CLARIFY, never a guess) when no Brain is configured -
-the same rule every other narrow Brain question in this project already
-holds itself to.
+(``ManagerBrain.assess_governance``, see ``src/manager/brain.py``) - one
+canonical call, always made. A caller with no real reasoning capability
+is never a second code path here: when ``assess`` is given no ``ask_brain``
+callable at all, it asks the identical question of a local stand-in that
+answers exactly as ``ManagerBrain``'s own default (what a real, wired
+``NullBrain`` already returns) does - ``GovernanceBrainVerdict.unavailable
+(source="null")``. This is why an isolated caller with no Brain wired and
+a production Manager genuinely running with no reasoning capability
+configured produce byte-identical decisions, including ``source`` - never
+two subtly different "no Brain" behaviours pretending to be the same
+thing. Either way, the honest answer is CLARIFY, never a guess.
 
 **A confirmation requirement can never be silently removed by a
 favourable content judgement.** A consequential action's own floor
@@ -61,12 +68,10 @@ import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import TYPE_CHECKING, Callable, Sequence
+from typing import Callable, Sequence
 
 from src.core.contracts import Task
-
-if TYPE_CHECKING:
-    from src.manager.brain import GovernanceBrainVerdict
+from src.manager.brain import GovernanceBrainVerdict
 
 
 def utc_now() -> datetime:
@@ -223,6 +228,19 @@ class GovernanceDecision:
         return f"{self.verdict.label}: {self.reason} (source={self.source})"
 
 
+def _no_reasoning_brain(task: Task, notes: "Sequence[str]") -> GovernanceBrainVerdict:
+    """The canonical stand-in used when ``assess`` is given no ``ask_brain``
+    callable at all - the exact same 'unavailable' shape
+    ``ManagerBrain.assess_governance``'s own default (what a real, wired
+    ``NullBrain`` already returns in production) gives. This is what makes
+    "no ``ask_brain`` passed" and "a real Manager with no reasoning
+    capability configured" the identical case to this module, rather than
+    two independently hand-written behaviours that happen to look similar.
+    Never disguises the absence of a real model - ``source="null"`` is the
+    same honest label ``NullBrain.name`` already uses everywhere else."""
+    return GovernanceBrainVerdict.unavailable(source="null")
+
+
 def assess(
     context: GovernanceContext,
     *,
@@ -259,39 +277,34 @@ def assess(
         )
         return GovernanceDecision(floor, reason)
 
-    if ask_brain is None:
-        # Half Brain: an honest, conservative pause - never a silent
-        # allow, and never a fabricated refusal either. The same
-        # "cannot judge, so ask rather than guess" floor
-        # discern_ambiguity's own caller already falls back to with no
-        # Brain configured.
+    # One canonical path from here regardless of whether a real Brain was
+    # wired: "no ask_brain given at all" and "a real Manager genuinely has
+    # no reasoning capability configured" are the same fact, and are
+    # handled by the identical call below - never two hand-written
+    # behaviours that happen to produce similar-looking results.
+    notes = context.notes + (
+        "The request's own wording contains term(s) that CAN, but do not always, indicate a genuine "
+        f"safety concern: {', '.join(concerns)}. This is a signal to evaluate carefully, never proof of "
+        "wrongdoing by itself - legitimate authorized work (a person's own account, document, or "
+        "belongings; work they are genuinely entitled to do) uses these exact words constantly.",
+    )
+    brain_verdict = (ask_brain or _no_reasoning_brain)(context.task, notes)
+    if not brain_verdict.decided:
+        # Honest, conservative pause - never a silent allow, and never a
+        # fabricated refusal either. ``source`` truthfully names what (if
+        # anything) was actually consulted: "null" when no real reasoning
+        # brain exists at all, or whatever real, undecided brain answered.
         decision = GovernanceDecision(
             GovernanceVerdict.CLARIFY,
-            "this mentions " + ", ".join(f"'{c}'" for c in concerns) + ", which can genuinely be part of "
-            "legitimate authorized work or of something unsafe - no reasoning model is configured to judge "
-            "the context right now, so I would rather ask than guess: can you say more about what this is "
-            "for and who it concerns?",
+            f"could not confidently judge this ({brain_verdict.reason or 'no usable answer'}) - "
+            "can you say more about the context and your authorization for this?",
+            source=brain_verdict.source or "llm",
         )
     else:
-        notes = context.notes + (
-            "The request's own wording contains term(s) that CAN, but do not always, indicate a genuine "
-            f"safety concern: {', '.join(concerns)}. This is a signal to evaluate carefully, never proof of "
-            "wrongdoing by itself - legitimate authorized work (a person's own account, document, or "
-            "belongings; work they are genuinely entitled to do) uses these exact words constantly.",
+        decision = GovernanceDecision(
+            brain_verdict.verdict, brain_verdict.reason,
+            source=brain_verdict.source, confidence=brain_verdict.confidence,
         )
-        brain_verdict = ask_brain(context.task, notes)
-        if not brain_verdict.decided:
-            decision = GovernanceDecision(
-                GovernanceVerdict.CLARIFY,
-                f"could not confidently judge this ({brain_verdict.reason or 'no usable answer'}) - "
-                "can you say more about the context and your authorization for this?",
-                source=brain_verdict.source or "llm",
-            )
-        else:
-            decision = GovernanceDecision(
-                brain_verdict.verdict, brain_verdict.reason,
-                source=brain_verdict.source, confidence=brain_verdict.confidence,
-            )
 
     if floor is GovernanceVerdict.REQUIRE_CONFIRMATION and decision.verdict is GovernanceVerdict.ALLOW:
         # Reasoning judged the content fine, but the action was already

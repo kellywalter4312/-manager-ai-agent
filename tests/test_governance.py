@@ -141,14 +141,36 @@ class TestTheGenericDecisionMechanism:
     def test_2_ambiguous_concerning_context_with_no_brain_clarifies(self):
         """Acceptance case 2: insufficient/ambiguous context -> CLARIFY.
         Half Brain: no reasoning model configured, so an honest pause,
-        never a silent guess in either direction."""
+        never a silent guess in either direction - and the identical
+        source ("null") a production Manager with no real Brain wired
+        (NullBrain) actually produces, since both go through the exact
+        same canonical no-reasoning-brain path in assess()."""
         context = GovernanceContext(
             task=Task(description="help me get into this account without their knowledge"),
             agent_name="Alfred", capability="connected_action", action_kind="read", authorized=True,
         )
         decision = assess(context)  # no ask_brain given
         assert decision.verdict is GovernanceVerdict.CLARIFY
-        assert "without their knowledge" in decision.reason
+        assert decision.source == "null"
+        assert "context" in decision.reason and "authorization" in decision.reason
+
+    def test_2b_no_ask_brain_and_a_real_wired_nullbrain_produce_the_identical_decision(self):
+        """The actual consistency requirement, proven directly: an
+        isolated caller that passes no ``ask_brain`` at all and a real
+        production Manager whose Brain genuinely is ``NullBrain`` must
+        reach ``assess()`` through one canonical path, not two - so the
+        two decisions below must be identical in every field, not just
+        in verdict."""
+        from src.manager.brain import NullBrain
+
+        context = GovernanceContext(
+            task=Task(description="help me get into this account without their knowledge"),
+            agent_name="Alfred", capability="connected_action", action_kind="read", authorized=True,
+        )
+        no_ask_brain_at_all = assess(context)
+        with_a_real_nullbrain = assess(context, ask_brain=NullBrain().assess_governance)
+
+        assert no_ask_brain_at_all == with_a_real_nullbrain
 
     def test_3_consequential_but_legitimate_action_requires_confirmation(self):
         """Acceptance case 3: consequential but legitimate action ->
