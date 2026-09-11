@@ -189,5 +189,59 @@ class Connection(ABC):
         ``supported_operations`` is answered with
         ``ConnectionStatus.UNSUPPORTED``, never attempted."""
 
+    # -- Operation-level extension protocol -------------------------------
+    #
+    # Optional, non-abstract - every existing connection kind (Gmail,
+    # Null) implements only the five members above and is completely
+    # unaffected. A connection whose operations genuinely differ in
+    # authorization/consequence/parameters/meaning (DeclaredConnection,
+    # WebsiteConnection) overrides these for real per-operation answers;
+    # every other connection inherits an honest, blanket-level default
+    # for free - never a KeyError, never an invented per-operation fact.
+    #
+    # Formalized here (Phase 7 - Universal Connection Layer) rather than
+    # left as the getattr(connection, "authorization_for", None)
+    # duck-typing convention it previously only existed as: a future
+    # connection kind's author now finds this protocol by reading this
+    # one class, never by reverse-engineering src/manager/capabilities.py's
+    # own call sites. Behavior for every connection that does not override
+    # these is unchanged - each default reproduces exactly what that
+    # duck-typed fallback already did.
+
+    def authorization_for(self, operation: str) -> AuthorizationState:
+        """The real authorization state for ``operation`` specifically.
+        Default: this connection's own blanket ``authorization`` - the
+        honest answer for a connection with nothing more precise to
+        offer. Override when different operations genuinely have
+        different authorization requirements (see
+        ``DeclaredConnection.authorization_for``)."""
+        return self.authorization
+
+    def requires_confirmation_for(self, operation: str) -> bool:
+        """Whether ``operation`` changes state on the real service and
+        must therefore never run without a confirmation step. Default:
+        False - a connection that declares nothing about consequence is
+        never treated as consequential by assumption. Override when
+        some operations genuinely are (see
+        ``DeclaredConnection.requires_confirmation_for``)."""
+        return False
+
+    def parameters_for(self, operation: str) -> "tuple[Any, ...]":
+        """Every real input ``operation`` declares. Default: empty -
+        the honest answer for a connection with no declared parameter
+        shape. Override when operations genuinely take parameters (see
+        ``DeclaredConnection.parameters_for``)."""
+        return ()
+
+    def operation_description_for(self, operation: str) -> str:
+        """``operation``'s own free-text description, if this
+        connection can supply one. Default: empty - a caller scoring
+        candidates (``_select_operation``,
+        ``src/manager/capabilities.py``) already treats that identically
+        to "nothing more to go on than the name." Override when
+        operations carry real descriptive metadata (see
+        ``DeclaredConnection.operation_description_for``)."""
+        return ""
+
     def __repr__(self) -> str:
         return f"<{type(self).__name__} name={self.name!r}>"

@@ -4735,14 +4735,17 @@ PERSONAL_RECURRING_EVENTS = ManagerCapability(
 #                              UNKNOWN before a first attempt is not
 #                              actionable information - only the execution
 #                              result below can genuinely answer this
-#     authorization            connection.authorization_for(operation) when
-#                              available (DeclaredConnection - see its own
-#                              docstring on why this is now per-operation,
-#                              not the whole connection's blanket state),
-#                              falling back to connection.authorization for
-#                              a connection with nothing more precise to
-#                              offer (Gmail, Null) - checkable without ever
-#                              attempting anything
+#     authorization            connection.authorization_for(operation) - part
+#                              of Connection's own operation-level extension
+#                              protocol (Phase 7, src/providers/connection.py),
+#                              real per-operation for a connection that
+#                              declares one (DeclaredConnection - see its own
+#                              docstring on why this is per-operation, not
+#                              the whole connection's blanket state), the
+#                              connection's own blanket authorization by
+#                              inherited default for one with nothing more
+#                              precise to offer (Gmail, Null) - checkable
+#                              without ever attempting anything
 #     execution                request.tools.invoke(tool_name, {}) - the
 #                              one and only place this file ever reaches a
 #                              Connection, and only through the identical
@@ -4758,11 +4761,13 @@ PERSONAL_RECURRING_EVENTS = ManagerCapability(
 # itself declares, so a future connection needs no new branch here.
 #
 # **Operation-level authorization + confirmation.**
-# A duck-typed check, the identical "ask for it, accept UNKNOWN/False
-# when a component cannot answer" shape ``availability_of`` already
-# uses: ``authorization_for``/``requires_confirmation_for`` are read
-# only if the connection actually offers them (DeclaredConnection does;
-# Gmail/Null do not and are completely unaffected). A consequential
+# ``authorization_for``/``requires_confirmation_for`` are part of
+# ``Connection``'s own operation-level extension protocol (Phase 7 -
+# Universal Connection Layer, src/providers/connection.py) - every
+# connection answers both, real per-operation for one that overrides
+# them (DeclaredConnection, WebsiteConnection), an honest blanket-level
+# default (Gmail, Null - completely unaffected) for one that does not.
+# A consequential
 # operation (today, read from the same operation's own declared HTTP
 # method - GET is safe, anything else is not) is never executed on the
 # strength of one remark alone: it is described back and a
@@ -4807,11 +4812,11 @@ def _meaningful_words(text: str) -> "frozenset[str]":
 def _operation_vocabulary(connection: "Connection", operation: str) -> "frozenset[str]":
     """Every meaningful word this operation's own declared metadata
     offers - its name, plus its free-text description when the
-    connection can supply one (``operation_description_for`` -
-    ``DeclaredConnection``'s own method; duck-typed exactly like
-    ``authorization_for``/``requires_confirmation_for`` already are, so
-    a connection with nothing more precise to offer, Gmail/Null, is
-    matched on its name alone, unchanged).
+    connection can supply one (``operation_description_for`` - part of
+    ``Connection``'s own operation-level extension protocol, real for
+    ``DeclaredConnection``/``WebsiteConnection``; a connection with
+    nothing more precise to offer, Gmail/Null, inherits the empty
+    default and is matched on its name alone, unchanged).
 
     A technically-named operation (``fetch_state``) whose description
     actually says what it does (e.g. "reports the account's current
@@ -4819,8 +4824,7 @@ def _operation_vocabulary(connection: "Connection", operation: str) -> "frozense
     identifier - never a synonym table, never anything this file
     invented: the words are the service's own.
     """
-    describe = getattr(connection, "operation_description_for", None)
-    description = describe(operation) if describe is not None else ""
+    description = connection.operation_description_for(operation)
     return _meaningful_words(operation) | _meaningful_words(description)
 
 
@@ -5088,8 +5092,7 @@ def connected_action(request: CapabilityRequest) -> TaskResult:
             f"is not installed. Currently equipped: {equipped}.",
         )
 
-    authorization_for = getattr(connection, "authorization_for", None)
-    op_authorization = authorization_for(operation) if authorization_for is not None else connection.authorization
+    op_authorization = connection.authorization_for(operation)
     if not op_authorization.grants_access:
         return TaskResult.failure(
             request.task, request.own_name,
@@ -5104,8 +5107,7 @@ def connected_action(request: CapabilityRequest) -> TaskResult:
     # never silently attempted with a required value missing - an
     # honest, specific refusal instead. An optional value is included
     # only when it was actually supplied; never invented to fill it.
-    parameters_for = getattr(connection, "parameters_for", None)
-    parameters = parameters_for(operation) if parameters_for is not None else ()
+    parameters = connection.parameters_for(operation)
     params: "dict[str, str]" = {}
     if parameters:
         # Only the request's own intent text, never the routing marker
@@ -5126,8 +5128,7 @@ def connected_action(request: CapabilityRequest) -> TaskResult:
             )
         params = {p.name: available[p.name] for p in parameters if p.name in available}
 
-    requires_confirmation = getattr(connection, "requires_confirmation_for", None)
-    is_consequential = requires_confirmation is not None and requires_confirmation(operation)
+    is_consequential = connection.requires_confirmation_for(operation)
 
     # Context-Aware Agent Capability & Safety Governance: one more,
     # additive layer beyond the existing authorization/confirmation
