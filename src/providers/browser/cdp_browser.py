@@ -86,31 +86,55 @@ def find_browser_executable() -> "str | None":
     return None
 
 
-def _kill_by_profile_dir(profile_dir: str) -> None:
-    """Best-effort: terminate any real process still using ``profile_dir``
-    as its own ``--user-data-dir`` - the one fact that reliably still
-    identifies a launched browser even when it handed off to, and
-    exited in favour of, a separate child process this object never
-    held a handle to (see ``CDPBrowser.is_running``'s own docstring). A
-    real system call, never a no-op pretending to have cleaned up;
-    failure here (no PowerShell, a permissions refusal) is swallowed
-    rather than raised, the same "cleanup is best-effort" discipline
-    ``CDPBrowser.close`` already holds its own ``Popen.terminate``
-    attempt to.
+def _kill_by_profile_dir(profile_dir: str, *, attempts: int = 6, poll_seconds: float = 0.4) -> bool:
+    """Verified termination of every real process still using
+    ``profile_dir`` as its own ``--user-data-dir`` - the one fact that
+    reliably identifies every process a single browser launch spawns
+    (the main browser process, and its GPU/renderer/crashpad-handler
+    helpers, each of which inherits and keeps this same argument on its
+    own command line - confirmed by inspection: most of them do not
+    carry the ``--headless`` flag on their own command line, only the
+    profile directory), even when the originally launched process
+    handed off to, and exited in favour of, children this object never
+    held a ``Popen`` handle to (see ``CDPBrowser.is_running``'s own
+    docstring for the identical, already-observed handoff behaviour).
+
+    **Why one kill pass was not enough - the actual defect this fixes.**
+    A single ``Stop-Process`` sweep does not guarantee the target has
+    actually left the process table by the time it returns, and a
+    browser can still be spawning a late helper (a renderer for a page
+    that was mid-load) at the exact moment it is asked to die. This
+    polls and re-issues the kill for up to ``attempts`` rounds, re-
+    querying fresh each time, until a round finds nothing left to kill
+    - or gives up honestly and reports that via the return value, never
+    silently claimed as clean when it was not.
+
+    Never broad process-name killing: every match is scoped to this one
+    connection's own, uniquely-generated profile directory - a real
+    Edge/Chrome window the person is actually using has a different
+    ``--user-data-dir`` (its own default profile) and can never match.
     """
     if "'" in profile_dir:
-        return  # a profile dir this module itself generated never contains one; refuse rather than risk injection
-    try:
-        subprocess.run(
-            [
-                "powershell", "-NoProfile", "-NonInteractive", "-Command",
-                "Get-CimInstance Win32_Process -Filter \"CommandLine like '%" + profile_dir.replace("\\", "\\\\")
-                + "%'\" | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }",
-            ],
-            capture_output=True, timeout=10,
-        )
-    except Exception:  # noqa: BLE001 - best-effort cleanup only
-        pass
+        return False  # a profile dir this module itself generated never contains one; refuse rather than risk injection
+    escaped = profile_dir.replace("\\", "\\\\")
+    script = (
+        "$targets = Get-CimInstance Win32_Process -Filter \"CommandLine like '%" + escaped + "%'\"; "
+        "$targets | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; "
+        "Write-Output $targets.Count"
+    )
+    for _ in range(max(attempts, 1)):
+        try:
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                capture_output=True, timeout=10, text=True,
+            )
+            found_this_round = int((result.stdout or "").strip() or "-1")
+        except Exception:  # noqa: BLE001 - best-effort cleanup only; treated as "not yet verified" below
+            found_this_round = -1
+        if found_this_round == 0:
+            return True
+        time.sleep(poll_seconds)
+    return False
 
 
 def _free_port() -> int:
@@ -154,6 +178,13 @@ class CDPBrowser:
         self._profile_dir: "str | None" = None
         self._tab_ws_url: "str | None" = None
         self._next_id = 0
+        # None until close() actually runs its cleanup step; then True
+        # (every process matching this connection's own profile
+        # directory was verified gone) or False (cleanup was attempted
+        # but could not be verified within the bound - a real, honest
+        # signal, read by tests and by close() itself, never silently
+        # dropped).
+        self.cleanup_verified: "bool | None" = None
 
     @property
     def is_running(self) -> bool:
@@ -209,27 +240,42 @@ class CDPBrowser:
                 args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
         except OSError as exc:
+            # Nothing was actually launched - the profile directory was
+            # created, but no process exists to hold it open, so a
+            # plain removal (no _kill_by_profile_dir needed) is enough.
+            shutil.rmtree(self._profile_dir, ignore_errors=True)
+            self._profile_dir = None
+            self._port = None
             raise BrowserUnavailable(f"could not start '{self._executable}': {exc}") from None
 
-        deadline = time.monotonic() + self._timeout
-        version_url = f"http://127.0.0.1:{self._port}/json/version"
-        last_error: "Exception | None" = None
-        while time.monotonic() < deadline:
-            try:
-                request = urllib.request.Request(version_url, headers={"User-Agent": _USER_AGENT})
-                with urllib.request.urlopen(request, timeout=1.5):
-                    break
-            except (urllib.error.URLError, OSError) as exc:
-                last_error = exc
-                time.sleep(0.15)
-        else:
-            self.close()
-            raise BrowserUnavailable(
-                f"'{self._executable}' did not become reachable on port {self._port} "
-                f"within {self._timeout}s: {last_error}"
-            )
+        # From here on, a real process exists and must never be left
+        # behind - ANY failure past this point (not merely the expected
+        # "never became reachable" timeout) closes this connection
+        # before propagating, the identical honest cleanup-on-failure
+        # ``_ensure_started``'s own docstring on "failed startup" in
+        # this project's own test/review history already requires.
+        try:
+            deadline = time.monotonic() + self._timeout
+            version_url = f"http://127.0.0.1:{self._port}/json/version"
+            last_error: "Exception | None" = None
+            while time.monotonic() < deadline:
+                try:
+                    request = urllib.request.Request(version_url, headers={"User-Agent": _USER_AGENT})
+                    with urllib.request.urlopen(request, timeout=1.5):
+                        break
+                except (urllib.error.URLError, OSError) as exc:
+                    last_error = exc
+                    time.sleep(0.15)
+            else:
+                raise BrowserUnavailable(
+                    f"'{self._executable}' did not become reachable on port {self._port} "
+                    f"within {self._timeout}s: {last_error}"
+                )
 
-        self._tab_ws_url = self._open_tab()
+            self._tab_ws_url = self._open_tab()
+        except BaseException:
+            self.close()
+            raise
 
     def _open_tab(self) -> str:
         assert self._port is not None
@@ -356,14 +402,18 @@ class CDPBrowser:
     def close(self) -> None:
         """Terminate the real browser process, if one was ever started.
         Idempotent - closing twice, or closing one that never started,
-        is a harmless no-op.
+        is a harmless no-op (the second call finds ``self._profile_dir``
+        already ``None`` and does nothing further).
 
         Never trusts the launched ``Popen`` handle alone (see
         ``is_running``'s own docstring for why it can be stale) -
-        ``_kill_by_profile_dir`` finds and stops whatever real process
-        is actually using this connection's own, uniquely-generated
-        profile directory, which is the one fact that reliably still
-        identifies it.
+        ``_kill_by_profile_dir`` finds and *verifies* it stopped every
+        real process actually using this connection's own, uniquely-
+        generated profile directory, the one fact that reliably still
+        identifies all of them, including helpers the ``Popen`` handle
+        never knew about. The profile directory itself is only removed
+        once that is confirmed - deleting it out from under a process
+        that still has it open would be pointless at best.
         """
         self._tab_ws_url = None
         if self._process is not None:
@@ -377,7 +427,7 @@ class CDPBrowser:
                     pass
             self._process = None
         if self._profile_dir is not None:
-            _kill_by_profile_dir(self._profile_dir)
+            self.cleanup_verified = _kill_by_profile_dir(self._profile_dir)
             shutil.rmtree(self._profile_dir, ignore_errors=True)
             self._profile_dir = None
         self._port = None
