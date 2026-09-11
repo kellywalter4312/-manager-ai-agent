@@ -1320,9 +1320,17 @@ def main(argv: list[str] | None = None) -> int:
         # Lazily imported so a plain-HTTP run (still the default) never
         # even attempts to import the optional 'cryptography' dependency
         # this needs.
-        from scripts.dev_tls import TLSUnavailable, build_ssl_context, describe_trust_steps, ensure_certificate
+        from scripts.dev_tls import (
+            TLSUnavailable, build_ssl_context, describe_trust_steps, ensure_ca, ensure_certificate,
+        )
 
         try:
+            # A CA is ensured before any leaf, always (ensure_certificate
+            # does this internally too) - fetched again here, separately,
+            # purely to report it below; re-reading two small local files
+            # is cheaper than widening ensure_certificate's own, otherwise
+            # unchanged, single-value return contract.
+            ca = ensure_ca()
             info = ensure_certificate(extra_hosts=tuple(args.tls_host))
             httpd.socket = build_ssl_context(info).wrap_socket(httpd.socket, server_side=True)
         except TLSUnavailable as exc:
@@ -1334,7 +1342,7 @@ def main(argv: list[str] | None = None) -> int:
             httpd.server_close()
             return 2
         scheme = "https"
-        print(describe_trust_steps(info))
+        print(describe_trust_steps(ca, info))
 
     print(f"serving {scheme}://{args.host}:{args.port}/  (Ctrl+C to stop)")
     try:
