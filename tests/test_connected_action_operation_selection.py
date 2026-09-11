@@ -61,7 +61,9 @@ def real_manager(*, tools: "ToolSet | None" = None, connection: "Connection | No
     runtime = build_runtime(settings)
     manager = build_manager(runtime, mailbox=InMemoryMailbox(), profile=None, tools=tools)
     if connection is not None:
-        manager.own_skills._connection = connection
+        from src.providers.connection_resolver import ConnectionResolver
+
+        manager.own_skills._connections = ConnectionResolver({connection.name: connection}, connection.name)
     return manager
 
 

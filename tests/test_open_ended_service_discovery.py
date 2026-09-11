@@ -153,14 +153,16 @@ class TestConnectedActionReachesADeclaredServiceThroughTheUnmodifiedCapability:
             env={}, log_level="CRITICAL", memory="ephemeral", connection_provider="weatherstub",
         )
         runtime = build_runtime(settings)
-        connection = runtime.connection
+        connection = runtime.connections.default
         assert isinstance(connection, DeclaredConnection)
 
         tools = ToolSet([
             ConnectionActionTool(connection, operation="ping", description="Pings weatherstub.")
         ])
         manager = build_manager(runtime, mailbox=InMemoryMailbox(), profile=None, tools=tools)
-        manager.own_skills._connection = connection
+        from src.providers.connection_resolver import ConnectionResolver
+
+        manager.own_skills._connections = ConnectionResolver({connection.name: connection}, connection.name)
 
         result = manager.handle_task(CONNECTED_TASK)
 
@@ -184,12 +186,14 @@ class TestConnectedActionReachesADeclaredServiceThroughTheUnmodifiedCapability:
             env={}, log_level="CRITICAL", memory="ephemeral", connection_provider="weatherstub",
         )
         runtime = build_runtime(settings)
-        connection = runtime.connection
+        connection = runtime.connections.default
         tools = ToolSet([
             ConnectionActionTool(connection, operation="ping", description="Pings weatherstub.")
         ])
         manager = build_manager(runtime, mailbox=InMemoryMailbox(), profile=None, tools=tools)
-        manager.own_skills._connection = connection
+        from src.providers.connection_resolver import ConnectionResolver
+
+        manager.own_skills._connections = ConnectionResolver({connection.name: connection}, connection.name)
 
         result = manager.handle_task(CONNECTED_TASK)
         assert not result.succeeded
@@ -355,7 +359,7 @@ class TestDiscoveryFlowsIntoTheExistingConnectionMechanismEndToEnd:
             env={}, log_level="CRITICAL", memory="ephemeral", connection_provider="weatherstub",
         )
         runtime = build_runtime(settings)
-        connection = runtime.connection
+        connection = runtime.connections.default
         assert isinstance(connection, DeclaredConnection)
         assert connection.name == "weatherstub"
 
@@ -374,7 +378,9 @@ class TestDiscoveryFlowsIntoTheExistingConnectionMechanismEndToEnd:
             ConnectionActionTool(connection, operation="ping", description="Pings weatherstub.")
         ])
         manager = build_manager(runtime, mailbox=InMemoryMailbox(), profile=None, tools=tools)
-        manager.own_skills._connection = connection
+        from src.providers.connection_resolver import ConnectionResolver
+
+        manager.own_skills._connections = ConnectionResolver({connection.name: connection}, connection.name)
 
         result = manager.handle_task(CONNECTED_TASK)
         assert result.succeeded
@@ -483,7 +489,7 @@ class TestGenericOperationExecutionEndToEnd:
             env={}, log_level="CRITICAL", memory="ephemeral", connection_provider="genericsvc",
         )
         runtime = build_runtime(settings)
-        connection = runtime.connection
+        connection = runtime.connections.default
         assert isinstance(connection, DeclaredConnection)
         assert connection.supported_operations[0] == "read_item"  # the fixture's own declaration order
 
@@ -492,7 +498,9 @@ class TestGenericOperationExecutionEndToEnd:
             for op in connection.supported_operations
         ])
         manager = build_manager(runtime, mailbox=InMemoryMailbox(), profile=None, tools=tools)
-        manager.own_skills._connection = connection
+        from src.providers.connection_resolver import ConnectionResolver
+
+        manager.own_skills._connections = ConnectionResolver({connection.name: connection}, connection.name)
 
         read_result = manager.handle_task(Task(description="check my connected account: read the item"))
         assert read_result.succeeded  # the safe read, genuinely executed

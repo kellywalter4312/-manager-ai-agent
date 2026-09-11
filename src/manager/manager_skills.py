@@ -48,7 +48,7 @@ from src.manager.capabilities import (
 from src.manager.governance import GovernanceLog
 from src.manager.recognition import Recognition, recognise
 from src.providers.celebration import CelebrationProvider, CelebrationReaction
-from src.providers.connection import Connection
+from src.providers.connection_resolver import ConnectionResolver
 from src.providers.default_celebration_provider import DefaultCelebrationProvider
 from src.control_center.interfaces import InterfaceDescriptor
 from src.services.identity.identity import AgentIdentity
@@ -79,7 +79,7 @@ class ManagerSkills(BaseAgent):
         forget: "Callable[[str], bool] | None" = None,
         retain: "Callable[[MemoryRecord], object] | None" = None,
         celebration: "CelebrationProvider | None" = None,
-        connection: "Connection | None" = None,
+        connections: "ConnectionResolver | None" = None,
         calendar: "Calendar | None" = None,
         history: "Callable[[], Sequence[str]] | None" = None,
         activity_sessions: "ActivitySessions | None" = None,
@@ -178,17 +178,21 @@ class ManagerSkills(BaseAgent):
         self._celebration_provider = (
             celebration if celebration is not None else DefaultCelebrationProvider()
         )
-        # Stage 16: read-only access to one governed Connection, handed
-        # to capability handlers as-is (never executed here) - see
-        # CapabilityRequest's own docstring for why this stays a
-        # read-mostly reference rather than a bound callable like
-        # celebration above: Connection's own surface is already narrow
-        # (four read-only properties, one execute() a handler must
-        # reach only through request.tools.invoke). None by default,
+        # Stage 16 / Phase 7 (Universal Connection Layer): read-only
+        # access to every governed Connection this agent was equipped
+        # with, handed to capability handlers as-is (never executed
+        # here) - see CapabilityRequest's own docstring for why this
+        # stays a read-mostly reference rather than a bound callable
+        # like celebration above. Was a single Connection; is now a
+        # ConnectionResolver (an open-ended, per-agent connection
+        # context - see that module's own docstring), constructed once
+        # per ManagerSkills instance exactly like governance_log
+        # already is - what keeps two agents' own connections genuinely
+        # independent rather than accidentally shared. None by default,
         # the same honest-refusal shape converse/recall/forget/retain
         # already have - a Manager nobody equipped with a connection can
         # attempt none.
-        self._connection = connection
+        self._connections = connections
         # Foundation Repair #1: the same Calendar ManagerAgent itself
         # holds - how this Manager reckons days - threaded down so
         # current_datetime can answer "what day/date/month/year is it"
@@ -212,7 +216,7 @@ class ManagerSkills(BaseAgent):
         # while this Manager is running - see activity_session.py's own
         # docstring for why this is neither Memory nor a second Brain.
         # Handed through whole, the same "already narrow enough" shape
-        # Connection above and ToolSet already have - constructed once
+        # ConnectionResolver above and ToolSet already have - constructed once
         # here (never per turn) so state genuinely survives from one
         # turn to the next, the identical lifetime PresenceRegistry
         # already has at the Runtime level.
@@ -586,7 +590,7 @@ class ManagerSkills(BaseAgent):
                 forget=self._forget,
                 retain=self._retain,
                 celebration=self.celebration_reaction,
-                connection=self._connection,
+                connections=self._connections,
                 calendar=self._calendar,
                 history=self._history,
                 activity_sessions=self._activity_sessions,

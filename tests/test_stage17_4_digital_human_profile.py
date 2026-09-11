@@ -243,7 +243,7 @@ class TestProfileChangeIsIsolated:
         caps_before = tuple(
             c.name for c in centre.overview().agent(manager.own_skills.name).capabilities
         )
-        connection_before = runtime.connection
+        connection_before = runtime.connections
 
         memory = memory_for(manager, manager.own_skills.name)
         set_digital_human_style(
@@ -255,7 +255,7 @@ class TestProfileChangeIsIsolated:
             c.name for c in centre.overview().agent(manager.own_skills.name).capabilities
         )
         assert caps_after == caps_before
-        assert runtime.connection is connection_before
+        assert runtime.connections is connection_before
 
     def test_the_avatar_choice_itself_is_unaffected_by_a_style_change(self):
         """avatar_id and the other nine dimensions are two genuinely

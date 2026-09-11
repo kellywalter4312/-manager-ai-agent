@@ -49,6 +49,7 @@ from typing import Callable, Mapping
 
 from src.config.settings import Settings
 from src.providers.connection import Connection
+from src.providers.connection_resolver import ConnectionResolver
 from src.providers.null_connection import NullConnection
 from src.utils.logging import get_logger
 
@@ -151,6 +152,63 @@ def _build_declared(name: str) -> "Connection | None":
     )
     account = store.active(descriptor.name)
     return DeclaredConnection(descriptor, account)
+
+
+def build_all_connections(settings: Settings, adapter_version: str = "1") -> ConnectionResolver:
+    """Every connection this session is genuinely equipped to reach -
+    Phase 7's own Universal Connection Layer, built once, here, at
+    process-construction time: the identical, sole sanctioned moment
+    ``service_registry.py``/``site_registry.py``'s own "never a live
+    read from inside a capability handler" rule already permits (see
+    those modules' own docstrings) - the same moment ``build_connection``'s
+    own registry fallback already read them at, for one name, before
+    this checkpoint.
+
+    The configured default (``settings.connection_provider``) is
+    always included, built exactly as ``build_connection`` already
+    does it - every existing single-connection installation is
+    completely unaffected, byte-for-byte. Every other currently
+    declared service/site is included alongside it, each skipped
+    (never fatal - logged, not raised) if it genuinely fails to build,
+    the identical tolerant-of-one-bad-entry discipline
+    ``service_registry.load_service_registry`` already holds itself to
+    for a malformed file entry.
+
+    Never called from inside a capability handler - only from
+    ``composition.py``/``scripts/control_center.py``'s own
+    construction, exactly like ``build_connection`` itself.
+    """
+    default_name = settings.connection_provider
+    connections: "dict[str, Connection]" = {
+        default_name: build_connection(settings, adapter_version=adapter_version)
+    }
+
+    from src.services.connections import service_registry as service_registry_module
+    from src.services.connections import site_registry as site_registry_module
+
+    for name in service_registry_module.load_service_registry(service_registry_module.DEFAULT_SERVICES_PATH):
+        if name in connections:
+            continue
+        try:
+            built = _build_declared(name)
+        except Exception:  # noqa: BLE001 - one bad entry must never take every other connection down with it
+            logger.warning("declared service %r failed to build - skipped", name, exc_info=True)
+            continue
+        if built is not None:
+            connections[name] = built
+
+    for name in site_registry_module.load_site_registry(site_registry_module.DEFAULT_SITES_PATH):
+        if name in connections:
+            continue
+        try:
+            built = _build_site(name)
+        except Exception:  # noqa: BLE001 - same tolerance as the loop above
+            logger.warning("declared site %r failed to build - skipped", name, exc_info=True)
+            continue
+        if built is not None:
+            connections[name] = built
+
+    return ConnectionResolver(connections, default_name)
 
 
 def _build_site(name: str) -> "Connection | None":

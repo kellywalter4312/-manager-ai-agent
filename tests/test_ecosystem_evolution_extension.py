@@ -276,18 +276,18 @@ class TestConnectionAdapterEvolution:
         assert "OK" in result
 
         runtime2, *_ = real_system(connection_provider="gmail")
-        assert runtime2.connection.adapter_version == "2"
+        assert runtime2.connections.default.adapter_version == "2"
 
     def test_the_account_authorization_state_is_provably_unaffected(self):
         runtime, manager, channel, conversation = real_system(connection_provider="gmail")
         centre = ControlCenter(runtime, manager)
-        before_auth = runtime.connection.authorization
+        before_auth = runtime.connections.default.authorization
 
         run_ecosystem_command(centre, "connection.gmail propose 2 low r|b")
         run_ecosystem_command(centre, "connection.gmail run connection.gmail-1 yes")
 
         runtime2, *_ = real_system(connection_provider="gmail")
-        assert runtime2.connection.authorization == before_auth
+        assert runtime2.connections.default.authorization == before_auth
 
     def test_an_unknown_adapter_version_is_refused(self):
         runtime, manager, channel, conversation = real_system(connection_provider="gmail")
@@ -322,7 +322,7 @@ class TestConnectionAdapterEvolution:
         run_ecosystem_command(centre, "connection.gmail rollback connection.gmail-1 yes")
 
         runtime2, *_ = real_system(connection_provider="gmail")
-        assert runtime2.connection.adapter_version == "1"
+        assert runtime2.connections.default.adapter_version == "1"
 
 
 # ---------------------------------------------------------------------------

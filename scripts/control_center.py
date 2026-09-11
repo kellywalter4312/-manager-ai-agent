@@ -98,6 +98,7 @@ from src.control_center.render import (  # noqa: E402
 from src.control_center.views import VoiceView  # noqa: E402
 from src.conversation.conversation import Conversation  # noqa: E402
 from src.providers.connection import AuthorizationState, Connection  # noqa: E402
+from src.providers.connection_resolver import ConnectionResolver  # noqa: E402
 from src.providers.connection_factory import build_connection  # noqa: E402
 from src.providers.factory import ProviderConfigurationError, available_providers  # noqa: E402
 from src.providers.media.factory import (  # noqa: E402
@@ -410,27 +411,29 @@ HELP = """
 CONVERSATION_HISTORY_LIMIT = 6
 
 
-def _connection_tools(connection: Connection) -> "list[ConnectionActionTool]":
-    """Grant a real ``ConnectionActionTool`` for every operation
-    ``connection`` declares - the exact missing half of Stage 16.
+def _connection_tools(resolver: ConnectionResolver) -> "list[ConnectionActionTool]":
+    """Grant a real ``ConnectionActionTool`` for every operation every
+    connection ``resolver`` holds declares - the exact missing half of
+    Stage 16, generalized (Phase 7 - Universal Connection Layer) from
+    the one connection it originally covered to however many
+    ``resolver`` actually equips this session with.
 
     **The gap this closes.** ``connected_action``
-    (``src/manager/capabilities.py``) has always reached its connection
-    only through ``request.tools.invoke(tool_name_for(operation), ...)``
-    - a real ``Connection`` was never enough by itself, it also had to
-    be *granted* under that name in the ToolSet Alfred's own process is
-    built with. Nothing here ever did that granting: this file's own
-    ``tools=ToolSet([...])`` below named every other collaborator
-    (``runtime.communication``, ``runtime.media``, ...) but never
-    ``runtime.connection``, so a live, authorized connection's own
-    operation was unreachable through ordinary conversation for exactly
-    the reason ``connected_action`` would report - "the underlying
-    'connection_<op>' capability is not installed" - regardless of how
-    real, authorized or selected the connection itself was.
+    (``src/manager/capabilities.py``) has always reached a connection
+    only through ``request.tools.invoke(tool_name_for(connection_name,
+    operation), ...)`` - a real ``Connection`` was never enough by
+    itself, it also had to be *granted* under that name in the ToolSet
+    Alfred's own process is built with. Nothing here ever did that
+    granting: this file's own ``tools=ToolSet([...])`` below named
+    every other collaborator (``runtime.communication``,
+    ``runtime.media``, ...) but never ``runtime.connections``, so a
+    live, authorized connection's own operation was unreachable
+    through ordinary conversation regardless of how real, authorized
+    or selected the connection itself was.
 
-    **Why this is the right place, not composition.py.** Building the
-    connection (``runtime.connection``) and granting a *tool* for one of
-    its operations are different questions - the same reason
+    **Why this is the right place, not composition.py.** Building each
+    connection (``runtime.connections``) and granting a *tool* for one
+    of its operations are different questions - the same reason
     ``runtime.communication`` is built once but
     ``CommunicationReadTool``/``SendTool``/``CallTool`` are granted here,
     not inside ``composition.py``. This is the one real place every
@@ -448,27 +451,37 @@ def _connection_tools(connection: Connection) -> "list[ConnectionActionTool]":
     operation (a booking, an order, a cancellation), so the tool-grant
     boundary and the safety boundary can be the same one place they
     already are for communication: capability logic, never which tools
-    happen to exist. A future connection needs no change here either
-    way - this reads only ``connection.supported_operations``.
+    happen to exist.
+
+    **Connection-scoped tool names.** Two different connections
+    declaring an operation of the same name (two declared services
+    both offering "search", say) must never collide under one ToolSet
+    entry once more than one connection can be granted at once - see
+    ``tool_name_for``'s own docstring (``src/agents/tools/connection.py``).
+    A future connection - of any kind, however many are simultaneously
+    equipped - needs no change here either way: this reads only
+    ``resolver.names`` and each connection's own
+    ``supported_operations``/``parameters_for``.
     """
-    parameters_for = getattr(connection, "parameters_for", None)
     tools: "list[ConnectionActionTool]" = []
-    for operation in connection.supported_operations:
-        tools.append(
-            ConnectionActionTool(
-                connection,
-                operation=operation,
-                description=f"perform the already-declared '{operation}' action "
-                f"through the '{connection.name}' connection",
-                # Data-flow-through-execution checkpoint: the operation's
-                # own declared inputs (empty for a connection with
-                # nothing more precise to offer, Gmail/Null -
-                # unchanged), so a real, explicit value a step genuinely
-                # has can actually reach the connection, never merely a
-                # decision about which operation to call.
-                parameters=parameters_for(operation) if parameters_for is not None else (),
+    for name in resolver.names:
+        connection = resolver.get(name)
+        for operation in connection.supported_operations:
+            tools.append(
+                ConnectionActionTool(
+                    connection,
+                    operation=operation,
+                    description=f"perform the already-declared '{operation}' action "
+                    f"through the '{connection.name}' connection",
+                    # Data-flow-through-execution checkpoint: the operation's
+                    # own declared inputs (empty for a connection with
+                    # nothing more precise to offer, Gmail/Null -
+                    # unchanged), so a real, explicit value a step genuinely
+                    # has can actually reach the connection, never merely a
+                    # decision about which operation to call.
+                    parameters=connection.parameters_for(operation),
+                )
             )
-        )
     return tools
 
 
@@ -559,18 +572,19 @@ def build(settings: Settings):
             CommunicationReadTool(runtime.communication),
             CommunicationSendTool(runtime.communication),
             CommunicationCallTool(runtime.communication),
-            # Natural-language/live-connection integration gap closure:
-            # a real ConnectionActionTool for every one of
-            # runtime.connection's own operations, safe or
-            # consequential - see _connection_tools's own docstring for
-            # exactly what gap this closes and why granting a
-            # consequential operation's tool is safe (the identical
-            # confirm-before-execute boundary CommunicationSendTool/
-            # CallTool already rely on, never the tool grant itself).
-            # Empty for "null" (no operations at all) and unchanged for
-            # every existing caller that never configured a real
-            # connection.
-            *_connection_tools(runtime.connection),
+            # Natural-language/live-connection integration gap closure,
+            # generalized to every connection this session is equipped
+            # with (Phase 7 - Universal Connection Layer): a real
+            # ConnectionActionTool for every operation each one
+            # declares, safe or consequential - see _connection_tools's
+            # own docstring for exactly what gap this closes and why
+            # granting a consequential operation's tool is safe (the
+            # identical confirm-before-execute boundary
+            # CommunicationSendTool/CallTool already rely on, never the
+            # tool grant itself). Empty for an installation equipped
+            # with only "null" (no operations at all) and unchanged for
+            # every existing single-connection caller.
+            *_connection_tools(runtime.connections),
             # Stage 18: read-only access to the documents, books and notes
             # the user themselves put in runtime.knowledge's folder. It
             # sits beside live_information rather than replacing it -
@@ -860,8 +874,12 @@ def render_capabilities(centre: "ControlCenter") -> str:
         detail=f"provider={runtime.environment_provider.name} - manage with 'environment <agent> <choice>'",
     ))
     lines.append(_capability_row(
-        "Connection", ready=runtime.connection.name != "null",
-        detail=f"provider={runtime.connection.name} - manage with 'provider connection'",
+        "Connection", ready=runtime.connections.default.name != "null",
+        detail=(
+            f"default={runtime.connections.default.name} "
+            f"({len(runtime.connections.names)} equipped: {', '.join(runtime.connections.names)}) - "
+            "manage with 'connections'/'services'/'sites'"
+        ),
     ))
     lines.append(_capability_row(
         "Communication (messaging/calling, any recipient)",

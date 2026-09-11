@@ -119,13 +119,19 @@ class ScriptedConnection(Connection):
 def real_manager(*, tools: ToolSet | None = None, connection: Connection | None = None, **overrides):
     from src.composition import build_manager, build_runtime
     from src.config.settings import Settings
+    from src.providers.connection_resolver import ConnectionResolver
     from src.services.email.in_memory_mailbox import InMemoryMailbox
 
     settings = Settings.from_env(env={}, log_level="CRITICAL", memory="ephemeral", **overrides)
     runtime = build_runtime(settings)
     manager = build_manager(runtime, mailbox=InMemoryMailbox(), profile=None, tools=tools)
     if connection is not None:
-        manager.own_skills._connection = connection
+        # Phase 7 (Universal Connection Layer): own_skills now holds a
+        # ConnectionResolver, not one bare Connection - wrapped here so
+        # every existing caller of this helper (a real test fixture,
+        # not production code) that passes connection=... is completely
+        # unaffected.
+        manager.own_skills._connections = ConnectionResolver({connection.name: connection}, connection.name)
     return manager
 
 
@@ -196,7 +202,7 @@ class TestConnectionAvailabilityIsDistinctFromBrainAvailability:
 
     def test_connection_availability_and_brain_mode_are_read_from_different_objects(self):
         manager = manager_with_connection()
-        assert manager.own_skills._connection is not manager.brain
+        assert manager.own_skills._connections is not manager.brain
 
 
 # ---------------------------------------------------------------------------
@@ -290,7 +296,7 @@ class TestGovernedCapabilityExecution:
         request = capabilities_module.CapabilityRequest(
             task=_Task(description="check my connected account"),
             identity=None, roster=lambda: (), own_name="Alfred",
-            own_capabilities=(), tools=ToolSet(), connection=None,
+            own_capabilities=(), tools=ToolSet(), connections=None,
         )
         result = capabilities_module.connected_action(request)
         assert not result.succeeded
@@ -539,7 +545,7 @@ class TestFutureConnectionNeedsNoOrchestrationChange:
         every account parameter beside it) - composition.py still never
         names GmailConnection/NullConnection directly."""
         source = (REPO_ROOT / "src" / "composition.py").read_text(encoding="utf-8")
-        assert "build_connection(settings, adapter_version=connection_adapter_version)" in source
+        assert "build_all_connections(settings, adapter_version=connection_adapter_version)" in source
         assert "GmailConnection(" not in source
         assert "NullConnection()" not in source
 
@@ -684,8 +690,8 @@ class TestGenericityAndSafety:
             specialist_tools={"email_agent": ToolSet([tool])},
         )
         arthur = manager.registry.get("Arthur")
-        assert arthur.tools.permits(tool_name_for("read_email"))
-        outcome = arthur.tools.invoke(tool_name_for("read_email"), {})
+        assert arthur.tools.permits(tool_name_for(connection.name, "read_email"))
+        outcome = arthur.tools.invoke(tool_name_for(connection.name, "read_email"), {})
         assert outcome.ok
 
     def test_no_agent_name_hardcoded_in_the_generic_connection_layer(self):

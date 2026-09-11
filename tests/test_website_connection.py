@@ -279,7 +279,9 @@ class TestIntegratesWithTheUnmodifiedConnectedActionCapability:
         settings = Settings.from_env(env={}, log_level="CRITICAL", memory="ephemeral")
         runtime = build_runtime(settings)
         manager = build_manager(runtime, mailbox=InMemoryMailbox(), profile=None, tools=tools)
-        manager.own_skills._connection = connection
+        from src.providers.connection_resolver import ConnectionResolver
+
+        manager.own_skills._connections = ConnectionResolver({connection.name: connection}, connection.name)
         return manager
 
     def test_a_safe_read_page_operation_executes_immediately_through_natural_language(self):
@@ -310,7 +312,7 @@ class TestIntegratesWithTheUnmodifiedConnectedActionCapability:
     def test_the_tool_names_granted_are_the_generic_connection_prefixed_shape(self):
         connection = WebsiteConnection(_site(), None, browser=_FakeBrowser())
         for op in connection.supported_operations:
-            assert tool_name_for(op) == f"connection_{op}"
+            assert tool_name_for(connection.name, op) == f"connection_{connection.name}_{op}"
 
 
 class TestGenericAcrossAnyDeclaredSiteNeverHardcoded:

@@ -1,6 +1,6 @@
 """Phase 7 - Universal Connection Layer.
 
-Two things this file proves, neither a new architecture - both
+Three things this file proves, neither a new architecture - all
 strengthening what Stage 16/Phase 6 already built:
 
 1. ``Connection``'s operation-level extension protocol
@@ -20,13 +20,21 @@ strengthening what Stage 16/Phase 6 already built:
    existed anywhere else in this project.
 
 2. Two independently constructed agents (``ManagerSkills``), each
-   given their own ``Connection`` instance the identical way
+   given their own ``ConnectionResolver`` the identical way
    ``governance_log`` was already proven independent
    (``tests/test_governance.py::TestAgentIndependenceIsPreserved``),
    genuinely never share, leak into, or affect each other's
    connection - through the real, unmodified ``execute()``/
    ``connected_action`` dispatch path, never inspected by mocking it
    away.
+
+3. ONE agent, equipped with MULTIPLE simultaneous connections in one
+   ``ConnectionResolver`` - the actual canonical model Phase 7
+   requires - genuinely reaches whichever one the request's own words
+   name, dynamically, through the identical real dispatch path, with
+   the configured default winning whenever nothing else is named
+   (every existing single-connection installation's behaviour,
+   unchanged).
 """
 
 from __future__ import annotations
@@ -43,6 +51,7 @@ from src.providers.connection import (
     ConnectionStatus,
     utc_now,
 )
+from src.providers.connection_resolver import ConnectionResolver
 from src.providers.null_connection import NullConnection
 from src.services.identity.identity import AgentIdentity
 
@@ -153,10 +162,15 @@ class _FakeConnection(Connection):
         )
 
 
+def _resolver(*connections: Connection, default: "str | None" = None) -> ConnectionResolver:
+    by_name = {c.name: c for c in connections}
+    return ConnectionResolver(by_name, default or connections[0].name)
+
+
 def _agent_with_own_connection(name: str, connection: Connection) -> ManagerSkills:
     return ManagerSkills(
         _identity(name),
-        connection=connection,
+        connections=_resolver(connection),
         tools=ToolSet([
             ConnectionActionTool(connection, operation="ping", description="Pings the connection.", parameters=())
         ]),
@@ -214,3 +228,78 @@ class TestAgentToConnectionIndependence:
         assert alfred_v1_connection.executed == [("ping", {})]
         assert alfred_v2_connection.executed == [("ping", {})]
         assert arthur_connection.executed == [("ping", {})]
+
+
+# ---------------------------------------------------------------------------
+# 3. ONE agent, MULTIPLE simultaneous connections - the actual canonical
+# model this checkpoint exists to prove, not merely two separate agents
+# each with one.
+# ---------------------------------------------------------------------------
+
+
+class TestMultipleSimultaneousConnectionsFromOneAgent:
+    def _agent(self) -> "tuple[ManagerSkills, _FakeConnection, _FakeConnection]":
+        primary = _FakeConnection("primarysvc")
+        secondary = _FakeConnection("secondarysvc")
+        resolver = _resolver(primary, secondary, default="primarysvc")
+        agent = ManagerSkills(
+            _identity("Alfred"),
+            connections=resolver,
+            tools=ToolSet([
+                ConnectionActionTool(primary, operation="ping", description="Pings primarysvc.", parameters=()),
+                ConnectionActionTool(secondary, operation="ping", description="Pings secondarysvc.", parameters=()),
+            ]),
+        )
+        return agent, primary, secondary
+
+    def test_ordinary_phrasing_with_no_connection_named_reaches_the_default(self):
+        """Every existing single-connection installation's behaviour,
+        unchanged: naming no connection at all means the configured
+        default, even though a second one now genuinely coexists."""
+        agent, primary, secondary = self._agent()
+        result = agent.execute(Task(description="check my connected account: ping"))
+        assert result.succeeded, result.error
+        assert primary.executed == [("ping", {})]
+        assert secondary.executed == []
+
+    def test_naming_the_non_default_connection_reaches_it_instead(self):
+        """Dynamic resolution at execution time (Phase 7's own
+        requirement): the SAME agent, the SAME running process, no
+        rebuild - just different words routing to a different,
+        already-equipped connection."""
+        agent, primary, secondary = self._agent()
+        result = agent.execute(Task(description="check my connected account: ping secondarysvc"))
+        assert result.succeeded, result.error
+        assert secondary.executed == [("ping", {})]
+        assert primary.executed == []
+
+    def test_adding_one_never_disconnects_or_shadows_the_other(self):
+        """Both connections genuinely, simultaneously usable in the
+        same session - not a slot that gets replaced by declaring a
+        second one."""
+        agent, primary, secondary = self._agent()
+        agent.execute(Task(description="check my connected account: ping"))
+        agent.execute(Task(description="check my connected account: ping secondarysvc"))
+        agent.execute(Task(description="check my connected account: ping"))
+        assert primary.executed == [("ping", {}), ("ping", {})]
+        assert secondary.executed == [("ping", {})]
+
+    def test_no_fixed_connection_count_limit(self):
+        """No "3 connections", no "10 connections" - however many are
+        declared is however many ConnectionResolver holds, and
+        connected_action reaches every one of them by name."""
+        connections = [_FakeConnection(f"svc{i}") for i in range(25)]
+        resolver = _resolver(*connections, default="svc0")
+        agent = ManagerSkills(
+            _identity("Alfred"),
+            connections=resolver,
+            tools=ToolSet([
+                ConnectionActionTool(c, operation="ping", description=f"Pings {c.name}.", parameters=())
+                for c in connections
+            ]),
+        )
+        assert len(resolver.names) == 25
+        result = agent.execute(Task(description="check my connected account: ping svc17"))
+        assert result.succeeded, result.error
+        assert connections[17].executed == [("ping", {})]
+        assert all(c.executed == [] for i, c in enumerate(connections) if i != 17)

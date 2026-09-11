@@ -129,7 +129,7 @@ class TestASafeOperationIsReachableThroughNaturalLanguage:
         _declare_and_credential(_isolated_paths, operations="read_item:GET:/item:open,write_item:POST:/item:auth")
         runtime, manager, channel, conversation = real_system(connection_provider="fixturesvc")
 
-        assert manager.own_skills.tools.permits(tool_name_for("read_item"))
+        assert manager.own_skills.tools.permits(tool_name_for("fixturesvc", "read_item"))
 
     def test_an_unauthorized_safe_operation_is_still_refused_even_though_the_tool_is_granted(self, _isolated_paths):
         """Granting the Tool is not the same as authorizing it - the
@@ -171,8 +171,8 @@ class TestTheConsequentialBoundaryIsNowAGovernedConfirmationNotARefusal:
         )
         runtime, manager, channel, conversation = real_system(connection_provider="fixturesvc")
 
-        assert manager.own_skills.tools.permits(tool_name_for("write_item"))
-        assert manager.own_skills.tools.permits(tool_name_for("read_item"))
+        assert manager.own_skills.tools.permits(tool_name_for("fixturesvc", "write_item"))
+        assert manager.own_skills.tools.permits(tool_name_for("fixturesvc", "read_item"))
 
     def test_a_matched_consequential_operation_raises_a_confirmation_not_an_immediate_execution(self, _isolated_paths):
         """The user's own words clearly pick out write_item (declared

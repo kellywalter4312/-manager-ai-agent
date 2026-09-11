@@ -125,11 +125,12 @@ def _try_resolve_confirmation(
         if pending.connection:
             from src.manager.capabilities import _execute_connected_operation
 
-            connection = request.connection
-            if connection is None or connection.name != pending.connection:
+            resolver = request.connections
+            connection = resolver.get(pending.connection) if resolver is not None else None
+            if connection is None:
                 return TaskResult.failure(
                     request.task, request.own_name,
-                    f"'{pending.connection}' is no longer the configured connection, "
+                    f"'{pending.connection}' is no longer a connection I'm equipped with, "
                     f"so I can't complete '{pending.operation}' - nothing was executed.",
                 )
             return _execute_connected_operation(request, connection, pending.operation, pending.params)

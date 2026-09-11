@@ -276,7 +276,7 @@ class TestProviderReplacementPreservesCanonicalIdentity:
         caps_before = tuple(
             c.name for c in centre.overview().agent(manager.own_skills.name).capabilities
         )
-        connection_before = runtime.connection
+        connection_before = runtime.connections
 
         presence_for(manager.own_skills.name, provider=_OneAvatarProvider(), recall=manager.memory.recall)
 
@@ -284,7 +284,7 @@ class TestProviderReplacementPreservesCanonicalIdentity:
             c.name for c in centre.overview().agent(manager.own_skills.name).capabilities
         )
         assert caps_after == caps_before
-        assert runtime.connection is connection_before
+        assert runtime.connections is connection_before
 
 
 # ---------------------------------------------------------------------------

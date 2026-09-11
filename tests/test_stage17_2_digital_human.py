@@ -465,7 +465,7 @@ class TestAvatarChangeLeavesCapabilitiesAndConnectionsAlone:
 
     def test_the_runtimes_connection_object_is_unchanged_by_an_avatar_choice(self):
         runtime, manager, _, _, _ = system()
-        connection_before = runtime.connection
+        connection_before = runtime.connections
 
         memory = memory_for(manager, manager.own_skills.name)
         set_avatar_preference(
@@ -477,7 +477,7 @@ class TestAvatarChangeLeavesCapabilitiesAndConnectionsAlone:
             forget=memory.forget,
         )
 
-        assert runtime.connection is connection_before
+        assert runtime.connections is connection_before
 
 
 # ---------------------------------------------------------------------------

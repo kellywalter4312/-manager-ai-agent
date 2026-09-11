@@ -82,8 +82,8 @@ from src.providers.celebration import CelebrationProvider
 from src.providers.celebration_factory import build_celebration_provider
 from src.providers.communication import CommunicationProvider
 from src.providers.communication_factory import build_communication_provider
-from src.providers.connection import Connection
-from src.providers.connection_factory import build_connection
+from src.providers.connection_factory import build_all_connections
+from src.providers.connection_resolver import ConnectionResolver
 from src.providers.documents.factory import build_document_rendering
 from src.providers.documents.pdf import DocumentRenderer
 from src.providers.factory import build_provider
@@ -235,15 +235,18 @@ class Runtime:
     # already makes.
     calendar_events: CalendarEventProvider
 
-    # Stage 16: where Alfred's governed connection tools reach for a
-    # real external, authenticated service (Gmail today; a future
-    # calendar/commerce/travel connection tomorrow, added through this
-    # exact same seam), selected by name exactly as every provider
-    # above already is. "null" (honestly unavailable) is what an
-    # unconfigured installation gets - unlike celebration/calendar_events,
-    # a connection is consequential, the same reasoning communication
-    # above already follows.
-    connection: Connection
+    # Stage 16 / Phase 7 (Universal Connection Layer): where Alfred's
+    # governed connection tools reach for every real, external,
+    # authenticated connection this session is equipped with - not one
+    # fixed connection, an open-ended ConnectionResolver (see that
+    # module's own docstring). The configured default
+    # (settings.connection_provider) is always among these, built
+    # exactly as before ("null", honestly unavailable, for an
+    # unconfigured installation - unlike celebration/calendar_events, a
+    # connection is consequential, the same reasoning communication
+    # above already follows); every other currently declared service/
+    # site joins it, built once, here, at process-construction time.
+    connections: ConnectionResolver
 
     # Stage 17: where every agent's presence reaches for its avatar
     # catalog and deterministic default, selected by name exactly as
@@ -326,7 +329,7 @@ class Runtime:
             f"knowledge={self.knowledge.name} "
             f"celebration={self.celebration.name} "
             f"calendar_events={self.calendar_events.name} "
-            f"connection={self.connection.name} "
+            f"connections={self.connections.default.name}({len(self.connections.names)}) "
             f"avatar_provider={self.avatar_provider.name} "
             f"environment_provider={self.environment_provider.name} "
             f"router={type(self.router).__name__} "
@@ -492,17 +495,22 @@ def build_runtime(
         # Stage 12 closure: selected by name from settings.calendar_event_provider,
         # the identical pattern celebration above already uses.
         calendar_events=build_calendar_event_provider(settings),
-        # Stage 16: selected by name from settings.connection_provider,
-        # the identical pattern communication above already uses -
-        # "null" (honestly unavailable) unless a real connection was
-        # deliberately configured. Full Alfred OS Ecosystem Evolution:
+        # Stage 16 / Phase 7 (Universal Connection Layer): the default
+        # is selected by name from settings.connection_provider, the
+        # identical pattern communication above already uses - "null"
+        # (honestly unavailable) unless a real connection was
+        # deliberately configured - but build_all_connections equips
+        # this session with every OTHER currently declared service/site
+        # too, an open-ended ConnectionResolver rather than one fixed
+        # Connection (see that module's own docstring). Full Alfred OS
+        # Ecosystem Evolution:
         # connection_adapter_version is the identical optional,
         # additive seam every other account parameter above already is,
         # applied to which real *implementation* a builder with more
         # than one (today, only Gmail) should use - never the
         # account/credential, which stays exactly what `accounts` above
         # already governs.
-        connection=build_connection(settings, adapter_version=connection_adapter_version),
+        connections=build_all_connections(settings, adapter_version=connection_adapter_version),
         # Stage 17: selected by name from settings.avatar_provider, the
         # identical pattern celebration above already uses.
         avatar_provider=build_avatar_provider(settings),
@@ -721,11 +729,12 @@ def build_manager(
         # agent's own celebration reaction now comes from, in place of
         # each agent silently constructing its own DefaultCelebrationProvider.
         celebration=runtime.celebration,
-        # Stage 16: read-only status access to Alfred's own configured
-        # connection - see CapabilityRequest's own docstring for why
-        # only connected_action ever reaches request.tools.invoke() to
-        # actually execute anything through it.
-        connection=runtime.connection,
+        # Stage 16 / Phase 7 (Universal Connection Layer): read-only
+        # status access to every connection Alfred is equipped with -
+        # see CapabilityRequest's own docstring for why only
+        # connected_action ever reaches request.tools.invoke() to
+        # actually execute anything through any of them.
+        connections=runtime.connections,
         # Foundation Repair #1: the same real, timezone-configured
         # Calendar given to ManagerAgent below - one canonical clock,
         # never a second one - so current_datetime answers "what day is

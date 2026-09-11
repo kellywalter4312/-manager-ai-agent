@@ -370,7 +370,7 @@ class TestIndependenceHoldsWithRealSpeechFlowing:
         caps_before = tuple(
             c.name for c in centre.overview().agent(manager.own_skills.name).capabilities
         )
-        connection_before = runtime.connection
+        connection_before = runtime.connections
 
         exchange(real_channel, conversation, "what can you do?", speak=True)
 
@@ -378,7 +378,7 @@ class TestIndependenceHoldsWithRealSpeechFlowing:
             c.name for c in centre.overview().agent(manager.own_skills.name).capabilities
         )
         assert caps_after == caps_before
-        assert runtime.connection is connection_before
+        assert runtime.connections is connection_before
 
     def test_a_different_voiceprofile_still_drives_correct_speaking_presence(self):
         """Arthur's own, distinct VoiceProfile is what deliver() looks

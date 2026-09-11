@@ -42,12 +42,22 @@ from src.agents.tools.tool import Tool, ToolSpec
 from src.providers.connection import Connection
 
 
-def tool_name_for(operation: str) -> str:
-    """The Tool name one operation is granted under - deterministic
-    from the operation alone, so a capability handler that only knows
-    the operation name (never a specific connection class) can still
-    ask ``ToolSet.permits(tool_name_for(operation))``."""
-    return f"connection_{operation}"
+def tool_name_for(connection_name: str, operation: str) -> str:
+    """The Tool name one (connection, operation) pair is granted under -
+    deterministic from both, so a capability handler that knows which
+    connection and which operation it means can always ask
+    ``ToolSet.permits(tool_name_for(connection_name, operation))``.
+
+    Connection-scoped (Phase 7 - Universal Connection Layer), not
+    merely operation-scoped: once one agent can be granted more than
+    one connection at once, two different connections declaring an
+    operation of the same name (two declared services both offering
+    "search", say) must never collide under one ToolSet entry -
+    silently shadowing one of them. Granting
+    ``connection_mysite_search`` never implies any other connection's
+    own "search", or any other operation on this same connection, is
+    granted."""
+    return f"connection_{connection_name}_{operation}"
 
 
 class ConnectionActionTool(Tool):
@@ -71,7 +81,7 @@ class ConnectionActionTool(Tool):
         schema = {p.name: str for p in self._parameters if p.required}
         optional = {p.name: str for p in self._parameters if not p.required}
         return ToolSpec(
-            name=tool_name_for(self._operation), description=self._description,
+            name=tool_name_for(self._connection.name, self._operation), description=self._description,
             schema=schema, optional=optional,
         )
 

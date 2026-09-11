@@ -42,6 +42,7 @@ from src.manager.governance import (
 from src.providers.availability import AvailabilityState
 from src.providers.browser.cdp_browser import BrowserUnavailable, PageReceipt
 from src.providers.connection import ConnectionStatus
+from src.providers.connection_resolver import ConnectionResolver
 from src.providers.documents.pdf import NullDocumentRenderer, SimplePDFRenderer
 from src.providers.media.image import NullImageProvider
 from src.providers.site_descriptor import SiteDescriptor
@@ -118,6 +119,14 @@ def _site_connection(**overrides) -> WebsiteConnection:
     browser = overrides.pop("browser", None) or _FakeBrowser()
     descriptor = SiteDescriptor(name="genericsite", base_url="http://127.0.0.1:9199")
     return WebsiteConnection(descriptor, None, browser=browser)
+
+
+def _connection_resolver(connection) -> ConnectionResolver:
+    """Phase 7 (Universal Connection Layer): wrap a single connection
+    into the resolver ``request.connections`` now expects - the
+    identical single-connection shape every existing test here already
+    exercised, just addressed by name."""
+    return ConnectionResolver({connection.name: connection}, connection.name)
 
 
 # ---------------------------------------------------------------------------
@@ -408,7 +417,7 @@ class TestTheWebsiteInteractionHookUsesTheIdenticalSharedMechanism:
                 ConnectionActionTool(connection, operation=op, description=f"Performs {op}.", parameters=connection.parameters_for(op))
                 for op in connection.supported_operations
             ]),
-            connection=connection, governance_log=log,
+            connections=_connection_resolver(connection), governance_log=log,
             description="check my connected account: click locator=submit_btn",
         )
         from src.manager.capabilities import connected_action
@@ -435,7 +444,7 @@ class TestTheWebsiteInteractionHookUsesTheIdenticalSharedMechanism:
                 ConnectionActionTool(connection, operation=op, description=f"Performs {op}.", parameters=connection.parameters_for(op))
                 for op in connection.supported_operations
             ]),
-            connection=connection,
+            connections=_connection_resolver(connection),
             description="check my connected account: click locator=submit_btn to access someone else's account without their consent",
         )
         from src.manager.capabilities import connected_action
@@ -455,7 +464,7 @@ class TestTheWebsiteInteractionHookUsesTheIdenticalSharedMechanism:
                 ConnectionActionTool(connection, operation=op, description=f"Performs {op}.", parameters=connection.parameters_for(op))
                 for op in connection.supported_operations
             ]),
-            connection=connection, governance_log=log,
+            connections=_connection_resolver(connection), governance_log=log,
             description="check my connected account: read the page",
         )
         from src.manager.capabilities import connected_action

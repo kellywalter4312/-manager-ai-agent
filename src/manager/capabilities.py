@@ -80,6 +80,7 @@ from src.agents.tools.connection import tool_name_for
 from src.agents.tools.media_production import find_video_path, parse_clip_specs
 from src.providers.celebration import CelebrationReaction
 from src.providers.connection import Connection
+from src.providers.connection_resolver import ConnectionResolver
 from src.services.identity.identity import AgentIdentity
 from src.services.conversation_floor import (
     ACKNOWLEDGEMENT_WORDS,
@@ -321,22 +322,27 @@ class CapabilityRequest:
     # provider reaches this request, the same honest-refusal shape every
     # other optional collaborator here already has.
     celebration: "Callable[..., CelebrationReaction] | None" = None
-    # Stage 16: read-only access to one governed Connection's own
-    # status - name, availability, authorization, supported operations -
-    # never the means to execute anything through it. A handler that
-    # wants to actually perform an operation goes through
-    # request.tools.invoke(...), the identical governed boundary every
-    # other consequential action in this file already crosses (see
-    # connected_action below); this field exists only so a handler can
-    # report *why* something cannot be attempted (not configured, not
-    # reachable, not authorized) before ever trying, keeping "capability
-    # availability" (request.tools), "connection availability"
+    # Stage 16 / Phase 7 (Universal Connection Layer): read-only access
+    # to every governed Connection this agent was equipped with - name,
+    # availability, authorization, supported operations - never the
+    # means to execute anything through it. A handler that wants to
+    # actually perform an operation goes through request.tools.invoke(...),
+    # the identical governed boundary every other consequential action
+    # in this file already crosses (see connected_action below); this
+    # field exists only so a handler can report *why* something cannot
+    # be attempted (not configured, not reachable, not authorized)
+    # before ever trying, keeping "capability availability"
+    # (request.tools), "connection availability"
     # (connection.availability) and "authorization"
     # (connection.authorization) genuinely distinct facts rather than
-    # one collapsed concept. None when no connection reaches this
-    # request, the same honest-refusal shape every other optional
-    # collaborator here already has.
-    connection: "Connection | None" = None
+    # one collapsed concept. Was a single ``Connection``; is now a
+    # ``ConnectionResolver`` (Phase 7) - an open-ended, per-agent
+    # connection context rather than one fixed connection, built once
+    # at process-construction time (see that module's own docstring
+    # for why it is never re-read live). None when no connection
+    # reaches this request, the same honest-refusal shape every other
+    # optional collaborator here already has.
+    connections: "ConnectionResolver | None" = None
     # Foundation Repair #1: how this Manager reckons days - the same
     # Calendar ManagerAgent itself holds (see manager.py), threaded down
     # so a handler can answer "what day/date/month/year is it" from the
@@ -4701,22 +4707,35 @@ PERSONAL_RECURRING_EVENTS = ManagerCapability(
 
 
 # ---------------------------------------------------------------------------
-# Stage 16: Connections + Real-World Actions - one governed action
-# through one external, authenticated connection.
+# Stage 16 / Phase 7 (Universal Connection Layer): one governed action
+# through one of potentially several external, authenticated
+# connections this agent was equipped with.
 # ---------------------------------------------------------------------------
 #
 # **The flow this handler is the middle of, stated once:**
 #
 #     user request -> Alfred's reasoning (this claims= match) -> governed
-#     capability (this handler) -> required connection
-#     (request.connection) -> external action (request.tools.invoke,
-#     never called directly) -> verified result -> Alfred's response
+#     capability (this handler) -> which connection
+#     (request.connections, a ConnectionResolver - Phase 7) -> which
+#     operation on it -> external action (request.tools.invoke, never
+#     called directly) -> verified result -> Alfred's response
 #
-# **Seven genuinely different facts, checked in this order, never
+# **Eight genuinely different facts, checked in this order, never
 # collapsed into one:**
 #
 #     reasoning               already settled - this handler was reached
 #                              because connected_action_intent matched
+#     connection selection    _select_connection(request.task,
+#                              resolver.names, resolver.default_name) -
+#                              which of this agent's own equipped
+#                              connections the user's own words pick out,
+#                              from each connection's own name - the
+#                              configured default wins unless another
+#                              genuinely, more specifically matches (see
+#                              that function's own docstring); an honest
+#                              failure, never a guess, only when two or
+#                              more non-default connections are genuinely
+#                              tied
 #     operation selection     _select_operation(request.task, operations,
 #                              connection) - which declared operation the
 #                              user's own words pick out, from each
@@ -4727,7 +4746,8 @@ PERSONAL_RECURRING_EVENTS = ManagerCapability(
 #                              more than one operation matches equally
 #                              well
 #     capability availability request.tools.permits(tool_name) - was this
-#                              specific operation *granted*?
+#                              specific (connection, operation) pair
+#                              *granted*?
 #     connection availability connection.availability - Evidence from an
 #                              actual attempt (Availability's own
 #                              UNKNOWN/AVAILABLE/UNAVAILABLE contract);
@@ -4756,9 +4776,15 @@ PERSONAL_RECURRING_EVENTS = ManagerCapability(
 #                              from having been attempted
 #
 # **Generic over which connection, never a hardcoded service.** Nothing
-# below names Gmail, a calendar, commerce or travel - the operation
-# actually attempted is whatever ``connection.supported_operations``
-# itself declares, so a future connection needs no new branch here.
+# below names Gmail, a calendar, commerce, travel, a website or any
+# other example - both which connection and which operation are
+# resolved entirely from each connection's own declared name/metadata
+# (``resolver.names``, ``connection.supported_operations``), so a
+# future connection - of any kind, added through the identical
+# ``ConnectionResolver`` a brand-new future connection kind already
+# reaches (see ``connection_resolver.py``'s own docstring) - needs no
+# new branch here, and neither does a second, third or Nth
+# *simultaneous* one.
 #
 # **Operation-level authorization + confirmation.**
 # ``authorization_for``/``requires_confirmation_for`` are part of
@@ -4826,6 +4852,55 @@ def _operation_vocabulary(connection: "Connection", operation: str) -> "frozense
     """
     description = connection.operation_description_for(operation)
     return _meaningful_words(operation) | _meaningful_words(description)
+
+
+def _select_connection(
+    task: Task, names: "Sequence[str]", default_name: str
+) -> "tuple[str | None, tuple[str, ...]]":
+    """Which of ``names`` (``ConnectionResolver.names``) the user
+    actually means - Phase 7's own Universal Connection Layer,
+    resolving among however many connections this agent was equipped
+    with the identical generic, no-hardcoded-name way
+    ``_select_operation`` (below) already resolves among a single
+    connection's own operations, one level up: never ``if "github" in
+    text: ...`` - only each connection's own declared name, matched
+    against the user's own words.
+
+    **The configured default always wins unless something else
+    genuinely, more specifically matches.** Every existing
+    single-connection installation - and every ordinary remark that
+    never names a connection at all - is completely unaffected: with
+    nothing in the running that scores higher than the default, the
+    default is returned, exactly the one connection this project held
+    before this checkpoint. Only a request whose own words score
+    STRICTLY higher against some OTHER equipped connection's own name
+    is ever routed elsewhere - naming a connection is opt-in, never a
+    trap sprung by ordinary phrasing that happens to share a word with
+    one.
+
+    **Trivial when there is only one.** No decision to make, so an
+    installation equipped with exactly one connection - today's
+    overwhelmingly common case - behaves exactly as before.
+
+    **Fails honestly rather than guessing** only when two or more
+    non-default connections are genuinely, equally the best match:
+    ``(None, tied_candidates)``. Never ``(None, ())`` on its own - with
+    the default always among ``names`` (``ConnectionResolver`` itself
+    guarantees this), there is always something to fall back to.
+    """
+    if len(names) <= 1:
+        return (names[0] if names else None, ())
+
+    intent_words = _meaningful_words(_after_marker(task.description, CONNECTED_ACTION_MARKERS))
+    scored = [(name, len(_meaningful_words(name) & intent_words)) for name in names]
+    best = max(score for _, score in scored)
+    default_score = dict(scored).get(default_name, 0)
+    if best == 0 or best <= default_score:
+        return (default_name, ())
+    candidates = tuple(name for name, score in scored if score == best)
+    if len(candidates) > 1:
+        return (None, candidates)
+    return (candidates[0], ())
 
 
 def _select_operation(
@@ -4924,7 +4999,7 @@ def _execute_connected_operation(
     the same reason: this may run on a later turn than the one that
     raised the confirmation.
     """
-    tool_name = tool_name_for(operation)
+    tool_name = tool_name_for(connection.name, operation)
     if not request.tools.permits(tool_name):
         equipped = ", ".join(request.tools.names()) or "none"
         return TaskResult.failure(
@@ -4965,7 +5040,7 @@ def _raise_connected_action_confirmation(
     unauthorized Manager must refuse outright, never engage with
     confirming an action it cannot perform regardless of the answer.
     """
-    tool_name = tool_name_for(operation)
+    tool_name = tool_name_for(connection.name, operation)
     if not request.tools.permits(tool_name):
         equipped = ", ".join(request.tools.names()) or "none"
         return TaskResult.failure(
@@ -5051,16 +5126,25 @@ def _governance_check(
 
 
 def connected_action(request: CapabilityRequest) -> TaskResult:
-    """Attempt one governed action through Alfred's configured
-    connection - see this section's own module comment for the full
+    """Attempt one governed action through one of Alfred's configured
+    connections - see this section's own module comment for the full
     flow this function walks through in order.
     """
-    connection = request.connection
-    if connection is None:
+    resolver = request.connections
+    if resolver is None or not resolver.names:
         return TaskResult.failure(
             request.task, request.own_name,
             "I don't have a connection configured to check right now.",
         )
+
+    connection_name, ambiguous_connections = _select_connection(request.task, resolver.names, resolver.default_name)
+    if connection_name is None:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            f"more than one connection could match that ({', '.join(ambiguous_connections)}) - "
+            "say which one you mean.",
+        )
+    connection = resolver.get(connection_name)
 
     operations = connection.supported_operations
     if not operations:
@@ -5082,7 +5166,7 @@ def connected_action(request: CapabilityRequest) -> TaskResult:
             f"I'm not sure which of '{connection.name}''s actions you mean "
             f"({', '.join(operations)}) - say which one, more specifically.",
         )
-    tool_name = tool_name_for(operation)
+    tool_name = tool_name_for(connection.name, operation)
 
     if not request.tools.permits(tool_name):
         equipped = ", ".join(request.tools.names()) or "none"
