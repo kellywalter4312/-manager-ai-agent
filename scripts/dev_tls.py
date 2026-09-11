@@ -59,12 +59,33 @@ CERT_NAME = "alfred-local.crt"
 KEY_NAME = "alfred-local.key"
 META_NAME = "alfred-local.json"
 # The longest leaf-certificate lifetime every major browser still honours
-# without complaint (~825 days, the 2018 CA/Browser Forum ceiling many
-# still enforce even for a locally-trusted cert nobody is racing to
-# revoke). Renewed automatically anyway the moment the detected address
-# set changes, so a longer fixed lifetime buys no real safety and only
-# means fewer "re-trust this on your phone" moments.
-VALIDITY_DAYS = 825
+# without complaint. NOT the older (825-day, 2018 CA/Browser Forum) ceiling
+# this used to be - found wrong the hard way (2026-09-11): a real iPhone
+# physically refused a certificate generated under that limit with
+# NET::ERR_CERT_VALIDITY_TOO_LONG. Since 1 September 2020, Apple (Safari/
+# WebKit, every platform including iOS) and Google's Chrome Root Program
+# both cap TLS server certificates issued on or after that date at 398
+# days - the actual current ceiling, confirmed against real physical
+# device behaviour, not assumed from an outdated rule.
+#
+# 396, not 397: the certificate's own not_valid_before is backdated by a
+# further fixed day below (clock-skew tolerance - a client whose clock
+# runs slightly behind must not see a freshly issued certificate as "not
+# yet valid"), so the REAL total span a browser measures is
+# VALIDITY_DAYS + 1. 396 + 1 = 397 days - a full day of margin under the
+# 398-day ceiling, not resting exactly on it, so ordinary UTC/leap-second
+# rounding across "now" can never push the real lifetime a browser
+# computes to 399. (An earlier version of this fix used 397 here without
+# accounting for that extra backdated day, which produced an exact
+# 398-day span - correct per the letter of the rule but with zero margin;
+# tightened once, verified with a direct not_valid_after minus
+# not_valid_before check on the real generated certificate, not assumed.)
+# Renewed automatically anyway the moment the detected address set
+# changes or the cert nears expiry (RENEW_WITHIN_DAYS below), so this
+# shorter fixed lifetime buys no less real safety and only means a
+# "re-trust this on your phone" moment every ~13 months instead of every
+# ~27.
+VALIDITY_DAYS = 396
 RENEW_WITHIN_DAYS = 30
 # RFC 5737 TEST-NET-3 - reserved for documentation/examples, guaranteed
 # never routable. UDP `connect()` never actually transmits a packet; it
