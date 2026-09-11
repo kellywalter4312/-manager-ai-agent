@@ -207,7 +207,7 @@ class TestTheRealTasksButtonIsGenuinelyConnected:
         assert len(result["fetchCalls"]) == 1
 
 
-@pytest.mark.parametrize("verb", ["recordings", "unresolved", "services"])
+@pytest.mark.parametrize("verb", ["recordings", "unresolved", "services", "sites", "governance"])
 class TestTheNewlyConnectedReadOnlyButtonsWork:
     """Control Center integration gate: 'recordings', 'unresolved' and
     (open-ended service discovery, 2026-09-09) 'services' were real,
@@ -217,7 +217,16 @@ class TestTheNewlyConnectedReadOnlyButtonsWork:
     gets the full click-to-fetch-to-render proof; these three now get
     the identical proof, not just a name check. 'services' with no
     argument is the bare, read-only list - declare/forget still need
-    arguments the generic free-text box supplies, unchanged."""
+    arguments the generic free-text box supplies, unchanged.
+
+    Phases 6-8 surgical integration pass (2026-09-11): 'sites' (literal
+    website interaction) and 'governance' (Context-Aware Agent
+    Capability & Safety Governance) were the identical gap - real,
+    already-governed, already-tested server verbs (both already in
+    scripts/serve_ui.py's own MANAGEMENT_VERBS) with a sibling verb
+    ('services') that had a button and no button of their own. Added to
+    MGMT_VERBS alongside their siblings; proven here with the identical
+    harness, not merely asserted present by name."""
 
     def test_the_verb_is_among_the_real_generated_quick_view_buttons(self, tmp_path, verb):
         result = _run_harness(
@@ -269,4 +278,16 @@ class TestTheServerGenuinelyAcceptsBothVerbsAndNeverAsksForConfirmation:
         from scripts.control_center import classify_administrative_write
 
         is_write, _ = classify_administrative_write("unresolved")
+        assert is_write is False
+
+    def test_bare_sites_is_never_classified_as_an_administrative_write(self):
+        from scripts.control_center import classify_administrative_write
+
+        is_write, _ = classify_administrative_write("sites")
+        assert is_write is False
+
+    def test_governance_is_never_classified_as_an_administrative_write(self):
+        from scripts.control_center import classify_administrative_write
+
+        is_write, _ = classify_administrative_write("governance")
         assert is_write is False
