@@ -107,12 +107,14 @@ class TestExtractPersonalContextCandidateAndIntent:
             assert personal_context_intent(text), text
             assert extract_personal_context_candidate(text) is not None, text
 
-    def test_currently_learning_x_is_left_to_the_existing_learning_context_capability(self):
-        """Deliberately NOT claimed here - learning.py's own present-
-        continuous shape already owns this, unchanged, and this module
-        must never collide with or duplicate it."""
-        assert extract_personal_context_candidate("I am studying for my chemistry exam") is None
-        assert not personal_context_intent("I am currently learning Rust")
+    def test_a_study_statement_is_personal_context_in_the_one_canonical_store(self):
+        """Pre-Stage-9 Campaign 1: what the user is studying is no longer a
+        separate learning store beside this one - it is an ordinary,
+        supersedable personal-context topic whose topic is the subject."""
+        studying = extract_personal_context_candidate("I am studying for my chemistry exam")
+        assert studying is not None and studying.category == "learning"
+        assert studying.topic == "my chemistry exam"
+        assert personal_context_intent("I am currently learning Rust")
 
     def test_ordinary_conversation_is_never_claimed(self):
         for text in ("thanks, that works", "what do you think?", "I'm tired today", "sounds good"):

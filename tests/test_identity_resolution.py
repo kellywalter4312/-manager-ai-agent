@@ -311,7 +311,7 @@ class TestThisIsNotASecondRouter:
             "create_diagram",
             "create_task", "current_datetime", "forget",
             "general_assistance", "generate_document", "image_analysis",
-            "knowledge", "learning_context", "list_recordings", "list_tasks", "live_information",
+            "knowledge", "list_recordings", "list_tasks", "live_information",
             "media_production",
             "milestone_recognition", "participant_invitation", "personal_context",
             "personal_recurring_events",

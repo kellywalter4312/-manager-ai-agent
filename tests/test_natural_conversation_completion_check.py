@@ -159,7 +159,7 @@ class TestConfirmedRoutingDefectsAreFixed:
             ("record_this", "record this for later: pick up dry cleaning"),
             ("communication", "call Mom"),
             ("forget", "forget that we prefer blue"),
-            ("learning_context", "I am studying for my chemistry exam next week."),
+            ("personal_context", "I am studying for my chemistry exam next week."),
             ("temporal_derivation", "how old am I"),
             ("recall_memory", "what do you remember about the Q3 roadmap"),
             ("personal_recurring_events", "my mom's birthday is March 24"),

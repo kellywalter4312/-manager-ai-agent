@@ -44,7 +44,6 @@ from src.manager.brain import BrainAction, BrainDecision, ManagerBrain, NullBrai
 from src.manager.capabilities import (
     GENERAL_ASSISTANCE,
     KNOWLEDGE,
-    LEARNING_CONTEXT,
     LIVE_INFORMATION,
     MANAGER_CAPABILITIES,
     OPEN_CONVERSATION,
@@ -55,8 +54,8 @@ from src.manager.capabilities import (
 )
 from src.manager.knowledge import (
     KNOWLEDGE_TOOL,
-    LEARNING_CONTEXT as LEARNING_CONTEXT_SOURCE,
     MODEL_KNOWLEDGE,
+    PERSONAL_CONTEXT as PERSONAL_CONTEXT_SOURCE,
     SETTLED_KNOWLEDGE_NOTE,
     USER_DOCUMENTS,
     gather_knowledge_evidence,
@@ -79,9 +78,12 @@ from src.registry.agent_registry import AgentRegistry
 from src.services.identity.identity import AgentIdentity, load_identity
 from src.services.memory.ephemeral import EphemeralMemory
 from src.services.memory.learning import (
-    build_learning_record,
     extract_learning_subject,
     learning_intent,
+)
+from src.services.memory.personal_context import (
+    build_personal_context_record,
+    extract_learning_activity,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -436,7 +438,7 @@ class TestTheFourSourcesStayDistinct:
         assert evidence.is_empty
         assert evidence.sources == ()
         assert any(USER_DOCUMENTS in entry for entry in evidence.unavailable)
-        assert any(LEARNING_CONTEXT_SOURCE in entry for entry in evidence.unavailable)
+        assert any(PERSONAL_CONTEXT_SOURCE in entry for entry in evidence.unavailable)
 
     def test_user_documents_are_named_as_their_own_source(self, tmp_path):
         tools = ToolSet([KnowledgeLookupTool(library(tmp_path, b="Rates rose to break inflation."))])
@@ -444,16 +446,15 @@ class TestTheFourSourcesStayDistinct:
         assert USER_DOCUMENTS in evidence.sources
         assert any("b.md" in note for note in evidence.notes)
 
-    def test_learning_context_is_named_as_its_own_source(self):
+    def test_what_the_user_studies_arrives_as_canonical_personal_context(self):
         store = EphemeralMemory()
         store.remember(
-            build_learning_record(
-                "I'm studying constitutional law", agent_name="Alfred",
-                kind=MemoryCategory.LEARNING.value,
+            build_personal_context_record(
+                extract_learning_activity("I'm studying constitutional law"), agent_name="Alfred",
             )
         )
         evidence = gather_knowledge_evidence("constitutional law", recall=store.recall)
-        assert LEARNING_CONTEXT_SOURCE in evidence.sources
+        assert PERSONAL_CONTEXT_SOURCE in evidence.sources
         assert any("constitutional law" in note for note in evidence.notes)
 
     def test_live_information_is_never_gathered_here(self, tmp_path):
@@ -509,7 +510,9 @@ class TestOneCapabilityForEverySubject:
 
     def test_the_registry_is_the_extension_point_and_nothing_else_changed(self):
         assert MANAGER_CAPABILITIES["knowledge"] is KNOWLEDGE
-        assert MANAGER_CAPABILITIES["learning_context"] is LEARNING_CONTEXT
+        # One canonical personal-context capability; no separate learning store.
+        assert "learning_context" not in MANAGER_CAPABILITIES
+        assert "personal_context" in MANAGER_CAPABILITIES
         # The orchestrator still knows no capability by name.
         orchestrator = (SRC / "manager" / "manager.py").read_text(encoding="utf-8")
         for name in ("knowledge_inquiry", "learning_context", "KNOWLEDGE"):
@@ -709,25 +712,23 @@ class TestLearningContextIsUserKnowledge:
         agent, store = skills(brain=ScriptedBrain())
         result = agent.execute(Task(description="I'm studying macroeconomics this term"))
         assert result.succeeded
-        stored = store.recall(kind=MemoryCategory.LEARNING.value)
+        stored = store.recall(kind=MemoryCategory.PERSONAL_CONTEXT.value)
         assert len(stored) == 1
         assert "macroeconomics this term" in stored[0].content
 
-    def test_the_policy_admits_it_as_its_own_category(self):
-        record = build_learning_record(
-            "I'm studying anything at all", agent_name="Alfred",
-            kind=MemoryCategory.LEARNING.value,
+    def test_the_policy_admits_it_in_the_canonical_personal_context_category(self):
+        record = build_personal_context_record(
+            extract_learning_activity("I'm studying anything at all"), agent_name="Alfred",
         )
         verdict = ManagerMemoryPolicy().evaluate(record)
         assert verdict.allowed
-        assert verdict.category == "learning"
+        assert verdict.category == "personal_context"
 
     def test_it_stores_the_subject_and_not_the_material(self):
-        record = build_learning_record(
-            "I'm reading a book on negotiation", agent_name="Alfred",
-            kind=MemoryCategory.LEARNING.value,
+        record = build_personal_context_record(
+            extract_learning_activity("I'm reading a book on negotiation"), agent_name="Alfred",
         )
-        assert record.context["subject"] == "a book on negotiation"
+        assert record.context["topic"] == "a book on negotiation"
         assert len(record.content) < 100
 
     def test_a_manager_with_no_memory_refuses_honestly(self):
@@ -745,14 +746,14 @@ class TestLearningContextIsUserKnowledge:
         agent.execute(Task(description="Tell me about the industrial revolution"))
 
         assert any("industrial revolution" in note.lower() for note in brain.notes[-1])
-        assert any("Learning context" in note for note in brain.notes[-1])
+        assert any("Personal context" in note for note in brain.notes[-1])
 
     def test_it_can_be_removed_like_any_other_memory(self):
         agent, store = skills(brain=ScriptedBrain())
         agent.execute(Task(description="I'm studying macroeconomics"))
-        stored = store.recall(kind=MemoryCategory.LEARNING.value)
+        stored = store.recall(kind=MemoryCategory.PERSONAL_CONTEXT.value)
         assert store.forget(stored[0].id)
-        assert store.recall(kind=MemoryCategory.LEARNING.value) == ()
+        assert store.recall(kind=MemoryCategory.PERSONAL_CONTEXT.value) == ()
 
     def test_the_extraction_module_knows_no_agent_and_no_subject(self):
         source = (SRC / "services" / "memory" / "learning.py").read_text(encoding="utf-8")
@@ -760,7 +761,7 @@ class TestLearningContextIsUserKnowledge:
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and node.module:
                 assert node.module in (
-                    "__future__", "src.services.memory.memory",
+                    "__future__", "dataclasses", "src.services.memory.memory",
                 ), node.module
         for subject in FORBIDDEN_SUBJECT_TOKENS:
             assert subject not in source.lower(), subject

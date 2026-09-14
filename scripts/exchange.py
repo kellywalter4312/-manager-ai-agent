@@ -40,6 +40,7 @@ from src.services.audit.action_log import (
 from src.services.memory.audio_recording import build_recording_record
 from src.services.memory.capture import capture_intent
 from src.services.memory.memory import MemoryRecord
+from src.services.memory.personal_context import build_personal_context_record, extract_personal_context_candidate
 from src.services.memory.session import RETAINED_KIND, RETAINED_SOURCE, retention_requests
 from src.services.memory.user_facts import extract_declared_facts, structure_date_fact
 from src.utils.logging import get_logger
@@ -233,7 +234,10 @@ def exchange(
     # and a silently-different return value second. See
     # _acknowledge_successful_retention's own docstring for exactly what this
     # does and does not change.
-    retained = retain_what_was_asked_for(channel, conversation, request)
+    retained = retain_what_was_asked_for(
+        channel, conversation, request,
+        handled_by_capability=turn.capability, handled_successfully=turn.succeeded,
+    )
     if retained and not turn.succeeded:
         turn = _acknowledge_successful_retention(turn, retained)
         response = replace(response, turn=turn, text=turn.outcome, speech=speakable(turn))
@@ -347,7 +351,8 @@ def _acknowledge_successful_retention(
 
 
 def retain_what_was_asked_for(
-    channel: Channel, conversation: Conversation, request: str
+    channel: Channel, conversation: Conversation, request: str,
+    *, handled_by_capability: "str | None" = None, handled_successfully: bool = False,
 ) -> "tuple[MemoryRecord, ...]":
     """Keep the things the person asked to be kept, if the policy allows.
 
@@ -384,10 +389,24 @@ def retain_what_was_asked_for(
     source, still passes through the identical governed policy gate
     below - nothing here writes anything on its own authority.
     """
-    candidates = list(
-        retention_requests([request], conversation_id=conversation.id)
-    )
-    candidates.extend(extract_declared_facts(request))
+    requested = retention_requests([request], conversation_id=conversation.id)
+    declared = extract_declared_facts(request)
+
+    # Pre-Stage-9 Campaign 1: a "remember that <personal fact>" ("remember
+    # that my goal is X", "note that I'm learning Y") is user knowledge, so it
+    # is filed in the one canonical personal-context store rather than as a
+    # second, unkeyed note that would never supersede anything. When the
+    # personal_context capability already handled this very turn it has
+    # written that record itself, so it is not written twice.
+    candidates: list[MemoryRecord] = []
+    agent_name = getattr(getattr(channel.manager, "own_skills", None), "name", "") or "manager"
+    for note in requested:
+        taught = extract_personal_context_candidate(note.content)
+        if taught is None:
+            candidates.append(note)
+        elif not (handled_by_capability == "personal_context" and handled_successfully):
+            candidates.append(build_personal_context_record(taught, agent_name=agent_name))
+    candidates.extend(declared)
 
     # 0.2 Final Surgical Pass: genuine understanding, not one more fixed
     # phrase, for the wording neither deterministic extractor above
@@ -402,7 +421,7 @@ def retain_what_was_asked_for(
     # check a request like "record this for later: water the plants"
     # would be captured twice: once correctly by record_this, and once
     # more here with a second, Brain-composed guess at the same content.
-    if not candidates and not capture_intent(request):
+    if not requested and not declared and not capture_intent(request):
         candidates.extend(_brain_judged_retention(channel, conversation, request))
 
     retained: list[MemoryRecord] = []

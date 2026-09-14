@@ -149,7 +149,6 @@ from src.services.memory.calendar_items import (
     next_occurrences as next_calendar_occurrences,
     parse_calendar_date,
 )
-from src.services.memory.learning import build_learning_record, learning_intent
 from src.services.memory.memory import MemoryRecord
 from src.services.memory.personal_context import (
     PersonalContextCandidate,
@@ -157,9 +156,16 @@ from src.services.memory.personal_context import (
     STATUS_DISCONTINUED,
     all_current_personal_context,
     build_personal_context_record,
+    describe_for_user,
     extract_personal_context_candidate,
+    extract_personal_context_query,
+    is_question_or_request as _is_question_or_request_statement,
+    match_personal_context,
     normalize_topic_key,
+    personal_context_query_intent,
 )
+from src.services.memory.query import STOPWORDS as _QUERY_STOPWORDS
+from src.services.memory.session import retention_requests
 from src.services.memory.personal_context import (
     personal_context_intent as _personal_context_shape_matches,
 )
@@ -1488,6 +1494,30 @@ def forget_this(request: CapabilityRequest) -> TaskResult:
     )
 
 
+# "What do you remember about me" - the whole of what the user taught.
+_SELF_REFERENCES = frozenset({"me", "myself", "me and my life", "my life"})
+PERSONAL_CONTEXT_ANSWER_LIMIT = 12
+
+
+def _canonical_recall(request: CapabilityRequest, topic: str) -> "tuple[Any, ...]":
+    try:
+        items = all_current_personal_context(recall=request.recall, limit=200)
+    except Exception as exc:  # noqa: BLE001 - a store that cannot be read
+        # must not take plain recall down with it.
+        logger.warning("could not read canonical personal context: %s", exc)
+        return ()
+    if not items:
+        return ()
+    cleaned = " ".join(str(topic or "").lower().split()).strip(" ?.!")
+    if cleaned in _SELF_REFERENCES:
+        return tuple(items[:PERSONAL_CONTEXT_ANSWER_LIMIT])
+    if not (tokenize(cleaned) - _QUERY_STOPWORDS):
+        return ()
+    matched = match_personal_context(items, cleaned)
+    current = tuple(item for item in matched if item.status == STATUS_CURRENT) or matched
+    return tuple(current[:PERSONAL_CONTEXT_ANSWER_LIMIT])
+
+
 def recall_memory(request: CapabilityRequest) -> TaskResult:
     """'What do you remember about X' - plain recall against this agent's
     own store, by whatever topic the person actually named. No topic list
@@ -1500,6 +1530,21 @@ def recall_memory(request: CapabilityRequest) -> TaskResult:
         )
 
     topic = _after_marker(request.task.description, RECALL_MARKERS)
+
+    # Pre-Stage-9 Campaign 1: what the user taught about themselves lives in
+    # one canonical, topic-keyed store, where a newer statement supersedes an
+    # older one. Answered from there first, so "what do you remember about my
+    # schedule" reports the current schedule rather than every schedule ever
+    # mentioned; anything else falls through to the plain recall below.
+    canonical = _canonical_recall(request, topic)
+    if canonical:
+        lines = "\n".join(f"- {describe_for_user(item)}" for item in canonical)
+        return TaskResult.success(
+            request.task, request.own_name,
+            f"Here's what I know:\n{lines}",
+            payload={"recalled": len(canonical), "source": "personal_context"},
+        )
+
     records = request.recall(topic, limit=5)
     if not records:
         return TaskResult.success(
@@ -1591,28 +1636,77 @@ def correction_intent(task: Task, participants: Sequence[str] = ()) -> bool:
     )
 
 
+def _canonical_items_for_correction(request: CapabilityRequest) -> "tuple[Any, ...]":
+    try:
+        return all_current_personal_context(recall=request.recall, limit=200)
+    except Exception as exc:  # noqa: BLE001 - a store that cannot be read
+        # must not take the plain correction path down with it.
+        logger.warning("could not read canonical personal context: %s", exc)
+        return ()
+
+
+def _canonical_for_topic(items: "Sequence[Any]", topic: str) -> "Any | None":
+    """The current canonical statement ``topic`` names - by its normalized
+    key, or by a whole-word key containment ("my favourite colour" names the
+    topic "favourite colour"). Never a partial word overlap: correcting the
+    wrong fact is worse than correcting none."""
+    key = normalize_topic_key(topic)
+    if not key:
+        return None
+    for item in items:
+        if item.topic_key == key:
+            return item
+    for item in items:
+        other = item.topic_key
+        if len(other) >= 3 and (
+            re.search(rf"\b{re.escape(other)}\b", key) or re.search(rf"\b{re.escape(key)}\b", other)
+        ):
+            return item
+    return None
+
+
+def _replace_canonical(
+    request: CapabilityRequest, existing: "Any", candidate: PersonalContextCandidate, *, reply: str, payload: dict,
+) -> TaskResult:
+    """Write the corrected statement under the existing topic's own key, then
+    remove only the statement that was wrong - retain first, so a refused
+    replacement never destroys what it was meant to replace. Earlier history
+    for the topic (a schedule that genuinely changed before) is untouched."""
+    corrected = PersonalContextCandidate(
+        topic=existing.topic, content=candidate.content, category=candidate.category or existing.category,
+        status=candidate.status, value=candidate.value, activity=candidate.activity,
+    )
+    record = build_personal_context_record(corrected, agent_name=request.own_name)
+    record = MemoryRecord(
+        content=record.content, kind=record.kind, tags=record.tags,
+        context={**dict(record.context or {}), "corrects": existing.record_id},
+    )
+    verdict = request.retain(record)
+    if not verdict.allowed:
+        return TaskResult.failure(request.task, request.own_name, f"I couldn't update that: {verdict.reason}")
+    request.forget(existing.record_id)
+    return TaskResult.success(request.task, request.own_name, reply, payload=payload)
+
+
 def correct_memory(request: CapabilityRequest) -> TaskResult:
     """Replace or invalidate an existing memory, atomically, through the
-    identical forget-then-retain sequence this file's own relational-
-    birthday handling (see ``_apply_relational_birthday`` above) already
-    proved works for one narrow domain - generalised here to any ordinary
-    ``user_context`` memory.
+    identical retain-then-forget sequence the relational-birthday handling
+    already proved.
+
+    Pre-Stage-9 Campaign 1: a personal fact now lives in the canonical,
+    topic-keyed personal-context store, so a correction first looks there -
+    a named topic, or the topic a stated replacement is about ("correction:
+    my favourite colour is green") - and replaces that topic's current
+    statement. A plain "remember that" note with no topic keeps the original
+    behaviour below.
 
     Three deterministic shapes, checked in order:
 
         "update what you remembered about X to Y"   named topic, named replacement
-        "that's wrong, Y" / "correction: Y" / ...    unnamed topic, named replacement -
-                                                       targets this agent's own single
-                                                       most recently retained
-                                                       user_context record
+        "that's wrong, Y" / "correction: Y" / ...    replacement, topic from Y when
+                                                       Y states one, otherwise this
+                                                       agent's most recent note
         "that's no longer my ..." / "... anymore"    pure invalidation, no replacement
-
-    Never guesses which memory "that" refers to beyond what ``recall()``
-    itself already ranks - a named topic narrows the search exactly as
-    FORGET/RECALL_MEMORY already do; an unnamed correction falls back to
-    "most recently retained", the identical default ``Memory.recall``'s
-    own contract already defines for an unfiltered query, scoped here to
-    one category rather than the whole store.
     """
     if request.recall is None or request.forget is None or request.retain is None:
         return TaskResult.failure(
@@ -1621,11 +1715,22 @@ def correct_memory(request: CapabilityRequest) -> TaskResult:
         )
 
     text = request.task.description
+    items = _canonical_items_for_correction(request)
 
     topic_match = CORRECTION_TOPIC_PATTERN.search(text)
     if topic_match is not None:
         topic = " ".join(topic_match.group(1).split())
         new_value = " ".join(topic_match.group(2).split())
+        existing = _canonical_for_topic(items, topic)
+        if existing is not None:
+            candidate = PersonalContextCandidate(
+                topic=existing.topic, content=f"The user's {existing.topic} is {new_value}.",
+                category=existing.category, value=new_value,
+            )
+            return _replace_canonical(
+                request, existing, candidate, reply=f"Updated what I remember about {topic}.",
+                payload={"handled_by": "correct_memory", "action": "updated", "topic": topic},
+            )
         matches = request.recall(topic, kind=MemoryCategory.USER_CONTEXT.value, limit=1)
         if not matches:
             return TaskResult.success(
@@ -1634,15 +1739,8 @@ def correct_memory(request: CapabilityRequest) -> TaskResult:
             )
         # The topic itself must stay in the stored content, not only in
         # this handler's own extraction - otherwise a bare replacement
-        # value ("purple") becomes unfindable by a later "what do you
-        # remember about my favorite color" recall, which matches on
-        # content tokens alone. Skipped only when the value already
-        # restates the topic, so a full-sentence replacement is never
-        # doubled into "my favorite color is my favorite color is purple".
+        # value becomes unfindable by a later recall on the topic.
         content = new_value if new_value.lower().startswith(topic.lower()) else f"{topic} is {new_value}"
-        # Retain the replacement BEFORE forgetting the original: a
-        # refused replacement (a secret, too long) must never have
-        # already destroyed the record it was meant to replace.
         verdict = request.retain(
             MemoryRecord(
                 content=content, kind=MemoryCategory.USER_CONTEXT.value,
@@ -1659,13 +1757,20 @@ def correct_memory(request: CapabilityRequest) -> TaskResult:
 
     replacement = _after_marker(text, CORRECTION_REPLACE_MARKERS)
     if replacement:
+        taught = extract_personal_context_candidate(replacement)
+        existing = _canonical_for_topic(items, taught.topic) if taught is not None else None
+        if taught is not None and existing is not None:
+            return _replace_canonical(
+                request, existing, taught, reply="Got it - I've corrected that.",
+                payload={"handled_by": "correct_memory", "action": "corrected", "topic": existing.topic},
+            )
         target = request.recall(kind=MemoryCategory.USER_CONTEXT.value, limit=1)
         new_record = MemoryRecord(
             content=replacement, kind=MemoryCategory.USER_CONTEXT.value,
             context={"source": "conversation", "corrects": target[0].id if target else None},
         )
-        # Same ordering discipline as the topic-scoped branch above: the
-        # replacement must be accepted before the original is removed.
+        # Same ordering discipline as above: the replacement must be
+        # accepted before the original is removed.
         verdict = request.retain(new_record)
         if not verdict.allowed:
             return TaskResult.failure(request.task, request.own_name, f"I couldn't update that: {verdict.reason}")
@@ -1677,13 +1782,16 @@ def correct_memory(request: CapabilityRequest) -> TaskResult:
         )
 
     if _marker_present(text, CORRECTION_INVALIDATE_MARKERS):
-        target = request.recall(kind=MemoryCategory.USER_CONTEXT.value, limit=1)
-        if not target:
+        notes = request.recall(kind=MemoryCategory.USER_CONTEXT.value, limit=1)
+        candidates = [(item.created_at, item.record_id) for item in items[:1]]
+        candidates += [(note.created_at, note.id) for note in notes]
+        if not candidates:
             return TaskResult.success(
                 request.task, request.own_name,
                 "I don't have anything remembered to remove.",
             )
-        request.forget(target[0].id)
+        _newest_at, newest_id = max(candidates, key=lambda pair: pair[0])
+        request.forget(newest_id)
         return TaskResult.success(
             request.task, request.own_name, "Understood - I've removed that.",
             payload={"handled_by": "correct_memory", "action": "invalidated"},
@@ -5914,92 +6022,6 @@ READ_CONTENT = ManagerCapability(
 )
 
 
-# The other half of the same stage: what the person says they are working
-# on. A statement, not a question - so it is stored, not answered.
-#
-# This is deliberately a capability of its own rather than a widening of
-# RECORD_THIS or of retain_what_was_asked_for. "I'm studying X" is neither
-# an explicit capture request nor an explicit "remember that": nobody asked
-# for anything to be kept. What makes it retainable is that it is a durable
-# fact about the person which changes how a future answer should be pitched
-# - the exact admission test MemoryCategory states - and it is filed under
-# its own category so that removing it later ("I've finished that course")
-# does not mean touching who the person is.
-
-
-def learning_context(request: CapabilityRequest) -> TaskResult:
-    """Retain what the person said they are studying, through the same
-    governed write path every other retention in this file uses.
-
-    Stores the *subject*, never the material. A book, a syllabus or a set
-    of notes belongs in the user's own documents, where it can be quoted
-    with provenance (see src/providers/knowledge.py); copying it into a
-    memory store would be the dump-under-a-plausible-category case
-    ManagerMemoryPolicy already refuses on length alone.
-    """
-    if request.retain is None:
-        return TaskResult.failure(
-            request.task,
-            request.own_name,
-            "I don't have a way to remember that right now.",
-        )
-
-    record = build_learning_record(
-        request.task.description,
-        agent_name=request.own_name,
-        kind=MemoryCategory.LEARNING.value,
-    )
-    if record is None:
-        # select_capability only reaches this handler when claims already
-        # matched, so this is unreachable in practice - kept as an honest
-        # answer rather than an assumption nothing else could route here.
-        return TaskResult.failure(
-            request.task, request.own_name, "Studying what, exactly?"
-        )
-
-    verdict = request.retain(record)
-    if not verdict.allowed:
-        return TaskResult.failure(
-            request.task,
-            request.own_name,
-            f"I couldn't keep that: {verdict.reason}",
-        )
-
-    subject = (record.context or {}).get("subject", "")
-    return TaskResult.success(
-        request.task,
-        request.own_name,
-        f"Noted - I'll keep in mind that you're working on {subject}.",
-        payload={"handled_by": "learning_context", "subject": subject},
-    )
-
-
-LEARNING_CONTEXT = ManagerCapability(
-    name="learning_context",
-    # Word overlap alone would collide "study" and "learning" with
-    # ordinary requests that merely mention them - claims below is what
-    # actually decides this, the same rule RECORD_THIS already states, so
-    # the words here only need to exist rather than to be precise.
-    capabilities=frozenset(
-        {"study", "studying", "learn", "learning", "revise", "revising", "syllabus", "coursework"}
-    ),
-    handle=learning_context,
-    description=(
-        "Remembers what the user is currently studying, reading or preparing "
-        "for, so a later explanation can be pitched at it - the subject only, "
-        "never the study material itself."
-    ),
-    claims=lambda task, participants=(): learning_intent(task.description),
-    # Natural Conversation fix: the comment above already argued scoring
-    # was unsafe here, but scoreable was never actually disabled -
-    # confirmed as a real, observable misroute ("I have been learning to
-    # cook lately" reaching this handler via word overlap alone, claims
-    # correctly False; genuine cases like "I am studying for my chemistry
-    # exam" confirmed still claimed True and unaffected).
-    scoreable=False,
-)
-
-
 # "speak" added for requirement 2's own canonical example - "Alfred, I
 # want you to speak Italian" names no "voice"/"accent" word at all.
 # Safe to widen: every check below this gate still requires either a
@@ -6331,35 +6353,110 @@ _PERSONAL_CONTEXT_TIER2_MARKERS = frozenset({
 _PERSONAL_CONTEXT_SELF_REFERENCE = re.compile(r"\b(?:i|i'm|i've|my)\b", re.IGNORECASE)
 
 
+def _personal_context_working_text(text: str) -> str:
+    """What a statement actually teaches: the part after a retention marker
+    ("remember that my goal is X" teaches "my goal is X"), or the whole
+    statement when there is no marker."""
+    requested = retention_requests([text])
+    return requested[0].content if requested else text
+
+
+def _personal_context_query_defers(task: Task, participants: Sequence[str] = ()) -> bool:
+    """A question about the user that a more specific capability already
+    owns - the calendar ("what's my schedule tomorrow"), tasks, recordings,
+    an age or date derivation, the clock, or an explicit "what do you
+    remember about" (recall_memory, which reads the same canonical store)."""
+    text = task.description
+    return bool(
+        calendar_retrieve_intent(text) or extract_calendar_period_query(text)
+        or list_tasks_intent(text) or list_recordings_intent(text)
+        or temporal_derivation_intent(task, participants)
+        or current_datetime_intent(task, participants)
+        or recall_memory_intent(task, participants)
+    )
+
+
 def personal_context_intent(task: Task, participants: Sequence[str] = ()) -> bool:
-    """Claims a request shaped like a self-declared, updatable personal
-    fact - Tier 1's own deterministic shapes, or (Tier 2 eligibility only)
-    a self-referential remark carrying one of this domain's markers that
-    Tier 1's regexes did not happen to match.
+    """Claims a self-declared, updatable personal fact - or a question about
+    what the user has taught - by shape:
 
-    Two deferrals:
-
-      - ``learning_intent`` already, correctly, owns present-continuous
-        study ("I am studying X") - LEARNING_CONTEXT's own capability,
-        deliberately untouched by this checkpoint (see personal_context.py's
-        own module docstring for why). A request already shaped that way is
-        never claimed here, Tier 1 or Tier 2, so the two capabilities can
-        never both fire for the same sentence.
-      - ``select_voice_intent`` reuses "learned"-adjacent phrasing nowhere,
-        but the deferral is added for the same documented reason every
-        other capability in this file already states one: a future
-        overlap must fail loud in a test, not fail silent in routing.
+      - a question about the user's own stored context ("what am I
+        learning", "what's my goal"), unless a more specific capability
+        owns it (see ``_personal_context_query_defers``);
+      - any of personal_context.py's deterministic statement shapes,
+        including a study statement and a "my X is Y" declaration, read
+        from what follows a retention marker when there is one;
+      - Tier 2 eligibility only: a self-referential *statement* (never a
+        question) carrying one of this domain's markers that Tier 1 did not
+        happen to match.
     """
     text = task.description
-    if learning_intent(text):
-        return False
-    if _personal_context_shape_matches(text):
+    if personal_context_query_intent(text):
+        return not _personal_context_query_defers(task, participants)
+    working = _personal_context_working_text(text)
+    if _personal_context_shape_matches(working):
         return True
     if select_voice_intent(task, participants):
+        return False
+    if _is_question_or_request_statement(text):
         return False
     if not _PERSONAL_CONTEXT_SELF_REFERENCE.search(text):
         return False
     return bool(_PERSONAL_CONTEXT_TIER2_MARKERS & tokenize(text))
+
+
+def _answer_personal_context_query(request: CapabilityRequest, text: str) -> TaskResult:
+    """"What am I learning?", "what's my schedule?" - answered from the
+    canonical store deterministically, identically with or without a Brain.
+    Current statements are preferred; a topic that is only known to have
+    ended is still reported honestly as ended."""
+    if request.recall is None:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "I don't have a way to recall what you've told me right now.",
+        )
+    focus = extract_personal_context_query(text) or ""
+    items = all_current_personal_context(recall=request.recall, limit=200)
+    matched = match_personal_context(items, focus)
+    current = tuple(item for item in matched if item.status == STATUS_CURRENT) or matched
+    current = current[:PERSONAL_CONTEXT_ANSWER_LIMIT]
+    if not current:
+        return TaskResult.success(
+            request.task, request.own_name,
+            "You haven't told me anything about that yet.",
+            payload={"handled_by": "personal_context", "action": "recall", "count": 0},
+        )
+    lines = [describe_for_user(item) for item in current]
+    message = lines[0] if len(lines) == 1 else "Here's what I know:\n" + "\n".join(f"- {line}" for line in lines)
+    return TaskResult.success(
+        request.task, request.own_name, message,
+        payload={
+            "handled_by": "personal_context", "action": "recall", "count": len(current),
+            "topics": [item.topic for item in current],
+        },
+    )
+
+
+def _broad_statement_is_personal(request: CapabilityRequest, working: str) -> bool:
+    """For the one broad shape ("my X is Y"): when a Brain is available, ask
+    whether this really is a personal fact rather than, say, a problem being
+    described. Only an explicit "not a personal fact" answer rejects it; no
+    Brain, or a Brain that cannot answer, keeps the deterministic reading -
+    Half Brain stays useful."""
+    if request.converse is None:
+        return True
+    notes = (
+        f"The user said: \"{working}\". Decide whether this is the user telling you a "
+        "durable, updatable fact about themselves (a preference, goal, plan, schedule, "
+        "possession or other personal context) rather than describing a problem or "
+        "asking for help. Reply with exactly one line: TOPIC: <short noun phrase> if it "
+        "is such a personal fact, or TOPIC: none if it is not.",
+    )
+    decision = request.converse(request.task, notes)
+    if not decision.is_decided or not decision.reason.strip():
+        return True
+    answer = re.search(r"TOPIC:\s*(\S+)", decision.reason, re.IGNORECASE)
+    return not (answer and answer.group(1).lower().startswith("none"))
 
 
 # REPAIR-01: a declaration that points at something rather than stating a
@@ -6386,8 +6483,17 @@ def personal_context(request: CapabilityRequest) -> TaskResult:
     the calling agent's own, exactly as select_voice already established.
     """
     text = request.task.description
-    candidate = extract_personal_context_candidate(text)
+    if personal_context_query_intent(text):
+        return _answer_personal_context_query(request, text)
+
+    working = _personal_context_working_text(text)
+    candidate = extract_personal_context_candidate(working)
     brain_assisted = False
+
+    if candidate is not None and candidate.broad and not _broad_statement_is_personal(request, working):
+        # A Brain judged "my X is Y" to be something other than a personal
+        # fact - answered as ordinary conversation, never stored.
+        return open_conversation(request)
 
     if candidate is None:
         if request.converse is None:
@@ -6398,7 +6504,7 @@ def personal_context(request: CapabilityRequest) -> TaskResult:
                 "right now.",
             )
         notes = (
-            f"The user said: \"{text}\". This appears to be the user teaching you "
+            f"The user said: \"{working}\". This appears to be the user teaching you "
             "an updatable personal fact about themselves - a skill, a schedule, or "
             "some other changing personal context, not a request for information. "
             "Reply with exactly two lines and nothing else:\n"
@@ -6435,7 +6541,7 @@ def personal_context(request: CapabilityRequest) -> TaskResult:
         status = status_match.group(1).lower() if status_match else STATUS_CURRENT
         candidate = PersonalContextCandidate(
             topic=topic_raw[:120],
-            content=text.strip(),
+            content=working.strip(),
             category="context",
             status=status,
         )
@@ -6510,10 +6616,16 @@ def personal_context(request: CapabilityRequest) -> TaskResult:
             if calendar_verdict.allowed:
                 calendar_note = " I've also updated your calendar to match."
 
-    verb = "noted" if candidate.status == STATUS_CURRENT else "noted that this has ended"
+    if attached_id:
+        confirmation = "Got it."
+    elif candidate.content.startswith("The user stated (regarding"):
+        confirmation = f"Got it - I'll remember what you told me about your {candidate.topic}."
+    else:
+        said_back = describe_for_user(candidate)
+        confirmation = f"Got it - I'll remember that {said_back[:1].lower()}{said_back[1:]}"
     return TaskResult.success(
         request.task, request.own_name,
-        f"Got it - I've {verb} regarding {candidate.topic}.{calendar_note}{artifact_note}",
+        f"{confirmation}{calendar_note}{artifact_note}",
         payload={
             "handled_by": "personal_context",
             "topic": candidate.topic,
@@ -6530,6 +6642,9 @@ PERSONAL_CONTEXT = ManagerCapability(
     name="personal_context",
     capabilities=frozenset({
         "learned", "skill", "skills", "schedule", "timetable", "syllabus",
+        # What the user is studying is personal context too (Pre-Stage-9
+        # Campaign 1) - the words IDENTITY.md declares for it stay backed.
+        "study", "studying", "learn", "learning", "revise", "revising", "coursework",
     }),
     handle=personal_context,
     description=(
@@ -7019,9 +7134,8 @@ MANAGER_CAPABILITIES: dict[str, ManagerCapability] = {
     PERSONAL_RECURRING_EVENTS.name: PERSONAL_RECURRING_EVENTS,
     CONNECTED_ACTION.name: CONNECTED_ACTION,
     # Stage 18: general knowledge and history as one capability for every
-    # subject, and the learning context that pitches it.
+    # subject. What the user is studying is personal context (Campaign 1).
     KNOWLEDGE.name: KNOWLEDGE,
-    LEARNING_CONTEXT.name: LEARNING_CONTEXT,
     SELECT_VOICE.name: SELECT_VOICE,
     # Generalized user knowledge/personal-context checkpoint.
     PERSONAL_CONTEXT.name: PERSONAL_CONTEXT,

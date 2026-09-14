@@ -33,6 +33,11 @@ from typing import Iterable
 from src.services.memory.memory import MemoryRecord
 from src.services.memory.temporal_facts import parse_month_day, parse_natural_date
 
+# Every ``fact_type`` extract_declared_facts can write - named once so the
+# canonical personal-context reader can present these facts beside
+# everything else the user taught, instead of a second list of them.
+DECLARED_FACT_TYPES: tuple[str, ...] = ("name", "date_of_birth", "school", "completion_date")
+
 _WORD = r"[A-Za-z][\w'\-]*"
 _NAME_GROUP = rf"({_WORD}(?:\s+{_WORD}){{0,3}})"
 

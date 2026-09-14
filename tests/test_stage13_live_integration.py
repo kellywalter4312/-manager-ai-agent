@@ -302,9 +302,11 @@ class TestStage12BehaviourIntactThroughTheLivePath:
         calls = []
         real = exchange_module.retain_what_was_asked_for
 
-        def spy(ch, conv, request):
+        def spy(ch, conv, request, **kwargs):
+            # exchange() also passes how the routed turn was handled
+            # (Pre-Stage-9 Campaign 1), forwarded unchanged.
             calls.append(request)
-            return real(ch, conv, request)
+            return real(ch, conv, request, **kwargs)
 
         monkeypatch.setattr(exchange_module, "retain_what_was_asked_for", spy)
 

@@ -190,6 +190,7 @@ class JobOpportunityAnalyzer(Analyzer):
         profile: "UserProfile | None" = None,
         top_n: int = 5,
         interpreter: object | None = None,
+        profile_source: "Callable[[], UserProfile | None] | None" = None,
     ) -> None:
         """Detection only without a profile; full analysis with one.
 
@@ -218,6 +219,9 @@ class JobOpportunityAnalyzer(Analyzer):
         self._profile = profile
         self._top_n = top_n
         self._interpreter = interpreter
+        # Pre-Stage-9 Campaign 1: when given, the live canonical profile
+        # (USER.md plus everything taught since), asked on every analysis.
+        self._profile_source = profile_source
 
     @property
     def name(self) -> str:
@@ -244,15 +248,22 @@ class JobOpportunityAnalyzer(Analyzer):
         """
         return self._interpreter
 
+    def current_profile(self) -> "UserProfile | None":
+        """The profile this analysis would use right now."""
+        if self._profile_source is not None:
+            return self._profile_source()
+        return self._profile
+
     def analyze(self, messages: Sequence[EmailMessage]) -> AnalysisReport:
-        if self._profile is not None:
+        profile = self.current_profile()
+        if profile is not None:
             # Imported here so the detection-only path never loads the
             # extraction/matching machinery it does not use.
             from src.agents.email.opportunity_analysis import analyze_opportunities
 
             return analyze_opportunities(
                 messages,
-                profile=self._profile,
+                profile=profile,
                 analyzer_name=self.name,
                 min_score=self._min_score,
                 top_n=self._top_n,

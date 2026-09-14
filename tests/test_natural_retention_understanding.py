@@ -309,6 +309,9 @@ class TestRealProductionRetentionThroughUnseenWording:
         assert manager.memory.recall(limit=10) == ()
 
 
+NOTE = "remember that the blue folder holds the tax papers"
+
+
 class TestHonestRetentionWhenTheRoutedTaskFails:
     """Foundation Repair #3 (reconciliation audit, 2026-09-05): the exact
     defect the audit measured live - "remember that my favorite color is
@@ -316,26 +319,32 @@ class TestHonestRetentionWhenTheRoutedTaskFails:
     fact was retained anyway, because retain_what_was_asked_for is a
     separate, always-governed path that runs regardless of how the routed
     task was handled. Real, unfunded NullBrain throughout - the actual
-    current state of this project, not a special-cased fixture."""
+    current state of this project, not a special-cased fixture.
+
+    Pre-Stage-9 Campaign 1: a personal fact ("my favorite color is teal") is
+    now learned directly by the personal_context capability, so its turn
+    succeeds on its own terms. These checks therefore use a note that is not
+    a personal fact, which Half Brain still cannot answer - the honesty path
+    they guard is unchanged."""
 
     def test_the_task_no_longer_reports_failed(self):
         runtime, manager, channel, conversation = real_system()
-        turn = exchange(channel, conversation, "remember that my favorite color is teal")
+        turn = exchange(channel, conversation, NOTE)
         assert turn.succeeded is True
 
     def test_the_retention_genuinely_happened_not_merely_claimed(self):
         """The decisive check: succeeded=True would be worse than the
         original bug if the fact itself were not actually stored."""
         runtime, manager, channel, conversation = real_system()
-        exchange(channel, conversation, "remember that my favorite color is teal")
-        records = manager.memory.recall("teal")
-        assert any("teal" in r.content for r in records)
+        exchange(channel, conversation, NOTE)
+        records = manager.memory.recall("tax papers")
+        assert any("tax papers" in r.content for r in records)
 
     def test_the_original_failure_reason_is_not_hidden(self):
         """Honest means both things are said - what could not be done, and
         what was done anyway - never one replacing the other."""
         runtime, manager, channel, conversation = real_system()
-        turn = exchange(channel, conversation, "remember that my favorite color is teal")
+        turn = exchange(channel, conversation, NOTE)
         assert "reason about" in turn.outcome or "no reasoning capability" in turn.outcome
         assert "remembered" in turn.outcome.lower()
 
@@ -345,7 +354,7 @@ class TestHonestRetentionWhenTheRoutedTaskFails:
         accepted: failed" in the trail sitting right above a now-successful
         result."""
         runtime, manager, channel, conversation = real_system()
-        turn = exchange(channel, conversation, "remember that my favorite color is teal")
+        turn = exchange(channel, conversation, NOTE)
         assessed = next(step for step in turn.steps if step.label == "Assessed")
         assert "not accepted" not in assessed.detail
         assert any(step.label == "Memory" for step in turn.steps)
@@ -373,7 +382,7 @@ class TestHonestRetentionWhenTheRoutedTaskFails:
         otherwise the transcript itself would still show the dishonest
         text even though the returned turn was fixed."""
         runtime, manager, channel, conversation = real_system()
-        exchange(channel, conversation, "remember that my favorite color is teal")
+        exchange(channel, conversation, NOTE)
         transcript = conversation.transcript()
         assert not any("not accepted" in line for line in transcript)
         assert any("remembered" in line.lower() for line in transcript)

@@ -11,8 +11,6 @@ anything, and without knowing a single subject.
     ------------------------------------------------------------------------
     USER_DOCUMENTS             the knowledge_lookup tool      quotable, the
                                (a KnowledgeSourceProvider)    person's own
-    LEARNING_CONTEXT           the agent's governed Memory    who is asking
-                                                              and why
     PERSONAL_CONTEXT           the agent's governed Memory    the resolved,
                                (personal_context.py)          current-per-
                                                               topic state of
@@ -28,8 +26,9 @@ the user has ever taught Alfred may have several records behind it (see
 personal_context.py's own "lifecycle without mutation"); this module reads
 only ``all_current_personal_context`` - one record per topic, the latest -
 so a Brain reasoning over this evidence never sees a superseded fact beside
-its replacement and has to guess which one is true. Kept genuinely distinct
-from LEARNING_CONTEXT, which stays scoped to exactly what it always was.
+its replacement and has to guess which one is true. What the user is
+studying is part of it (Pre-Stage-9 Campaign 1): there is no second,
+separate learning store to consult.
 
 **Live information is deliberately absent, and its absence is the point.**
 ``LIVE_INFORMATION`` in ``capabilities.py`` already owns "what is true
@@ -62,7 +61,6 @@ import json
 
 from src.agents.tools.toolset import ToolSet
 from src.core.contracts import tokenize
-from src.manager.memory_policy import MemoryCategory
 from src.services.artifacts.content import (
     ContentUnit,
     artifact_ids_in,
@@ -92,7 +90,6 @@ KNOWLEDGE_TOOL = "knowledge_lookup"
 # it actually used. Plain strings rather than an enum on purpose: they
 # travel in a TaskResult payload, which is a mapping of ordinary values.
 USER_DOCUMENTS = "user_documents"
-LEARNING_CONTEXT = "learning_context"
 PERSONAL_CONTEXT = "personal_context"
 MODEL_KNOWLEDGE = "model_knowledge"
 # A specific document or file the person handed Alfred (or one Alfred
@@ -110,11 +107,6 @@ CONTENT_HISTORY_LINES = 12
 
 # Bound on how much of one referenced personal-context document is offered.
 PERSONAL_CONTEXT_DOCUMENT_CHARS = 4000
-
-# How many stored learning-context records are worth carrying into one
-# answer. Small: this is context for pitching an explanation, not a
-# transcript of everything the person has ever studied.
-LEARNING_RECALL_LIMIT = 3
 
 # How many distinct personal-context topics are worth carrying into one
 # answer. Small, for the same reason: ambient context for an answer, never
@@ -183,9 +175,8 @@ def _relevant_personal_context(
 
     **Governed personal-context intelligence checkpoint.** Scored by
     the identical literal-token-overlap relevance ``Memory.recall``'s
-    own ``query`` parameter already provides - the exact mechanism the
-    ``LEARNING_CONTEXT`` branch just above already uses - reused here
-    rather than duplicated. ``all_current_personal_context`` itself
+    own ``query`` parameter already provides - reused here rather than
+    duplicated. ``all_current_personal_context`` itself
     cannot take a relevance-ranked ``query`` directly: a relevance sort
     could return an older, superseded record for a topic ahead of its
     own newer replacement, silently breaking the "always the current
@@ -362,31 +353,6 @@ def gather_knowledge_evidence(
                 )
         if referenced:
             sources.append(SUPPLIED_CONTENT)
-
-    if recall is None:
-        unavailable.append(
-            f"{LEARNING_CONTEXT}: no memory reaches this request, so nothing is "
-            "known about what the user is studying"
-        )
-    else:
-        try:
-            records = tuple(
-                recall(text, kind=MemoryCategory.LEARNING.value, limit=LEARNING_RECALL_LIMIT)
-            )
-        except Exception as exc:  # noqa: BLE001 - deliberate boundary catch
-            # A memory that cannot be read must not take an answer down with
-            # it; the rest of the evidence is still true.
-            logger.warning("could not recall learning context: %s", exc)
-            unavailable.append(f"{LEARNING_CONTEXT}: memory could not be read")
-        else:
-            if records:
-                for record in records:
-                    notes.append(f"Learning context: {record.content}")
-                sources.append(LEARNING_CONTEXT)
-            else:
-                unavailable.append(
-                    f"{LEARNING_CONTEXT}: nothing is stored about what the user is studying"
-                )
 
     if recall is None:
         unavailable.append(

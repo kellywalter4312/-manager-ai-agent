@@ -56,6 +56,7 @@ from src.services.identity.recording_session import RecordingSessionRegistry
 from src.services.memory.day import Calendar
 from src.services.memory.memory import MemoryRecord
 from src.services.profile.profile import UserProfile
+from src.services.profile.user_knowledge import UserKnowledge
 from src.services.schedule.schedule import UserSchedule
 from src.utils.logging import get_logger, task_logger
 
@@ -71,6 +72,7 @@ class ManagerSkills(BaseAgent):
         roster: Callable[[], Sequence[BaseAgent]] | None = None,
         capabilities: dict[str, ManagerCapability] | None = None,
         user: UserProfile | None = None,
+        user_knowledge: "UserKnowledge | None" = None,
         schedule: UserSchedule | None = None,
         tools: ToolSet | None = None,
         converse: "Callable[[Task, Sequence[str]], BrainDecision] | None" = None,
@@ -120,6 +122,12 @@ class ManagerSkills(BaseAgent):
             MANAGER_CAPABILITIES if capabilities is None else dict(capabilities)
         )
         self._user = user
+        # Pre-Stage-9 Campaign 1: the canonical view of the person - USER.md
+        # with everything taught in conversation layered over it, read live.
+        # When present it is what ``user`` answers, so recognition and every
+        # handler reason from what the person has actually said, not only
+        # from what the document said at startup.
+        self._user_knowledge = user_knowledge
         # When the user is around. A second document about the same person,
         # kept apart from the profile because one changes when someone learns
         # something and the other when someone takes a holiday. Per run, like
@@ -485,7 +493,7 @@ class ManagerSkills(BaseAgent):
         has always accepted, so nothing about how he reasons changes - he
         simply now has something true to reason from.
         """
-        return recognise(task, self._user)
+        return recognise(task, self.user)
 
     @property
     def tools(self) -> ToolSet:
@@ -515,7 +523,14 @@ class ManagerSkills(BaseAgent):
         identity is read once with the runtime, the profile is re-read every
         run because the person keeps changing.
         """
+        if self._user_knowledge is not None:
+            return self._user_knowledge.profile()
         return self._user
+
+    @property
+    def user_knowledge(self) -> "UserKnowledge | None":
+        """The canonical view of the person this Manager serves, or None."""
+        return self._user_knowledge
 
     def execute(self, task: Task) -> TaskResult:
         """Pick the handler this task is asking for, and run it.
@@ -578,7 +593,7 @@ class ManagerSkills(BaseAgent):
                 own_capabilities=tuple(sorted(self.spec.capabilities)),
                 # Handed to every handler as read-only context. A handler that
                 # has no use for it simply does not look.
-                user=self._user,
+                user=self.user,
                 # Computed once per execution, before any handler runs, so two
                 # handlers cannot disagree about what this task named.
                 recognition=self.recognise(task),

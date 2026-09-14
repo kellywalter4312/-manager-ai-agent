@@ -1,5 +1,5 @@
-"""What the person is studying - a fact about the *user*, kept where every
-other fact about the user already lives.
+"""What the person is studying - the grammar of a first-person study
+statement, and nothing else.
 
 **The distinction this module exists to hold, stated once so nothing
 downstream has to re-derive it.** There are four separable ways Alfred
@@ -10,69 +10,68 @@ can know something, and only one of them belongs in Memory:
                               ``src/providers/knowledge.py``.
     user documents/books      material the person supplied. Lives in
                               their own files and is *quoted*, never
-                              copied into a memory store: a book is not
-                              knowledge about the user, and admitting one
-                              would fill the store with a dump of
-                              something that belongs elsewhere - exactly
-                              what ManagerMemoryPolicy's length rule
-                              already refuses.
+                              copied into a memory store.
     live information          the present moment. Decays, so retaining it
                               would be retaining something that is about
                               to be false.
-    LEARNING CONTEXT          THIS module. "I am studying X", "I am
-                              reading Y", "I am preparing for Z". A
-                              stable fact about the person that should
-                              change how a future answer is pitched -
-                              which is the entire admission test
-                              ``src/manager/memory_policy.py`` states for
-                              a category existing at all.
+    WHAT THE USER IS STUDYING a stable, supersedable fact about the person
+                              that should change how a future answer is
+                              pitched.
+
+**One store, not two (Pre-Stage-9 Campaign 1).** This module used to build
+its own ``learning``-kind record, a second store of user knowledge beside
+``personal_context.py``'s topic-keyed one - "I'm learning X" and "I've
+learned X" then lived in different places, superseded nothing, and were
+read by different code. It now only *recognises* the statement; the one
+canonical writer is ``personal_context.py`` (``extract_learning_activity``),
+which turns it into an ordinary personal-context record whose topic is the
+subject. ``LEARNING_KIND`` survives solely so records written before this
+change are still read back (see ``personal_context.all_current_personal_context``).
 
 **Recognised by request shape, never by subject.** No subject, course,
 book, exam board, school, country or discipline appears below and none
 may be added. A marker earns its place here only by being a *first-person
 statement of ongoing study*, true of any subject a person could ever
 name: whatever follows the marker **is** the subject, stored as a plain
-string, never matched against a list of known subjects. A field of study
-nobody has mentioned yet needs no change here.
-
-**Shared, never duplicated per agent.** This module knows nothing about
-Alfred, Arthur, ManagerCapability or CapabilityRequest - it turns text
-into a candidate ``MemoryRecord``, the same neutral shape
-``build_recording`` already returns, and the caller offers it to
-whichever agent's own governed policy applies. The same one-extraction-
-two-callers rule ``src/services/memory/capture.py`` already documents.
+string, never matched against a list of known subjects.
 """
 
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
-from src.services.memory.memory import MemoryRecord
-
+# The kind older learning records were written under. Read-only now: no
+# code path writes it (see this module's own docstring).
 LEARNING_KIND = "learning"
-LEARNING_SOURCE = "conversation"
 
-# First-person statements of ongoing or intended study. Whatever follows
+# Adverbs a person naturally puts between "I'm" and the study verb ("I'm
+# also learning", "I am still studying"). Grammar, never a subject.
+_ADVERBS = r"(?:(?:also|still|currently|now|really|actively|just|already|even)\s+)*"
+_STUDY_VERB = r"(?P<verb>studying|learning|revising|reading|practi[cs]ing)"
+_PREPOSITION = r"(?P<prep>about\s+|for\s+)?"
+
+# First-person statements of ongoing or newly-begun study. Whatever follows
 # the verb is the subject, captured by the group - the code never reads it
 # as anything but text.
 #
 # "reading" is included and "read" is not, deliberately: "I'm reading X"
 # states a current activity, while "read X" is an instruction to somebody.
-# The same reason ``capture.py`` matches "record this" and not "record".
-_LEARNING_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
-    re.compile(pattern, re.IGNORECASE)
-    for pattern in (
-        r"\bi(?:'m|\s+am)\s+(?:currently\s+)?studying\s+(?P<subject>[^.!?]+)",
-        r"\bi(?:'m|\s+am)\s+(?:currently\s+)?learning\s+(?:about\s+)?(?P<subject>[^.!?]+)",
-        r"\bi(?:'m|\s+am)\s+(?:currently\s+)?revising\s+(?:for\s+)?(?P<subject>[^.!?]+)",
-        r"\bi(?:'m|\s+am)\s+(?:currently\s+)?reading\s+(?P<subject>[^.!?]+)",
-        r"\bi(?:'m|\s+am)\s+(?:currently\s+)?preparing\s+for\s+(?P<subject>[^.!?]+)",
+_LEARNING_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = tuple(
+    (re.compile(pattern, re.IGNORECASE), tense)
+    for pattern, tense in (
+        (rf"\bi(?:'m|\s+am|m)\s+{_ADVERBS}{_STUDY_VERB}\s+{_PREPOSITION}(?P<subject>[^.!?]+)", "ongoing"),
+        (rf"\bi(?:'m|\s+am|m)\s+{_ADVERBS}(?P<verb>preparing)\s+(?P<prep>for\s+)(?P<subject>[^.!?]+)", "ongoing"),
         # "taking" needs the noun as well: "I'm taking a course on X" states
         # study, "I'm taking the bus" states nothing this module should keep.
-        r"\bi(?:'m|\s+am)\s+(?:currently\s+)?taking\s+(?:a\s+|an\s+|the\s+)?"
-        r"(?P<subject>[^.!?]*\b(?:course|class|module|paper)\b[^.!?]*)",
-        r"\bim\s+(?:currently\s+)?(?:studying|learning|revising|reading)\s+"
-        r"(?:about\s+|for\s+)?(?P<subject>[^.!?]+)",
+        (rf"\bi(?:'m|\s+am|m)\s+{_ADVERBS}(?P<verb>taking)\s+(?P<prep>a\s+|an\s+|the\s+)?"
+         r"(?P<subject>[^.!?]*\b(?:course|class|module|paper)\b[^.!?]*)", "ongoing"),
+        # A study that has just begun - "I've started learning X", "I began
+        # studying X". Same subject slot, reported as started.
+        (rf"\bi(?:'ve|\s+have)?\s+(?:just\s+|recently\s+)?(?:started|begun|began)\s+{_STUDY_VERB}\s+"
+         rf"{_PREPOSITION}(?P<subject>[^.!?]+)", "started"),
+        (rf"\bi(?:'m|\s+am|m)\s+{_ADVERBS}starting\s+to\s+(?P<verb>study|learn|revise|read|practi[cs]e)\s+"
+         rf"{_PREPOSITION}(?P<subject>[^.!?]+)", "started"),
     )
 )
 
@@ -83,84 +82,85 @@ _VOCATIVE_ADDRESS = re.compile(
     r"^(?:hey|hi|hello)?\s*[A-Z][\w'\-]*(?:\s+[A-Z][\w'\-]*){0,2}\s*,\s*", re.IGNORECASE
 )
 
+# Words a person tacks onto the end of a statement that belong to the
+# sentence, never to what it is about ("I'm learning X too" is about X).
+# Filler grammar, the same role _TOPIC_STOPWORDS plays in personal_context.py.
+_TRAILING_FILLER = re.compile(
+    r"(?:\s*,?\s+(?:too|as\s+well|also|now|lately|these\s+days|at\s+the\s+moment|right\s+now|anymore|any\s+more))+\s*$",
+    re.IGNORECASE,
+)
+
 # A subject is a phrase, not an essay. A "subject" longer than this is a
 # sentence that happened to open with a study verb, and storing it would
 # put prose in a field every later reader treats as a label.
 _MAX_SUBJECT_CHARS = 120
 
+_GERUND_OF = {
+    "study": "studying", "learn": "learning", "revise": "revising", "read": "reading",
+    "practise": "practising", "practice": "practicing",
+}
+
+
+@dataclass(frozen=True)
+class LearningStatement:
+    """One recognised study statement. ``activity`` is the study verb as a
+    gerund ("learning"), ``subject`` the text itself (never a category),
+    ``preposition`` whatever joined the two as it was said ("for ", "about
+    ", or empty), and ``tense`` either "ongoing" or "started"."""
+
+    activity: str
+    subject: str
+    tense: str
+    preposition: str = ""
+
+
+def strip_vocative_address(text: str) -> str:
+    """``text`` without a leading "Name, " address - who was spoken to is
+    never part of what was said."""
+    stripped = str(text or "").strip()
+    return _VOCATIVE_ADDRESS.sub("", stripped, count=1).strip() or stripped
+
+
+def strip_trailing_filler(text: str) -> str:
+    """``text`` without sentence-level filler at its end ("too", "as well",
+    "now", "these days")."""
+    return _TRAILING_FILLER.sub("", str(text or "")).strip(" ,;:")
+
 
 def learning_intent(text: str) -> bool:
-    """Whether this text states what the person is studying - the
-    ``claims=`` predicate a capability uses to recognise its own request
-    shape before word-overlap scoring ever runs, the same instrument
-    ``capture_intent`` and ``forget_intent`` already are."""
-    return extract_learning_subject(text) is not None
+    """Whether this text states what the person is studying."""
+    return extract_learning_statement(text) is not None
 
 
-def extract_learning_subject(text: str) -> str | None:
-    """The subject the person said they are studying, or None.
-
-    Returns the text itself, normalised and bounded - never a category,
-    never a lookup, never a guess. A historical period, a scientific
-    discipline, a professional certification and a book title are all
-    handled by the same line of code, because not one of them is
-    recognised: the sentence shape is. The examples this was specified
-    with live in its tests, where examples belong.
-    """
+def extract_learning_statement(text: str) -> "LearningStatement | None":
+    """The study statement ``text`` makes, or None."""
     stripped = str(text or "").strip()
     if not stripped:
         return None
 
-    addressed = _VOCATIVE_ADDRESS.sub("", stripped, count=1).strip()
-    working = addressed or stripped
-
-    for pattern in _LEARNING_PATTERNS:
+    working = strip_vocative_address(stripped)
+    for pattern, tense in _LEARNING_PATTERNS:
         match = pattern.search(working)
         if match is None:
             continue
-        subject = " ".join(match.group("subject").split()).strip(" ,;:")
+        subject = strip_trailing_filler(" ".join(match.group("subject").split()))
         if not subject:
             continue
         if len(subject) > _MAX_SUBJECT_CHARS:
             subject = subject[:_MAX_SUBJECT_CHARS].rstrip() + " ..."
-        return subject
+        verb = match.group("verb").lower()
+        preposition = (match.groupdict().get("prep") or "").lower()
+        if verb == "taking":
+            # "a course on X" - the article belongs to the subject phrase.
+            subject, preposition = f"{preposition}{subject}".strip(), ""
+        return LearningStatement(
+            activity=_GERUND_OF.get(verb, verb), subject=subject, tense=tense,
+            preposition=" ".join(preposition.split()) + (" " if preposition.strip() else ""),
+        )
     return None
 
 
-def build_learning_record(
-    text: str,
-    *,
-    agent_name: str,
-    kind: str = LEARNING_KIND,
-) -> MemoryRecord | None:
-    """One candidate learning-context record, or None when the text does
-    not state one at all.
-
-    ``agent_name`` travels in ``context`` as provenance - who was told
-    this - the same rule ``build_recording`` already follows. Never used
-    to reach into another agent's store: the caller decides whose memory
-    this candidate is offered to.
-
-    Carries full confidence (1.0) for the same reason a capture does: a
-    person saying what they are studying is a statement, not a hunch, and
-    treating it as tentative would refuse the exact thing this function
-    exists to keep.
-    """
-    subject = extract_learning_subject(text)
-    if subject is None:
-        return None
-
-    return MemoryRecord(
-        # The subject, not the whole utterance. What should change a
-        # future explanation is *what they are studying*; the sentence
-        # they happened to say it in is conversation.
-        content=f"Currently studying: {subject}",
-        kind=kind,
-        tags={"learning"},
-        context={
-            "subject": subject,
-            "confidence": 1.0,
-            "source": LEARNING_SOURCE,
-            "noted_by": agent_name,
-        },
-    )
+def extract_learning_subject(text: str) -> str | None:
+    """The subject the person said they are studying, or None."""
+    statement = extract_learning_statement(text)
+    return statement.subject if statement is not None else None

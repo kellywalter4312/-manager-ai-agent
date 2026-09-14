@@ -1,50 +1,44 @@
-"""Generalized, topic-keyed personal context - the mechanism, never a
-catalog of the things it can hold.
+"""The canonical personal-context system - the one place user knowledge is
+learned, superseded and read back. The mechanism, never a catalog of the
+things it can hold.
 
 **What this closes.** ``user_facts.py`` recognises a small, fixed set of
 self-introduction grammars (name, date of birth, school, completion
-date) - each its own regex, each its own ``fact_type``, one feature per
-category. ``learning.py`` recognises exactly one shape (present-
-continuous study) for exactly one purpose (pitching an explanation).
+date). ``learning.py`` recognises the grammar of a study statement.
 Neither generalizes to "the user just taught me a skill they have
-learned", "here is my new schedule", or a future kind of personal fact
-nobody has named yet - and building a third fixed-category module for
-each new kind a person happens to mention is exactly the "one feature
-per possible fact" this module exists to avoid.
+learned", "here is my new schedule", "my goal this year is X", or a future
+kind of personal fact nobody has named yet.
+
+**One store (Pre-Stage-9 Campaign 1).** Every self-declared, updatable fact
+- a study subject, a learned skill, a schedule, a goal, a preference, a
+project - is written here, as a ``personal_context`` record keyed by its
+topic. Before this campaign a study statement went to a separate
+``learning`` store and a "remember that my X is Y" to plain
+``user_context``, so the same knowledge lived in three places that
+superseded nothing. Those older records are still *read* by
+``all_current_personal_context`` (adapted into the same shape, the newest
+statement per topic still winning), but nothing writes them any more.
 
 **The generalization.** A statement is read into a ``PersonalContextCandidate``:
-a free-text ``topic`` (never matched against a list - the same discipline
-``learning.py``'s own subject capture already holds itself to), a
-``content`` string (what was actually said), a ``category`` (an open
-label like "skill"/"schedule"/"context" - carried, never enumerated
-here), and a ``status`` ("current" or "discontinued"). Nothing about the
-extraction functions below cares what the topic *is*; they recognise the
-grammatical *shape* of a statement, the identical principle every other
-deterministic extractor in this package already follows.
+a free-text ``topic`` (never matched against a list), a ``content`` string,
+a ``category`` (an open label like "learning"/"skill"/"context" - carried,
+never enumerated here), and a ``status`` ("current" or "discontinued").
+Nothing about the extraction functions below cares what the topic *is*;
+they recognise the grammatical *shape* of a statement.
 
-**Lifecycle without mutation.** ``MemoryRecord`` is frozen - "correcting
-a memory means storing a new record, which leaves the correction
-visible" (that module's own docstring). So a topic's current state is
-never edited in place; a new record is written for every statement, each
-tagged with a stable, normalized key for its topic
-(``personal_context_topic:<key>``), and ``recall(tags={that_key},
-limit=1)`` - "with no filters at all [beyond tags/kind], returns the
-most recent records" (``Memory.recall``'s own contract) - always answers
-"what is currently true about this topic" as the single latest record
-for it, honestly, with the full history still sitting right behind it
-in the same store, never deleted. A "no longer current" statement is not
-a deletion; it is one more record, with ``status="discontinued"``, that
-becomes the new latest word on that topic.
+**Lifecycle without mutation.** ``MemoryRecord`` is frozen, so a topic's
+current state is never edited in place; a new record is written for every
+statement, tagged with a stable key for its topic, and the most recent
+record for a key is the current word on it - the full history still in the
+store behind it. A "no longer current" statement is not a deletion; it is
+one more record, with ``status="discontinued"``.
 
-**Deterministic floor, Brain-assisted ceiling - the same shape this
-project's own memory-extraction modules already establish** (see
-``session.py``'s own docstring: "Model-judged extraction is a Full Brain
-upgrade layered on top of this floor, never a replacement for it").
-Everything in this module is Half-Brain-safe: no model is consulted.
-The genuinely open-ended cases language alone cannot classify (the
-capability's own Tier 2) live in ``src/manager/capabilities.py``, which
-asks a Brain only when nothing here matched, and validates its answer
-before ever writing it - this module holds no opinion about that.
+**Deterministic floor, Brain-assisted ceiling.** Everything in this module
+is Half-Brain-safe: no model is consulted, and every question about what is
+stored (``match_personal_context``) is answered by token overlap over real
+records. The genuinely open-ended cases language alone cannot classify live
+in ``src/manager/capabilities.py``, which asks a Brain only when it is
+available and validates its answer before writing anything.
 """
 
 from __future__ import annotations
@@ -53,11 +47,28 @@ import re
 from dataclasses import dataclass
 from typing import Callable, Iterable
 
+from src.core.contracts import tokenize
+from src.services.memory.learning import (
+    LEARNING_KIND,
+    extract_learning_statement,
+    strip_trailing_filler,
+    strip_vocative_address,
+)
 from src.services.memory.memory import MemoryRecord
+from src.services.memory.query import STOPWORDS
+from src.services.memory.user_facts import (
+    DECLARED_FACT_TYPES,
+    extract_declared_facts,
+    relational_birthday_intent,
+)
 
 PERSONAL_CONTEXT_KIND = "personal_context"
 PERSONAL_CONTEXT_FACT_TYPE = "personal_context"
 PERSONAL_CONTEXT_TAG = "personal_context"
+
+# The kind a plain "remember that X" note is filed under (session.py's own
+# RETAINED_KIND). Read here only to present older topic-shaped notes.
+_USER_CONTEXT_KIND = "user_context"
 
 STATUS_CURRENT = "current"
 STATUS_DISCONTINUED = "discontinued"
@@ -69,13 +80,23 @@ def _topic_tag(topic_key: str) -> str:
     return "personal_context_topic:" + "_".join(str(topic_key).lower().split())
 
 
+# Time phrases that qualify *when* a statement holds, never *what* it is
+# about ("my goal this year" and "my goal" are one topic). Grammar only.
+_TEMPORAL_TAIL = re.compile(
+    r"\s+(?:(?:for\s+)?(?:this|next|the)\s+(?:year|month|week|term|semester|season|quarter)"
+    r"|now|lately|these\s+days|at\s+the\s+moment|right\s+now)$",
+    re.IGNORECASE,
+)
+
+
 def normalize_topic_key(topic: str) -> str:
     """A stable grouping key for ``topic`` - lower-cased, whitespace-
-    collapsed, and stripped of the small set of leading qualifiers a
-    person's own restatement of the same topic commonly carries ("my
-    NEW IT schedule" and "my IT schedule" must group together, or
-    supersession could never find what it is replacing). Never a lookup
-    against known topics - there is no such list."""
+    collapsed, and stripped of the small set of leading qualifiers and
+    trailing time phrases a person's own restatement of the same topic
+    commonly carries ("my NEW IT schedule" and "my IT schedule", "my goal
+    this year" and "my goal", must group together, or supersession could
+    never find what it is replacing). Never a lookup against known topics -
+    there is no such list."""
     words = " ".join(str(topic or "").lower().split())
     qualifiers = ("new ", "updated ", "current ", "latest ", "my ")
     changed = True
@@ -85,20 +106,31 @@ def normalize_topic_key(topic: str) -> str:
             if words.startswith(qualifier):
                 words = words[len(qualifier):]
                 changed = True
+        stripped = _TEMPORAL_TAIL.sub("", words)
+        if stripped != words and stripped.strip():
+            words = stripped
+            changed = True
     return words.strip(" .,;:-")
 
 
 @dataclass(frozen=True)
 class PersonalContextCandidate:
-    """One recognised statement, not yet written - the neutral shape
-    every extractor below returns and the capability offers to governed
-    memory, the same "candidates, not memories" stance every sibling
-    module in this package already holds."""
+    """One recognised statement, not yet written - the neutral shape every
+    extractor below returns and the capability offers to governed memory.
+
+    ``value`` is the stated value when the statement had one ("Tue-Thu
+    10-4"), ``activity`` the study verb for a study statement, and
+    ``broad`` marks the one shape ("my X is Y") general enough that a Brain,
+    when one is available, is asked to confirm it really is a personal fact
+    before it is kept."""
 
     topic: str
     content: str
     category: str
     status: str = STATUS_CURRENT
+    value: str = ""
+    activity: str = ""
+    broad: bool = False
 
     def __post_init__(self) -> None:
         if not str(self.topic).strip():
@@ -109,10 +141,9 @@ class PersonalContextCandidate:
 
 @dataclass(frozen=True)
 class PersonalContextRecord:
-    """One resolved, current-or-discontinued fact, read back from
-    Memory - the shape a caller (a capability, Control Center, the
-    snapshot) actually wants, rather than a raw ``MemoryRecord`` whose
-    ``context`` dict it would otherwise have to unpack itself."""
+    """One resolved, current-or-discontinued fact, read back from Memory -
+    the shape every reader (a capability, Control Center, a specialist's
+    profile, the knowledge evidence) actually wants."""
 
     topic: str
     content: str
@@ -126,6 +157,16 @@ class PersonalContextRecord:
     # artifact stays the source of the actual content; this record is only
     # the governed, supersedable claim that it is the current one.
     artifact_id: str = ""
+    value: str = ""
+    activity: str = ""
+    # Which store the record was read from: "personal_context" for every
+    # record written since Campaign 1, or the older kind it was adapted
+    # from ("learning", "user_context").
+    source_kind: str = PERSONAL_CONTEXT_KIND
+
+    @property
+    def topic_key(self) -> str:
+        return normalize_topic_key(self.topic)
 
 
 # ---------------------------------------------------------------------------
@@ -136,11 +177,10 @@ class PersonalContextRecord:
 # it is what is left over when a marker phrase matched something that was
 # not really about a skill/schedule at all ("I know that's true"). Small,
 # and only ever used to *reject* an otherwise-matched capture, never to
-# recognise one - the identical role _NON_ACCENT_PRECEDING_WORDS plays
-# for voice parsing.
+# recognise one.
 _TOPIC_STOPWORDS = {
     "that", "it", "this", "so", "you", "him", "her", "them", "there",
-    "here", "what", "why", "how", "which", "who",
+    "here", "what", "why", "how", "which", "who", "your",
 }
 
 
@@ -157,20 +197,13 @@ def _reject_if_stopword(topic: "str | None") -> "str | None":
 
     def _is_acronym_shaped(word: str) -> bool:
         # An all-uppercase word ("IT", "AI", "UX") reads as a genuine
-        # acronym, never the pronoun it happens to share letters with -
-        # "I know IT" (the subject) and "I know it" (the pronoun) are
-        # not the same capture, and only the second should ever be
-        # rejected here.
+        # acronym, never the pronoun it happens to share letters with.
         return word.isupper() and len(word) <= 6
 
     first_word = cleaned.split(None, 1)[0]
     whole_is_stopword = not _is_acronym_shaped(cleaned) and cleaned.lower() in _TOPIC_STOPWORDS
     opens_with_stopword = not _is_acronym_shaped(first_word) and first_word.lower() in _TOPIC_STOPWORDS
     if whole_is_stopword or opens_with_stopword:
-        # Rejects both a bare pronoun capture ("I know it") and one
-        # that merely *opens* with one ("I know that is true") - a
-        # genuine topic is a noun phrase, never a clause that happens
-        # to start with a pronoun this table already treats as filler.
         return None
     return cleaned
 
@@ -184,99 +217,130 @@ def _bounded(text: str) -> str:
     return text
 
 
+def _third_person(text: str) -> str:
+    """"my notes" said by the user is "their notes" in a statement about
+    them - pronouns only, never meaning."""
+    return re.sub(r"\bmy\b", "their", re.sub(r"\bI\b", "they", str(text)))
+
+
 # "I've learned Python", "I have learned Python", "I learned Python",
 # "I've mastered X", "I know X now" - a completed, past-tense competency
-# statement. Deliberately distinct from learning.py's own present-
-# continuous "I am studying X" (a different capability, a different
-# category - see this module's own docstring) - "learn(ed)"/"master(ed)"
-# in the past tense is a claim of having acquired something, not of
-# currently working on it.
+# statement, distinct from a study still under way.
 _SKILL_LEARNED_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(pattern, re.IGNORECASE)
     for pattern in (
-        r"\bi(?:'ve| have)\s+(?:just\s+)?(?:learned|learnt|mastered|picked up)\s+(?P<topic>[^.!?]+)",
-        r"\bi\s+(?:just\s+)?(?:learned|learnt|mastered)\s+(?P<topic>[^.!?]+)",
+        r"\bi(?:'ve| have)\s+(?:just\s+|now\s+|finally\s+|also\s+)?(?:learned|learnt|mastered|picked up)\s+(?P<topic>[^.!?]+)",
+        r"\bi\s+(?:just\s+|finally\s+|also\s+)?(?:learned|learnt|mastered)\s+(?P<topic>[^.!?]+)",
         r"\bi\s+(?:now\s+)?know\s+(?P<topic>[^.!?]+?)\s+now\b",
         r"\bi\s+know\s+(?P<topic>[^.!?]+)",
     )
 )
 
-# "This is my new IT schedule", "here's my updated timetable", "this is
-# my schedule" - a general declaration/update shape, naming no category
-# of thing being declared. Whatever follows "my (new/updated/current)?"
-# *is* the topic and the content both - the same "whatever fills the
-# slot is the value, never matched against a list" rule every extractor
-# in this package already follows.
+# "This is my new IT schedule", "here's my updated timetable" - a general
+# declaration/update shape, naming no category of thing being declared.
 _UPDATE_DECLARATION_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(pattern, re.IGNORECASE)
     for pattern in (
-        # The topic stops at an optional ":"/"-" that introduces the
-        # actual value ("this is my IT schedule: Mon-Fri 9-3") - without
-        # this split, two successive statements about the same topic
-        # with different values ("... schedule: Mon-Fri 9-3" then "...
-        # new schedule: Tue-Thu 10-4") would each capture their own value
-        # into the topic itself and be tracked as two unrelated topics,
-        # never superseding one another. A real gap, found live, this
-        # checkpoint.
+        # The topic stops at an optional ":"/"-" that introduces the actual
+        # value ("this is my IT schedule: Mon-Fri 9-3"), so two successive
+        # statements about the same topic with different values supersede
+        # one another instead of being tracked as two topics.
         r"\b(?:this is|here is|here'?s)\s+my\s+(?:new\s+|updated\s+|current\s+|latest\s+)?"
         r"(?P<topic>[^.!?:\-]+?)(?:\s*[:\-]\s*(?P<content>[^.!?]+))?(?:[.!?]|$)",
         r"\bmy\s+(?:new\s+|updated\s+)(?P<topic>[^.!?]+?)\s+is\s*[:\-]?\s*(?P<content>[^.!?]*)",
     )
 )
 
-# "I'm starting IT", "I am starting a new job", "I've started my new
-# course" - a declaration that a new context has begun. Read the same
-# way an update-declaration is: the topic is genuinely new (no prior
-# state assumed), so this shares the update path rather than needing
-# its own status.
+# "I'm starting IT", "I've started my new course" - a declaration that a
+# new context has begun.
 _STARTING_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(pattern, re.IGNORECASE)
     for pattern in (
-        r"\bi(?:'m| am)\s+(?:now\s+)?starting\s+(?P<topic>[^.!?]+)",
-        r"\bi(?:'ve| have)\s+(?:just\s+)?started\s+(?P<topic>[^.!?]+)",
+        r"\bi(?:'m| am)\s+(?:now\s+|also\s+)?starting\s+(?P<topic>[^.!?]+)",
+        r"\bi(?:'ve| have)\s+(?:just\s+|also\s+)?started\s+(?P<topic>[^.!?]+)",
     )
 )
 
-# "My schedule has changed", "my timetable is different now" - names a
-# topic as stale without stating the new value. Handled as its own
-# shape: marks the topic discontinued/stale honestly (see
-# extract_discontinued's own docstring) rather than inventing content
-# that was never actually given.
+# "My schedule has changed" - names a topic as stale without stating the
+# new value. "has changed TO X" is a new value, handled by the possessive
+# declaration below, never by this shape.
 _CHANGED_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(pattern, re.IGNORECASE)
     for pattern in (
-        r"\bmy\s+(?P<topic>[^.!?]+?)\s+(?:has|have)\s+changed\b",
+        r"\bmy\s+(?P<topic>[^.!?]+?)\s+(?:has|have)\s+changed\b(?!\s+to\b)",
         r"\bmy\s+(?P<topic>[^.!?]+?)\s+is\s+different\s+now\b",
     )
 )
 
 # "I'm no longer learning French", "I've stopped studying for finals",
-# "I'm not doing IT anymore" - a topic explicitly closed out. Subject-
-# agnostic: the topic is whatever the negated activity names, never
-# matched against a list of known activities.
+# "I'm not doing IT anymore" - a topic explicitly closed out.
 _DISCONTINUED_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(pattern, re.IGNORECASE)
     for pattern in (
         r"\bi(?:'m| am)\s+no\s+longer\s+(?P<topic>[^.!?]+)",
         r"\bi(?:'ve| have)\s+stopped\s+(?P<topic>[^.!?]+)",
-        # The optional leading gerund ("doing"/"taking"/"studying"/
-        # "working on") is stripped from the capture so "I'm not doing
-        # IT anymore" resolves to the same topic key as "I'm starting
-        # IT" - a grammatical linking verb, not a personal fact, the
-        # same distinction learning.py already draws for its own verb
-        # list.
-        r"\bi(?:'m| am)\s+not\s+(?:doing|taking|studying|working\s+on)?\s*(?P<topic>[^.!?]+?)\s+anymore\b",
+        r"\bi(?:'m| am)\s+not\s+(?P<topic>[^.!?]+?)\s+any\s*more\b",
     )
 )
+
+# The activity verb a closed-out topic is often phrased with ("no longer
+# LEARNING French", "not DOING IT anymore") - grammar, stripped so the
+# topic resolves to the same key as the statement that opened it.
+_LEADING_ACTIVITY = re.compile(
+    r"^(?:learning|studying|revising|reading|practi[cs]ing|doing|taking|working\s+on|going\s+to)\s+(?:about\s+|for\s+)?",
+    re.IGNORECASE,
+)
+
+# "My X is Y", "my X are Y", "my X has changed to Y", "my X is now Y" - the
+# general possessive declaration of a personal value. Anchored to the start
+# of the statement (after an optional short lead-in like "also," or "by the
+# way,") so a possessive buried inside a longer request ("can you check
+# whether my code is right") is never read as one.
+_LEAD_IN = r"^(?:(?:and|so|also|well|oh|ok|okay|actually|by\s+the\s+way|btw|fyi|just\s+so\s+you\s+know)\s*,?\s*)?"
+_POSSESSIVE_DECLARATION = re.compile(
+    _LEAD_IN
+    + r"my\s+(?P<topic>[a-z0-9][\w'\-+#]*(?:\s+[\w'\-+#]+){0,5}?)"
+    r"(?:\s+(?P<verb>has\s+changed\s+to|have\s+changed\s+to|changed\s+to|is\s+now|are\s+now|is|are)|'s)\s+"
+    r"(?P<value>[^.!?]+)",
+    re.IGNORECASE,
+)
+
+# Opening words that make a sentence a question or a request rather than a
+# statement - grammar, never a topic.
+_NON_STATEMENT_OPENERS = frozenset({
+    "what", "when", "where", "who", "whom", "whose", "why", "how", "which",
+    "do", "does", "did", "is", "are", "was", "were", "can", "could", "would",
+    "will", "should", "shall", "may", "might", "please", "tell", "show",
+    "give", "help", "let", "find", "check", "read", "remind", "explain",
+})
+
+
+def _is_question_or_request(text: str) -> bool:
+    working = strip_vocative_address(text).strip()
+    if not working:
+        return True
+    if working.rstrip().endswith("?"):
+        return True
+    first = re.split(r"[\s,]+", working.lower(), maxsplit=1)[0].strip("'\"")
+    return first in _NON_STATEMENT_OPENERS
+
+
+def is_question_or_request(text: str) -> bool:
+    """Whether ``text`` asks or requests rather than states - the check
+    every statement shape here applies, offered to the capability layer so
+    its Brain-assisted tier never treats a question as something to learn."""
+    return _is_question_or_request(text)
 
 
 def extract_skill_learned(text: str) -> "PersonalContextCandidate | None":
     stripped = str(text or "")
+    if _is_question_or_request(stripped):
+        return None
     for pattern in _SKILL_LEARNED_PATTERNS:
         match = pattern.search(stripped)
         if match is None:
             continue
-        topic = _reject_if_stopword(match.group("topic"))
+        topic = _reject_if_stopword(strip_trailing_filler(match.group("topic")))
         if topic is None:
             continue
         topic = _bounded(topic)
@@ -285,8 +349,34 @@ def extract_skill_learned(text: str) -> "PersonalContextCandidate | None":
             content=f"The user has learned {topic}.",
             category="skill",
             status=STATUS_CURRENT,
+            activity="learned",
         )
     return None
+
+
+def extract_learning_activity(text: str) -> "PersonalContextCandidate | None":
+    """A study statement ("I'm also learning X", "I've started studying Y")
+    as one ordinary personal-context candidate whose topic is the subject -
+    the single writer of what used to be a separate learning store."""
+    stripped = str(text or "")
+    if _is_question_or_request(stripped):
+        return None
+    statement = extract_learning_statement(stripped)
+    if statement is None:
+        return None
+    topic = _reject_if_stopword(statement.subject)
+    if topic is None:
+        return None
+    topic = _bounded(topic)
+    phrase = _third_person(f"{statement.preposition}{topic}")
+    if statement.tense == "started":
+        content = f"The user has started {statement.activity} {phrase}."
+    else:
+        content = f"The user is {statement.activity} {phrase}."
+    return PersonalContextCandidate(
+        topic=topic, content=content, category="learning", status=STATUS_CURRENT,
+        activity=statement.activity,
+    )
 
 
 def extract_update_declaration(text: str) -> "PersonalContextCandidate | None":
@@ -301,49 +391,95 @@ def extract_update_declaration(text: str) -> "PersonalContextCandidate | None":
             continue
         content_part = groups.get("content")
         topic = _bounded(topic)
+        value = ""
         if content_part and content_part.strip():
-            content_part = _clean_topic(content_part)
-            statement = f"The user's {topic} is: {content_part}"
+            value = _clean_topic(content_part)
+            statement = f"The user's {topic} is: {value}"
         else:
             statement = f"The user stated (regarding {topic}): {_clean_topic(stripped)}"
         return PersonalContextCandidate(
             topic=topic, content=_bounded(statement), category="context", status=STATUS_CURRENT,
+            value=value,
         )
 
+    if _is_question_or_request(stripped):
+        return None
     for pattern in _STARTING_PATTERNS:
         match = pattern.search(stripped)
         if match is None:
             continue
-        topic = _reject_if_stopword(match.group("topic"))
+        topic = _reject_if_stopword(strip_trailing_filler(match.group("topic")))
         if topic is None:
             continue
         topic = _bounded(topic)
         return PersonalContextCandidate(
             topic=topic,
-            content=f"The user has started {topic}.",
+            content=f"The user has started {_third_person(topic)}.",
             category="context",
             status=STATUS_CURRENT,
         )
     return None
 
 
+def extract_possessive_declaration(text: str) -> "PersonalContextCandidate | None":
+    """"My goal this year is to X", "my favourite colour is green now", "my
+    schedule has changed to Tue-Thu" - a personal value, stated. The topic
+    is whatever fills "my ___", the value whatever follows the verb; neither
+    is ever matched against a list.
+
+    Deferred, never duplicated: a self-introduction fact user_facts.py
+    already owns ("my name is", "my birthday is") and another person's
+    birthday are left to those extractors."""
+    working = strip_vocative_address(str(text or "")).strip()
+    if not working or _is_question_or_request(working):
+        return None
+    if extract_declared_facts(working) or relational_birthday_intent(working):
+        return None
+    match = _POSSESSIVE_DECLARATION.search(working)
+    if match is None:
+        return None
+    topic = _reject_if_stopword(match.group("topic"))
+    if topic is None:
+        return None
+    value = strip_trailing_filler(_clean_topic(match.group("value")))
+    value = re.sub(r"^(?:now|currently|actually|really|in\s+fact)\s+", "", value, flags=re.IGNORECASE).strip()
+    if not value or len(value) > 200:
+        return None
+    verb = (match.group("verb") or "is").lower()
+    linking = "are" if verb.startswith("are") or verb.startswith("have") else "is"
+    if "changed" in verb or verb.endswith("now"):
+        linking = f"{linking} now"
+    topic = _bounded(topic)
+    return PersonalContextCandidate(
+        topic=topic,
+        content=f"The user's {topic} {linking} {_third_person(value)}.",
+        category="context",
+        status=STATUS_CURRENT,
+        value=value,
+        broad=True,
+    )
+
+
 def extract_discontinued(text: str) -> "PersonalContextCandidate | None":
-    """A topic the person just said is no longer current - "no longer
-    X", "stopped X", "not X anymore", or a bare "my X has changed" (a
-    real, honest signal that X is stale even with no new value given
-    yet - never inventing content that was not actually stated)."""
+    """A topic the person just said is no longer current - "no longer X",
+    "stopped X", "not X anymore", or a bare "my X has changed" (a real,
+    honest signal that X is stale even with no new value given yet - never
+    inventing content that was not actually stated)."""
     stripped = str(text or "")
+    if _is_question_or_request(stripped):
+        return None
     for pattern in _DISCONTINUED_PATTERNS:
         match = pattern.search(stripped)
         if match is None:
             continue
-        topic = _reject_if_stopword(match.group("topic"))
+        said = _clean_topic(match.group("topic"))
+        topic = _reject_if_stopword(_LEADING_ACTIVITY.sub("", said))
         if topic is None:
             continue
         topic = _bounded(topic)
         return PersonalContextCandidate(
             topic=topic,
-            content=f"The user is no longer {topic}.",
+            content=f"The user is no longer {_third_person(said)}.",
             category="context",
             status=STATUS_DISCONTINUED,
         )
@@ -366,11 +502,15 @@ def extract_discontinued(text: str) -> "PersonalContextCandidate | None":
 
 def extract_personal_context_candidate(text: str) -> "PersonalContextCandidate | None":
     """Every deterministic shape this module recognises, tried in order:
-    discontinuation first (a "no longer/changed" statement should never
-    be mistaken for a fresh skill/update), then skill-acquired, then
-    update-declaration/starting. The first genuine match wins; nothing
-    here ever combines two shapes from one sentence."""
-    for extractor in (extract_discontinued, extract_skill_learned, extract_update_declaration):
+    discontinuation first (a "no longer/changed" statement should never be
+    mistaken for a fresh one), then skill-acquired, then a study statement,
+    then update-declaration/starting, then the general possessive
+    declaration. The first genuine match wins; nothing here ever combines
+    two shapes from one sentence."""
+    for extractor in (
+        extract_discontinued, extract_skill_learned, extract_learning_activity,
+        extract_update_declaration, extract_possessive_declaration,
+    ):
         candidate = extractor(text)
         if candidate is not None:
             return candidate
@@ -378,9 +518,7 @@ def extract_personal_context_candidate(text: str) -> "PersonalContextCandidate |
 
 
 def personal_context_intent(text: str) -> bool:
-    """The ``claims=`` predicate a capability recognises its own
-    deterministic request shape with - true only when at least one of
-    this module's own grammars actually matched."""
+    """True only when at least one of this module's own grammars matched."""
     return extract_personal_context_candidate(text) is not None
 
 
@@ -388,14 +526,10 @@ def build_personal_context_record(
     candidate: PersonalContextCandidate, *, agent_name: str, artifact_id: str = ""
 ) -> MemoryRecord:
     """The MemoryRecord a governed write path retains for one candidate -
-    constructed here, never written here (this module holds no Memory
-    reference of its own, the same boundary every sibling extractor in
-    this package already crosses only through its caller).
+    constructed here, never written here.
 
     ``artifact_id``, when given, names the real document the statement was
-    about. Only the id travels into Memory - never the document's text,
-    which stays in the artifact store it came from, so Memory's own length
-    and secret policies are never asked to hold a whole file."""
+    about. Only the id travels into Memory - never the document's text."""
     topic_key = normalize_topic_key(candidate.topic)
     context = {
         "fact_type": PERSONAL_CONTEXT_FACT_TYPE,
@@ -406,6 +540,10 @@ def build_personal_context_record(
         "source": "conversation",
         "noted_by": agent_name,
     }
+    if candidate.value:
+        context["value"] = candidate.value
+    if candidate.activity:
+        context["activity"] = candidate.activity
     if artifact_id:
         context["artifact_id"] = artifact_id
     return MemoryRecord(
@@ -417,7 +555,8 @@ def build_personal_context_record(
 
 
 # ---------------------------------------------------------------------------
-# Retrieval - "latest record for this topic wins", never a second store.
+# Retrieval - "latest record for this topic wins", across every store user
+# knowledge has ever been written to.
 # ---------------------------------------------------------------------------
 
 
@@ -426,51 +565,225 @@ def _to_record(raw: MemoryRecord) -> "PersonalContextRecord | None":
     topic = ctx.get("topic")
     if not topic:
         return None
+    topic = str(topic)
+    content = raw.content
+    # Written before study statements joined this store: "I've started
+    # learning X" was kept under the topic "learning X". The topic is X.
+    if str(ctx.get("category") or "") == "context" and re.match(r"^The user (?:has started|is no longer) ", content):
+        stripped = _LEADING_ACTIVITY.sub("", topic).strip()
+        if stripped and stripped != topic:
+            topic = stripped
     return PersonalContextRecord(
-        topic=str(topic),
-        content=raw.content,
+        topic=topic,
+        content=content,
         category=str(ctx.get("category") or "context"),
         status=str(ctx.get("status") or STATUS_CURRENT),
         noted_by=str(ctx.get("noted_by") or ""),
         created_at=raw.created_at,
         record_id=raw.id,
         artifact_id=str(ctx.get("artifact_id") or ""),
+        value=str(ctx.get("value") or ""),
+        activity=str(ctx.get("activity") or ""),
     )
 
 
+def _legacy_learning_record(raw: MemoryRecord) -> "PersonalContextRecord | None":
+    ctx = raw.context or {}
+    subject = str(ctx.get("subject") or re.sub(r"^Currently studying:\s*", "", raw.content)).strip()
+    subject = strip_trailing_filler(subject)
+    if not subject:
+        return None
+    return PersonalContextRecord(
+        topic=subject, content=f"The user is studying {_third_person(subject)}.", category="learning",
+        status=STATUS_CURRENT, noted_by=str(ctx.get("noted_by") or ""), created_at=raw.created_at,
+        record_id=raw.id, activity="studying", source_kind=LEARNING_KIND,
+    )
+
+
+def _legacy_user_context_record(raw: MemoryRecord) -> "PersonalContextRecord | None":
+    ctx = raw.context or {}
+    fact_type = str(ctx.get("fact_type") or "")
+    if fact_type in DECLARED_FACT_TYPES:
+        return PersonalContextRecord(
+            topic=fact_type.replace("_", " "), content=raw.content, category="identity",
+            status=STATUS_CURRENT, noted_by=str(ctx.get("noted_by") or ""), created_at=raw.created_at,
+            record_id=raw.id, source_kind=_USER_CONTEXT_KIND,
+        )
+    if fact_type:
+        return None
+    candidate = extract_possessive_declaration(raw.content) or extract_learning_activity(raw.content)
+    if candidate is None:
+        return None
+    return PersonalContextRecord(
+        topic=candidate.topic, content=candidate.content, category=candidate.category,
+        status=candidate.status, noted_by=str(ctx.get("noted_by") or ""), created_at=raw.created_at,
+        record_id=raw.id, value=candidate.value, activity=candidate.activity,
+        source_kind=_USER_CONTEXT_KIND,
+    )
+
+
+def _all_records(recall: "_Recall", limit: int, include_legacy: bool) -> "list[PersonalContextRecord]":
+    records: list[PersonalContextRecord] = []
+    for raw in recall(kind=PERSONAL_CONTEXT_KIND, tags={PERSONAL_CONTEXT_TAG}, limit=limit):
+        record = _to_record(raw)
+        if record is not None:
+            records.append(record)
+    if include_legacy:
+        for kind, adapt in ((LEARNING_KIND, _legacy_learning_record), (_USER_CONTEXT_KIND, _legacy_user_context_record)):
+            try:
+                raws = tuple(recall(kind=kind, limit=limit))
+            except TypeError:
+                # A narrow test double that only understands the canonical
+                # query shape - older records simply are not read from it.
+                continue
+            for raw in raws:
+                record = adapt(raw)
+                if record is not None:
+                    records.append(record)
+    # Newest first across every store, so "latest statement wins" holds
+    # between a new record and an older one written somewhere else.
+    records.sort(key=lambda record: record.created_at, reverse=True)
+    return records
+
+
 def current_personal_context_for(topic: str, *, recall: "_Recall | None") -> "PersonalContextRecord | None":
-    """The single, latest statement about ``topic`` - honestly ``None``
-    when nothing has ever been said about it, or no ``recall`` reaches
-    this call at all. Never a guess, never the first match: the most
-    recent record genuinely is the current word on this topic, because
-    every statement about the same topic shares the same tag and
-    ``recall`` (with no query text) returns most-recent-first."""
+    """The single, latest statement about ``topic`` - honestly ``None`` when
+    nothing has ever been said about it, or no ``recall`` reaches this call."""
     if recall is None:
         return None
-    for raw in recall(kind=PERSONAL_CONTEXT_KIND, tags={_topic_tag(normalize_topic_key(topic))}, limit=1):
-        return _to_record(raw)
+    key = normalize_topic_key(topic)
+    for record in all_current_personal_context(recall=recall, limit=200):
+        if record.topic_key == key:
+            return record
     return None
 
 
-def all_current_personal_context(*, recall: "_Recall | None", limit: int = 50) -> "tuple[PersonalContextRecord, ...]":
-    """Every topic's own latest statement - real Memory content, grouped
-    by the same topic key every write already carries, never a second
-    index. ``limit`` bounds how many of the most recent raw records are
-    considered; a topic whose only mention has aged out of that window
-    is honestly absent, the same bounded-recall trade-off every other
-    "what do I know" query in this project already accepts.
-    """
+def all_current_personal_context(
+    *, recall: "_Recall | None", limit: int = 50, include_legacy: bool = True,
+) -> "tuple[PersonalContextRecord, ...]":
+    """Every topic's own latest statement - real Memory content, grouped by
+    topic key, newest first. ``limit`` bounds how many of the most recent
+    raw records per store are considered; a topic whose only mention has
+    aged out of that window is honestly absent."""
     if recall is None:
         return ()
     seen_topics: set[str] = set()
     resolved: list[PersonalContextRecord] = []
-    for raw in recall(kind=PERSONAL_CONTEXT_KIND, tags={PERSONAL_CONTEXT_TAG}, limit=limit):
-        ctx = raw.context or {}
-        topic_key = str(ctx.get("topic_key") or normalize_topic_key(str(ctx.get("topic") or "")))
-        if not topic_key or topic_key in seen_topics:
+    for record in _all_records(recall, limit, include_legacy):
+        key = record.topic_key
+        if not key or key in seen_topics:
             continue
-        seen_topics.add(topic_key)
-        record = _to_record(raw)
-        if record is not None:
-            resolved.append(record)
+        seen_topics.add(key)
+        resolved.append(record)
     return tuple(resolved)
+
+
+def personal_context_history(topic: str, *, recall: "_Recall | None", limit: int = 200) -> "tuple[PersonalContextRecord, ...]":
+    """Every statement ever made about ``topic``, newest first - the history
+    that supersession keeps rather than deletes."""
+    if recall is None:
+        return ()
+    key = normalize_topic_key(topic)
+    return tuple(record for record in _all_records(recall, limit, True) if record.topic_key == key)
+
+
+# ---------------------------------------------------------------------------
+# Answering "what do you know about me" without a model.
+# ---------------------------------------------------------------------------
+
+# "What am I learning?", "what's my schedule?", "do you know my goal?" - a
+# question about the user's own stored context. The focus is whatever the
+# question names; nothing here knows what it could be.
+_QUERY_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"^(?:so\s*,?\s+|and\s+|ok(?:ay)?\s*,?\s+)?what\s+(?:else\s+)?(?:am|was|have)\s+i\s+(?:been\s+)?"
+        r"(?P<focus>[a-z]+(?:ing|ed|nt))\b[^?]*\??\s*$",
+        r"^(?:so\s*,?\s+|and\s+|ok(?:ay)?\s*,?\s+)?what(?:'s|\s+is|\s+are|\s+was|\s+were)\s+my\s+(?P<focus>[^?.!]+?)\s*[?.!]*$",
+        r"^(?:so\s*,?\s+|and\s+)?(?:do\s+you\s+know|can\s+you\s+tell\s+me|tell\s+me|remind\s+me\s+(?:of|what))\s+"
+        r"(?:what\s+)?my\s+(?P<focus>[^?.!]+?)(?:\s+(?:is|are))?\s*[?.!]*$",
+    )
+)
+
+# Words a question uses to ask, never to name what it is about.
+_QUERY_FILLER = frozenset({
+    "s", "about", "know", "tell", "remember", "am", "currently", "right", "now",
+    "else", "user", "anything", "something", "stuff", "things",
+})
+
+
+def extract_personal_context_query(text: str) -> "str | None":
+    """The focus of a question about the user's own stored context ("what
+    am I LEARNING", "what's my SCHEDULE"), or None when ``text`` is not
+    such a question."""
+    working = strip_vocative_address(str(text or "")).strip()
+    for pattern in _QUERY_PATTERNS:
+        match = pattern.search(working)
+        if match is not None:
+            focus = _clean_topic(match.group("focus"))
+            return focus or None
+    return None
+
+
+def personal_context_query_intent(text: str) -> bool:
+    return extract_personal_context_query(text) is not None
+
+
+def _stem(word: str) -> str:
+    for suffix in ("ing", "ied", "ies", "ed", "es", "s", "t"):
+        if word.endswith(suffix) and len(word) - len(suffix) >= 3:
+            if suffix in ("ied", "ies"):
+                return word[: -len(suffix)] + "y"
+            return word[: -len(suffix)]
+    return word
+
+
+def _meaningful_stems(text: str) -> "frozenset[str]":
+    return frozenset(_stem(word) for word in tokenize(text) - STOPWORDS - _QUERY_FILLER)
+
+
+def match_personal_context(
+    items: "Iterable[PersonalContextRecord]", focus: str,
+) -> "tuple[PersonalContextRecord, ...]":
+    """Which stored records a question's ``focus`` is about - literal overlap
+    between the question's own words and each record's topic, content,
+    category and activity, compared by stem ("learning"/"learned" both name
+    "learn"). Best overlap first, then newest. Never a guess: a record that
+    shares no word with the question is not returned."""
+    wanted = _meaningful_stems(focus)
+    listed = tuple(items)
+    if not wanted:
+        return listed
+    scored = []
+    for position, item in enumerate(listed):
+        have = _meaningful_stems(" ".join((item.topic, item.content, item.category, item.activity)))
+        score = len(wanted & have)
+        if score:
+            scored.append((score, position, item))
+    scored.sort(key=lambda entry: (-entry[0], entry[1]))
+    return tuple(item for _score, _position, item in scored)
+
+
+def describe_for_user(record: PersonalContextRecord) -> str:
+    """One stored statement as it reads when said back to the person - the
+    same fact, in the second person ("The user is learning X" -> "You're
+    learning X")."""
+    text = str(record.content or "").strip()
+    stated = re.match(r"^The user stated \(regarding (?P<topic>[^)]*)\):\s*(?P<rest>.*)$", text)
+    if stated:
+        return f"About your {stated.group('topic')}: {stated.group('rest')}".rstrip(".") + "."
+    replacements = (
+        (r"^The user's\b", "Your"),
+        (r"^The user is\b", "You're"),
+        (r"^The user has\b", "You've"),
+        (r"^The user was\b", "You were"),
+        (r"^The user attends\b", "You attend"),
+        (r"^The user\b", "You"),
+        (r"^my\b", "Your"),
+        (r"\btheir\b", "your"),
+        (r"\bmy\b", "your"),
+    )
+    for pattern, replacement in replacements:
+        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+    text = text[:1].upper() + text[1:]
+    return text if text.endswith((".", "!", "?")) else text + "."

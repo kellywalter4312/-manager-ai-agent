@@ -108,6 +108,7 @@ from src.services.memory.factory import (
     build_memory,
 )
 from src.services.profile.profile import UserProfile
+from src.services.profile.user_knowledge import UserKnowledge
 from src.services.schedule.schedule import UserSchedule
 from src.utils.logging import get_logger
 
@@ -672,6 +673,12 @@ def build_manager(
     # remembered, through this exact policy, on every real turn.
     manager_memory = build_memory(runtime.settings, MANAGER)
     manager_memory_policy = ManagerMemoryPolicy()
+    # Pre-Stage-9 Campaign 1: one canonical view of the person, built over
+    # the Manager's own governed store (where everything taught in
+    # conversation is written) and the per-run USER.md profile. Handed to
+    # Alfred and granted, read-only, to every specialist below - never a
+    # second store and never a copy.
+    user_knowledge = UserKnowledge(base_profile=profile, recall=manager_memory.recall)
 
     # Built as a local rather than inline, so its governed write path
     # (``retain``) can be bound once the ManagerAgent that owns the real
@@ -681,6 +688,7 @@ def build_manager(
         runtime.identity,
         roster=registry.all_agents,
         user=profile,
+        user_knowledge=user_knowledge,
         # None here means "use ManagerSkills' own default" (MANAGER_CAPABILITIES,
         # unfiltered) - identical to never passing this parameter at all.
         capabilities=capabilities,
@@ -822,6 +830,8 @@ def build_manager(
                     # Per-run, every run. A profile freshly loaded this tick
                     # is what lets a skill learned since the last one count.
                     profile=profile,
+                    # The same canonical view Alfred reads, granted read-only.
+                    user_knowledge=user_knowledge,
                     mailbox=mailbox,
                     fetch_limit=fetch_limit,
                     interpreter=runtime.interpreter,

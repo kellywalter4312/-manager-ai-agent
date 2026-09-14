@@ -84,7 +84,11 @@ def assembled(profile=None, **overrides):
     """The real composition root, so these assertions are about production."""
     from src.composition import build_manager, build_runtime
 
-    runtime = build_runtime(settings(log_level="CRITICAL", **overrides))
+    # Ephemeral unless a test asks otherwise: since Pre-Stage-9 Campaign 1 the
+    # profile Alfred reasons from includes what the user taught in
+    # conversation, so a default build would otherwise read the owner's real
+    # memory and assert against whatever happens to be in it.
+    runtime = build_runtime(settings(log_level="CRITICAL", **{"memory": "ephemeral", **overrides}))
     return runtime, build_manager(runtime, mailbox=InMemoryMailbox(), profile=profile)
 
 

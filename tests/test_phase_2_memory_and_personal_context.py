@@ -297,7 +297,7 @@ class TestRecordingPurposeAndMultimodalBoundary:
         exchange(channel, conversation, "remember that my favorite color is blue")
 
         research = [r for r in manager.memory.recall(limit=20) if r.kind == "recording"]
-        preference = [r for r in manager.memory.recall(limit=20) if r.kind == "user_context"]
+        preference = [r for r in manager.memory.recall(limit=20) if r.kind in ("user_context", "personal_context")]
         assert len(research) == 1
         assert research[0].context.get("purpose") == "research"
         assert len(preference) == 1

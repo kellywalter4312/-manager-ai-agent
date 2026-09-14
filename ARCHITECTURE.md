@@ -8619,3 +8619,81 @@ choice; `#cc-out` survives the redraw).
 | PDF -> memory/context, changing information | VERIFIED WORKING (link, supersession, restart) |
 | Cross-capability use - read, reason, convert, edit, personal context | VERIFIED WORKING; document -> calendar/task extraction NOT VERIFIED (needs Full Brain) |
 | General ingestion of image/audio/video | ingestion VERIFIED WORKING for the mechanism; type-specific capability consumption is REPAIR-02 |
+
+### 52.31 Pre-Stage-9 Campaign 1 - one canonical personal context, learned continuously
+
+**What the Master Pre-Stage-9 Audit found (runtime, Half Brain).** User
+knowledge lived in four places that never met: topic-keyed
+`personal_context` records, a separate `learning` store ("Currently
+studying: X"), plain `user_context` notes from "remember that my X is Y", and
+USER.md's `UserProfile` - the only one Arthur read. "I'm also learning Java."
+and "My goal this year is to run a marathon" were not learned at all; "I'm
+learning C++ too." stored the subject "C++ too"; "What am I learning?" and
+"what's my schedule?" were refused without a model; after "I've learned Rust"
+Arthur's profile still had no Rust (LRN-01, LRN-04, LRN-05, LRN-06).
+
+**The repair.**
+
+- `src/services/memory/personal_context.py` is the one writer and reader of
+  user knowledge. New statement shapes, all recognised by grammar and never
+  by subject: a study statement (via `learning.py`'s grammar, now allowing
+  "also/still/currently" and trailing "too/as well/now"), and a general
+  anchored "my X is/are/has changed to Y" declaration (deferring to
+  `user_facts.py` for name/birth/school and to relational birthdays, and
+  never matching a question or request). Topic keys drop trailing time
+  qualifiers, so "my goal this year" and "my goal" - and "timetable for this
+  semester" and "timetable" - are one topic (a test that formerly recorded
+  this as a limitation now asserts supersession).
+- `learning.py` only recognises; it no longer writes a `learning` record.
+  The `learning_context` capability is removed - `personal_context` owns
+  study statements. Older `learning` and topic-shaped `user_context` records
+  are still read back (`all_current_personal_context`, newest statement per
+  topic across every store), so nothing already stored is lost.
+- "remember that <personal fact>" is filed as canonical personal context;
+  `scripts/exchange.py` never writes it twice when the capability already did.
+- Deterministic recall: questions about the user ("what am I learning",
+  "what's my X", "do you know my X") are answered from the store by stem
+  overlap (`match_personal_context`), deferring to calendar, tasks,
+  recordings, age/date and "what do you remember about" (`recall_memory`,
+  which now reads the canonical store first). Replies are said back in the
+  second person.
+- The broad "my X is Y" shape is confirmed with a Brain when one is
+  available ("my code is broken" is then answered, not stored); Half Brain
+  keeps the deterministic reading.
+- `correct_memory` targets the canonical topic (retain the correction, then
+  forget only the wrong current statement - earlier history kept).
+- `src/services/profile/user_knowledge.py` (`UserKnowledge`,
+  `effective_profile`): USER.md plus the canonical context, read live. Built
+  once in `build_manager` over the Manager's own store, handed to
+  `ManagerSkills` (`user` now answers from it) and granted read-only to
+  every specialist through `SpecialistContext.user_knowledge`;
+  `JobOpportunityAnalyzer` asks it on every analysis. "I've learned X" ->
+  at least WORKING, "I'm learning X" -> LEARNING (never counted), the
+  owner's document is never demoted, non-skill context never becomes a skill.
+
+**Verification.**
+
+- `tests/test_campaign_01_canonical_personal_context.py` (28 tests) plus the
+  updated pins in seven existing test files; 670 focused tests pass.
+- Real served system (`scripts/serve_ui.py::build_live_system`, persistent
+  scratch memory, no Brain provider, production `data/` hash unchanged):
+  nine unrelated statements learned immediately (9 `personal_context`
+  records, 0 `learning`, 0 `user_context`); a rebuild recalled all nine;
+  "What am I learning?", "what's my schedule?", "what's my goal?", "what do
+  you know about me" answered without a model; schedule and goal changed
+  and a colour corrected, then a second rebuild answered the new values with
+  history kept ("Tue-Thu 10-4" over "Mon-Fri 9-3"); the Control Center
+  `personal` view showed the current state; Arthur's analyzer read the same
+  `UserKnowledge` object as Alfred, and ranking the sample inbox through the
+  real conversation changed the Data Analyst posting from "missing: sql,
+  excel, power bi" to "partial: sql (working level) / learning: power bi
+  (not counted) / missing: excel".
+
+| Requirement | Status |
+|---|---|
+| LRN-01 personal statements learned generally and immediately | VERIFIED WORKING (Half Brain, served system) |
+| LRN-04 recall without a model | VERIFIED WORKING |
+| LRN-05 one canonical store | VERIFIED WORKING (older stores read-only) |
+| LRN-06 Arthur / future specialists read the same canonical context | VERIFIED WORKING |
+| Update, history, restart | VERIFIED WORKING |
+| Brain-confirmed learning of the broad "my X is Y" shape | VERIFIED PARTIAL - scripted Brain only; real vendor BLOCKED (unfunded) |

@@ -78,11 +78,12 @@ class TestAcceptanceExamplesRouteThroughTheRealManagerAndPersist:
         assert len(stored) == 1
         assert stored[0].context["topic"] == result.payload["topic"]
 
-    def test_currently_learning_is_left_to_the_existing_capability_untouched(self):
+    def test_currently_learning_is_personal_context_in_the_canonical_store(self):
         runtime, manager, channel, conversation = real_system()
         result = manager.handle_task(Task(description="I am currently learning Rust"))
         assert result.succeeded, result.error
-        assert result.payload["handled_by"] == "learning_context"
+        assert result.payload["handled_by"] == "personal_context"
+        assert result.payload["category"] == "learning"
 
 
 class TestKnowledgeSkillLifecycle:
@@ -151,22 +152,17 @@ class TestChangingPersonalContextLifecycle:
         assert current[0].status == "discontinued"
         assert "not yet stated" in current[0].content
 
-    def test_known_limitation_topic_wording_must_match_for_deterministic_supersession(self):
-        """Honest, documented boundary of the deterministic (non-Brain)
-        layer: topic identity is grouped by normalized wording
-        (normalize_topic_key), never by meaning. "timetable for this
-        semester" and "timetable" are the same real-world thing to a
-        person but are not textually the same topic key, so today they
-        are tracked as two independent topics rather than one superseding
-        the other. Resolving that would need semantic topic matching
-        (a Brain-assisted comparison), which is deliberately out of scope
-        for this checkpoint's deterministic floor - recorded here so the
-        gap is visible in a test, not silently assumed away."""
+    def test_a_time_qualified_topic_supersedes_the_same_topic_without_it(self):
+        """Formerly a recorded limitation: "timetable for this semester" and
+        "timetable" were tracked as two topics. Pre-Stage-9 Campaign 1's
+        topic key strips a trailing time qualifier (grammar, never meaning),
+        so the later statement genuinely supersedes the earlier one."""
         runtime, manager, channel, conversation = real_system()
         manager.handle_task(Task(description="This is my timetable for this semester: Mon 9-5."))
         manager.handle_task(Task(description="My timetable has changed."))
         current = all_current_personal_context(recall=manager.memory.recall)
-        assert len(current) == 2
+        assert len(current) == 1
+        assert current[0].status == "discontinued"
 
 
 class TestRestartPersistence:

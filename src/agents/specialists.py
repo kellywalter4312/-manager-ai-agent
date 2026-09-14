@@ -66,6 +66,7 @@ from src.services.memory.day import Calendar
 from src.services.memory.factory import EMAIL_AGENT, build_memory
 from src.services.memory.memory import Memory
 from src.services.profile.profile import UserProfile
+from src.services.profile.user_knowledge import UserKnowledge
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -251,6 +252,10 @@ class SpecialistContext:
     # nothing - the same rule the Manager's own ToolSet already lives under.
     tools: ToolSet = field(default_factory=ToolSet)
     profile: UserProfile | None = None
+    # Pre-Stage-9 Campaign 1: the canonical, live view of the person - the
+    # same object Alfred reads. A read-only grant: it can recall the
+    # canonical personal context and nothing else, and cannot write.
+    user_knowledge: UserKnowledge | None = None
     mailbox: Mailbox | None = None
     fetch_limit: int | None = None
     interpreter: Any | None = None
@@ -311,6 +316,11 @@ def build_email_specialist(context: SpecialistContext) -> BaseAgent:
                 # The profile arrives per run, freshly loaded. A skill the
                 # user learned since the last tick is already in it.
                 profile=context.profile,
+                # Read live on every analysis, so a skill the person taught
+                # Alfred a moment ago already counts in this ranking.
+                profile_source=(
+                    context.user_knowledge.profile if context.user_knowledge is not None else None
+                ),
                 interpreter=context.interpreter,
             )
         ],

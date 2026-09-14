@@ -247,12 +247,10 @@ class TestHandlersAreSelectedThroughTheRegistry:
             # Anthropic only).
             "image_analysis",
             # Stage 18: settled general knowledge and history as one
-            # capability for every subject, and the learning context that
-            # pitches it. Both are kinds of knowing, not topics - see
-            # src/manager/knowledge.py for the four-way separation they
-            # exist to keep.
+            # capability for every subject - a kind of knowing, not a topic.
+            # What the user is studying is personal context (Pre-Stage-9
+            # Campaign 1), so there is no separate learning capability.
             "knowledge",
-            "learning_context",
             # Real Audio Recording/Capture checkpoint: lists saved
             # recordings, or answers whether one matching a topic exists -
             # the identical bare-listing-or-named-topic shape "list_tasks"
