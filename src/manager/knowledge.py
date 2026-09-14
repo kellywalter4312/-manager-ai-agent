@@ -58,9 +58,19 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable, Sequence
 
+import json
+
 from src.agents.tools.toolset import ToolSet
 from src.core.contracts import tokenize
 from src.manager.memory_policy import MemoryCategory
+from src.services.artifacts.content import (
+    ContentUnit,
+    artifact_ids_in,
+    content_reference_intent,
+    select_units,
+    units_from_json,
+    wants_two_sources,
+)
 from src.services.memory.memory import MemoryRecord
 from src.services.memory.personal_context import (
     STATUS_DISCONTINUED,
@@ -85,6 +95,21 @@ USER_DOCUMENTS = "user_documents"
 LEARNING_CONTEXT = "learning_context"
 PERSONAL_CONTEXT = "personal_context"
 MODEL_KNOWLEDGE = "model_knowledge"
+# A specific document or file the person handed Alfred (or one Alfred
+# produced) and is now pointing at - "this PDF", "the other document",
+# "artifact <id>" - read through the artifact store, never the knowledge
+# folder search above.
+SUPPLIED_CONTENT = "supplied_content"
+
+# The tool that reads an artifact's own text units (see
+# src/agents/tools/artifact_production.py's read_content/list_content).
+ARTIFACT_TOOL = "artifact_production"
+
+# How far back in the conversation a shared file still counts as "this" one.
+CONTENT_HISTORY_LINES = 12
+
+# Bound on how much of one referenced personal-context document is offered.
+PERSONAL_CONTEXT_DOCUMENT_CHARS = 4000
 
 # How many stored learning-context records are worth carrying into one
 # answer. Small: this is context for pitching an explanation, not a
@@ -195,11 +220,93 @@ def _relevant_personal_context(
     return tuple(item for item, score in ranked if score > 0)[:limit]
 
 
+def _history_lines(history: "Callable[[], Sequence[str]] | None") -> tuple[str, ...]:
+    if history is None:
+        return ()
+    try:
+        return tuple(str(line) for line in history())[-CONTENT_HISTORY_LINES:]
+    except Exception as exc:  # noqa: BLE001 - a history that cannot be read
+        # must not take an answer down with it.
+        logger.warning("could not read conversation history: %s", exc)
+        return ()
+
+
+def read_artifact_content(tools: ToolSet, artifact_id: str) -> "tuple[dict, tuple[ContentUnit, ...]] | None":
+    """One artifact's real text units through the governed artifact tool,
+    or None when it is not this agent's, has no readable text, or the tool
+    is not granted - never a guess at what it might contain."""
+    if not tools.permits(ARTIFACT_TOOL):
+        return None
+    outcome = tools.invoke(ARTIFACT_TOOL, {"operation": "read_content", "content": artifact_id})
+    if not outcome.ok:
+        return None
+    try:
+        payload, units = units_from_json(outcome.output)
+    except (ValueError, KeyError, TypeError):
+        return None
+    return (payload, units) if units else None
+
+
+def resolve_content_sources(
+    query: str,
+    *,
+    tools: ToolSet,
+    history: "Callable[[], Sequence[str]] | None" = None,
+    limit: int = 1,
+    fallback_latest: bool = True,
+) -> "list[tuple[dict, tuple[ContentUnit, ...]]]":
+    """Which real documents a request is about, most relevant first:
+
+    1. an explicit ``artifact <id>`` in the request itself;
+    2. files shared (or produced) recently in this conversation, newest first;
+    3. only when ``fallback_latest`` - this agent's own most recent documents
+       and supplied files.
+
+    Each candidate is actually read before it counts, so an id that names
+    nothing readable is skipped rather than reported as a source.
+    """
+    if not tools.permits(ARTIFACT_TOOL) or limit <= 0:
+        return []
+    candidates: list[str] = []
+    for artifact_id in artifact_ids_in([query]) + artifact_ids_in(_history_lines(history)):
+        if artifact_id not in candidates:
+            candidates.append(artifact_id)
+
+    found: list[tuple[dict, tuple[ContentUnit, ...]]] = []
+    for artifact_id in candidates:
+        if len(found) >= limit:
+            break
+        read = read_artifact_content(tools, artifact_id)
+        if read is not None:
+            found.append(read)
+
+    if len(found) < limit and fallback_latest:
+        listing = tools.invoke(ARTIFACT_TOOL, {"operation": "list_content", "content": str(limit + len(candidates))})
+        if listing.ok:
+            try:
+                entries = json.loads(listing.output)
+            except ValueError:
+                entries = []
+            taken = {str(payload.get("artifact_id")) for payload, _ in found}
+            for entry in entries:
+                if len(found) >= limit:
+                    break
+                artifact_id = str(entry.get("artifact_id", ""))
+                if not artifact_id or artifact_id in taken:
+                    continue
+                read = read_artifact_content(tools, artifact_id)
+                if read is not None:
+                    found.append(read)
+                    taken.add(artifact_id)
+    return found
+
+
 def gather_knowledge_evidence(
     query: str,
     *,
     tools: ToolSet | None = None,
     recall: Callable[..., Sequence[MemoryRecord]] | None = None,
+    history: "Callable[[], Sequence[str]] | None" = None,
 ) -> KnowledgeEvidence:
     """Everything Alfred genuinely holds for ``query``, with provenance.
 
@@ -237,6 +344,24 @@ def gather_knowledge_evidence(
             sources.append(USER_DOCUMENTS)
         else:
             unavailable.append(f"{USER_DOCUMENTS}: {outcome.error or 'nothing was found'}")
+
+    # A specific document the person is pointing at ("this PDF", "the
+    # other document", "artifact <id>") - read in full through the artifact
+    # store and narrowed to what serves the question, never the folder
+    # search above. Only when the request actually points at content, so
+    # every ordinary knowledge question gathers exactly what it always did.
+    if content_reference_intent(text) and granted.permits(ARTIFACT_TOOL):
+        referenced = resolve_content_sources(
+            text, tools=granted, history=history, limit=2 if wants_two_sources(text) else 1,
+        )
+        for payload, units in referenced:
+            for unit in select_units(units, text):
+                notes.append(
+                    f"From the document '{payload.get('title')}' (artifact {payload.get('artifact_id')}), "
+                    f"{unit.locator}: {unit.text}"
+                )
+        if referenced:
+            sources.append(SUPPLIED_CONTENT)
 
     if recall is None:
         unavailable.append(
@@ -282,6 +407,20 @@ def gather_knowledge_evidence(
                         notes.append(f"Personal context (no longer current): {item.content}")
                     else:
                         notes.append(f"Personal context: {item.content}")
+                        # A current topic that *is* a document ("this is my
+                        # timetable" said about a shared file): the
+                        # document's own relevant text is the context, read
+                        # fresh from the artifact store - never a copy that
+                        # could go stale in Memory.
+                        if item.artifact_id:
+                            read = read_artifact_content(granted, item.artifact_id)
+                            if read is not None:
+                                payload, units = read
+                                for unit in select_units(units, text, max_chars=PERSONAL_CONTEXT_DOCUMENT_CHARS):
+                                    notes.append(
+                                        f"Personal context ({item.topic}), from the document "
+                                        f"'{payload.get('title')}', {unit.locator}: {unit.text}"
+                                    )
                 sources.append(PERSONAL_CONTEXT)
             else:
                 unavailable.append(

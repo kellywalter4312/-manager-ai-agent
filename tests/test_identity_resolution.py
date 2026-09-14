@@ -315,6 +315,7 @@ class TestThisIsNotASecondRouter:
             "media_production",
             "milestone_recognition", "participant_invitation", "personal_context",
             "personal_recurring_events",
+            "read_content",
             "recall_memory", "record_this", "reopen_task", "revise_artifact", "revise_diagram",
             "select_voice",
             "small_talk", "start_recording", "stop_recording", "temporal_derivation", "update_task",

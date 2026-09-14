@@ -195,6 +195,67 @@ class VoiceRecordingContent:
 
 
 @dataclass(frozen=True)
+class SuppliedFileContent:
+    """A file the *user* handed Alfred - a PDF, a document, an image, a
+    recording, a video - never something Alfred produced. Its canonical
+    content is the honest record of what was received (name, type,
+    content hash, size, where it came from, when); the received bytes
+    themselves are the artifact's one rendition, byte-for-byte as
+    supplied, never re-encoded or "cleaned up".
+
+    Deliberately type-agnostic: one schema for every supplied format, so
+    ingestion is one governed mechanism rather than one upload system per
+    file type. What a *capability* can do with a supplied file (read its
+    text, analyse its image, clip its video) is decided by that
+    capability and by ``src/services/artifacts/content.py``, never here.
+    """
+
+    filename: str
+    media_type: str
+    sha256: str
+    size_bytes: int
+    source: str
+    ingested_at: str
+
+    def __post_init__(self) -> None:
+        if not str(self.filename).strip():
+            raise ValueError("a supplied file needs a real filename")
+        if not str(self.sha256).strip():
+            raise ValueError("a supplied file needs a real content hash")
+        if int(self.size_bytes) <= 0:
+            raise ValueError("a supplied file cannot be empty")
+
+    def to_json(self) -> str:
+        return json.dumps(
+            {
+                "filename": self.filename,
+                "media_type": self.media_type,
+                "sha256": self.sha256,
+                "size_bytes": self.size_bytes,
+                "source": self.source,
+                "ingested_at": self.ingested_at,
+            }
+        )
+
+    @classmethod
+    def from_json(cls, data: str) -> "SuppliedFileContent":
+        try:
+            payload = json.loads(data)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"not valid supplied file content JSON: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("supplied file content JSON must be an object")
+        return cls(
+            filename=str(payload.get("filename", "")),
+            media_type=str(payload.get("media_type", "")),
+            sha256=str(payload.get("sha256", "")),
+            size_bytes=int(payload.get("size_bytes") or 0),
+            source=str(payload.get("source", "")),
+            ingested_at=str(payload.get("ingested_at", "")),
+        )
+
+
+@dataclass(frozen=True)
 class VideoContent:
     """A real video artifact's canonical content: a real, honest
     description of how it was produced - a prompt it was AI-generated

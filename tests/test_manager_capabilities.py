@@ -271,6 +271,10 @@ class TestHandlersAreSelectedThroughTheRegistry:
             # earlier one.
             "personal_context",
             "personal_recurring_events",
+            # REPAIR-01 (PDF/document capability): Content -> Voice - reads a
+            # supplied file's or document's own words aloud (a named page, or
+            # the beginning with a pointer to continue), deterministically.
+            "read_content",
             "recall_memory",
             "record_this",
             # Alfred's Real 3D Workspace: the task lifecycle's fourth

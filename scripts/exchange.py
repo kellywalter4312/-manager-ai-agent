@@ -68,7 +68,29 @@ __all__ = [
     # reached through this module" shape capture_intent/build_recording
     # already have for record_this.
     "build_recording_record",
+    "record_shared_file",
 ]
+
+
+def record_shared_file(conversation: Conversation, *, description: str, addressed: str | None = None) -> bool:
+    """Record, in the room, that the person shared a file - REPAIR-01/02.
+
+    A shared file is part of what happened in the conversation, exactly as
+    something said is: "this PDF" in the person's next line can only mean
+    the file they just shared if the room remembers it was shared. Recorded
+    as the person's own act (they did share it), carrying the artifact id
+    in its text so it is resolvable later - never a reply, never a turn
+    routed to anyone, and never a second way to hold a conversation
+    (``exchange`` above stays the only door for that).
+
+    Returns False, recording nothing, when the room has no person in it to
+    attribute the share to.
+    """
+    person = next((p.name for p in conversation.participants if not p.kind.is_agent), None)
+    if person is None or not str(description or "").strip():
+        return False
+    conversation.say(Utterance(speaker=person, text=description, addressed=addressed))
+    return True
 
 
 def memory_for(manager, agent_name: str):

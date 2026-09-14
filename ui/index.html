@@ -549,6 +549,12 @@
     border:1px solid rgba(var(--ac,125,216,232),.24)}
   .private-say .addressed{font-size:var(--t-meta);font-family:var(--mono);letter-spacing:.14em;
     text-transform:uppercase;color:var(--ink-4);width:100%;order:-1}
+  /* REPAIR-01/02: sharing a file is part of talking, so the control sits in
+     the composer itself - small, never competing with the message line. */
+  .say .attach{flex:0 0 auto;cursor:pointer;font-size:var(--t-meta);font-family:var(--mono);
+    letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3);padding:4px 8px;
+    border:1px solid rgba(140,170,225,.28);border-radius:6px;user-select:none}
+  .say .attach:hover{color:var(--ink-1);border-color:rgba(140,170,225,.55)}
 
   .env-foot{position:absolute;right:clamp(18px,2.4vw,30px);bottom:clamp(16px,2.2vh,24px);
     z-index:2;display:flex;flex-direction:column;align-items:flex-end;gap:5px;
@@ -1332,6 +1338,10 @@
             <input type="text" id="cc-cmd" placeholder="e.g. provider llm_provider accounts"/>
             <button type="button" id="cc-run">Run</button>
           </div>
+          <div class="mgmt-row">
+            <input type="file" id="cc-file" aria-label="Choose a file to add"/>
+            <button type="button" id="cc-upload">Add file</button>
+          </div>
           <pre class="mgmt-out" id="cc-out">Click a word above, or type a command and press Run.</pre>
           <div class="mgmt-note">Reuses the same run_command() a terminal session already
             calls. A credential typed here is never echoed back
@@ -1933,6 +1943,7 @@
           <div class="glass say private-say">${cut}
             <span class="addressed">A private line to ${esc(a.name)}</span>
             <input class="composer" data-to="${esc(a.name)}" placeholder="Message ${esc(a.name)}"${LIVE ? "" : " disabled"}>
+            <label class="attach" title="Share a file with ${esc(a.name)}">+ file<input type="file" class="attach-input" data-to="${esc(a.name)}" hidden${LIVE ? "" : " disabled"}></label>
             <span class="state">${esc(heard)}</span>
           </div>
         </div>
@@ -4598,6 +4609,25 @@
           ? `Speak to ${selectedAgent}…` : "Speak into the room…";
       });
     });
+    stage.querySelectorAll(".attach-input").forEach(fileInput => {
+      fileInput.addEventListener("change", async () => {
+        const file = fileInput.files && fileInput.files[0];
+        if(!file) return;
+        const agent = fileInput.dataset.to || selectedAgent || (manager() && manager().name);
+        const stateEl = stage.querySelector(".say .state");
+        if(stateEl) stateEl.textContent = `sharing ${file.name}…`;
+        try{
+          const r = await uploadSuppliedFile(file, agent, "conversation");
+          if(stateEl) stateEl.textContent = r.ok
+            ? `shared ${file.name}`
+            : `not shared — ${(r.payload && r.payload.error) || r.status}`;
+        }catch(err){
+          if(stateEl) stateEl.textContent = "not shared — offline";
+        }
+        fileInput.value = "";
+        await refreshFromLive();
+      });
+    });
     const input = stage.querySelector(".say input.composer");
     if(!input) return;
     input.addEventListener("keydown", async (e) => {
@@ -4702,6 +4732,33 @@
       runBtn.addEventListener("click", () => {
         const value = cmdInput.value.trim();
         if(value) runCommand(value);
+      });
+    }
+
+    const ccFile = stage.querySelector("#cc-file");
+    const ccUpload = stage.querySelector("#cc-upload");
+    if(ccFile && ccUpload){
+      // The upload starts the moment a file is chosen - exactly as the
+      // conversation's own attach control does. A two-step "choose, then
+      // click" lost the chosen file whenever the five-second live redraw
+      // replaced this input in between (found by REPAIR-01's real-browser
+      // verification); the button only opens the picker.
+      ccUpload.addEventListener("click", () => ccFile.click());
+      ccFile.addEventListener("change", async () => {
+        const file = ccFile.files && ccFile.files[0];
+        if(!file) return;
+        out.textContent = `Adding ${file.name}…`;
+        try{
+          const r = await uploadSuppliedFile(file, manager().name, "control_center");
+          const p = r.payload || {};
+          out.textContent = r.ok
+            ? `${p.created ? "Added" : "Already present"}: ${p.filename} (artifact ${p.artifact_id}, ${p.content_kind}, ${p.readable_units} readable unit(s)). Ask ${manager().name} about it in conversation.`
+            : `Not added: ${p.error || r.status}`;
+        }catch(err){
+          out.textContent = "Request failed: " + err;
+        }
+        ccFile.value = "";
+        refreshFromLive();
       });
     }
 
@@ -5005,6 +5062,23 @@
       catch(e){ /* keep trying the next candidate */ }
     }
     return ""; // let the browser choose its own real default rather than refusing
+  }
+
+  // REPAIR-01/02 (user-facing file ingestion): one upload path for every
+  // door - the private line's composer and Control Center's Manage section
+  // both send the real file's bytes to the one POST /upload route, which
+  // registers it through the one governed ingestion mechanism. Never a
+  // server filesystem path, never a second store.
+  async function uploadSuppliedFile(file, agent, source){
+    const data_base64 = await blobToBase64(file);
+    const res = await fetch("upload", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({agent, filename: file.name, mime_type: file.type || "", data_base64, source}),
+    });
+    let payload = {};
+    try{ payload = await res.json(); }catch(e){ /* a non-JSON failure keeps an empty payload */ }
+    return {ok: res.ok, status: res.status, payload};
   }
 
   function blobToBase64(blob){
@@ -5371,11 +5445,19 @@
     // this page's own composer triggered clears the box, and it already
     // did that itself before sending.
     const draft = stage.querySelector(".say input.composer")?.value ?? "";
+    // The same rule for a Control Center result: an answer a person just
+    // asked for ("Added: notes.pdf ...", a provider listing) must survive
+    // the background redraw rather than silently reverting to the
+    // placeholder a few seconds later (REPAIR-01's browser verification
+    // found this wiping the Add-file result).
+    const ccOutput = stage.querySelector("#cc-out")?.textContent ?? "";
     go(current);
     const redrawn = stage.querySelector(".view");
     if(redrawn) redrawn.scrollTop = scrollTop;
     const newInput = stage.querySelector(".say input.composer");
     if(newInput && draft) newInput.value = draft;
+    const newOutput = stage.querySelector("#cc-out");
+    if(newOutput && ccOutput) newOutput.textContent = ccOutput;
     if(rosterChanged) build();
   }
 

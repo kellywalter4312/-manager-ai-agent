@@ -121,6 +121,11 @@ class PersonalContextRecord:
     noted_by: str
     created_at: "object"
     record_id: str
+    # The supplied/document artifact this statement was about ("this is my
+    # timetable" said about a shared PDF), when there was one - the
+    # artifact stays the source of the actual content; this record is only
+    # the governed, supersedable claim that it is the current one.
+    artifact_id: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -380,26 +385,34 @@ def personal_context_intent(text: str) -> bool:
 
 
 def build_personal_context_record(
-    candidate: PersonalContextCandidate, *, agent_name: str
+    candidate: PersonalContextCandidate, *, agent_name: str, artifact_id: str = ""
 ) -> MemoryRecord:
     """The MemoryRecord a governed write path retains for one candidate -
     constructed here, never written here (this module holds no Memory
     reference of its own, the same boundary every sibling extractor in
-    this package already crosses only through its caller)."""
+    this package already crosses only through its caller).
+
+    ``artifact_id``, when given, names the real document the statement was
+    about. Only the id travels into Memory - never the document's text,
+    which stays in the artifact store it came from, so Memory's own length
+    and secret policies are never asked to hold a whole file."""
     topic_key = normalize_topic_key(candidate.topic)
+    context = {
+        "fact_type": PERSONAL_CONTEXT_FACT_TYPE,
+        "topic": candidate.topic,
+        "topic_key": topic_key,
+        "category": candidate.category,
+        "status": candidate.status,
+        "source": "conversation",
+        "noted_by": agent_name,
+    }
+    if artifact_id:
+        context["artifact_id"] = artifact_id
     return MemoryRecord(
         content=candidate.content,
         kind=PERSONAL_CONTEXT_KIND,
         tags={PERSONAL_CONTEXT_TAG, _topic_tag(topic_key)},
-        context={
-            "fact_type": PERSONAL_CONTEXT_FACT_TYPE,
-            "topic": candidate.topic,
-            "topic_key": topic_key,
-            "category": candidate.category,
-            "status": candidate.status,
-            "source": "conversation",
-            "noted_by": agent_name,
-        },
+        context=context,
     )
 
 
@@ -421,6 +434,7 @@ def _to_record(raw: MemoryRecord) -> "PersonalContextRecord | None":
         noted_by=str(ctx.get("noted_by") or ""),
         created_at=raw.created_at,
         record_id=raw.id,
+        artifact_id=str(ctx.get("artifact_id") or ""),
     )
 
 

@@ -265,6 +265,7 @@ def observe(
         tool_available=tool_available,
         invited=_invited_in(result),
         celebration=_celebration_of(result),
+        speak_in_full=bool((result.payload or {}).get("speak_in_full")),
     )
 
 

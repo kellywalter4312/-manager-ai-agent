@@ -73,7 +73,17 @@ from src.manager.knowledge import (
     KnowledgeEvidence,
     MODEL_KNOWLEDGE,
     gather_knowledge_evidence,
+    read_artifact_content,
+    resolve_content_sources,
 )
+from src.services.artifacts.content import (
+    ContentUnit,
+    content_reference_intent,
+    locator_in,
+    reading_selection,
+    units_at,
+)
+from src.services.artifacts.ingestion import SUPPLIED_FILE_TYPE
 from src.manager.memory_policy import MemoryCategory
 from src.manager.recognition import Recognition
 from src.agents.tools.connection import tool_name_for
@@ -1318,7 +1328,8 @@ def open_conversation(request: CapabilityRequest) -> TaskResult:
     # would be the same defect knowledge_inquiry exists to fix, one handler
     # over.
     evidence = gather_knowledge_evidence(
-        request.task.description, tools=request.tools, recall=request.recall
+        request.task.description, tools=request.tools, recall=request.recall,
+        history=request.history,
     )
     notes = (
         tuple(request.recognition.notes())
@@ -2204,8 +2215,99 @@ def _parse_document_content(text: str) -> "DocumentContent | None":
         return None
 
 
+# REPAIR-01 (PDF/document capability): producing a document *from* content
+# already in play - "create a PDF version of this", "turn this into a PDF".
+# Format words and production verbs only, never a subject.
+_CONVERT_TO_DOCUMENT_MARKERS: tuple[str, ...] = (
+    "pdf version of", "pdf copy of", "a pdf of", "into a pdf", "to a pdf", "as a pdf",
+    "into pdf", "to pdf", "as pdf",
+)
+_CONVERT_VERBS = re.compile(r"\b(create|make|turn|convert|export|save|produce|generate|give me)\b", re.IGNORECASE)
+_POINTING_WORD = re.compile(r"\b(this|that|it)\b", re.IGNORECASE)
+
+# REPAIR-01: user-authorized editing of a supplied file or document - the
+# generic edit shapes, plus a literal "replace/change X with/to Y" aimed at
+# content in play. Legitimate document work on the person's own material is
+# never refused merely for being a document: the one generic governance
+# check below still runs, with real ownership evidence.
+_REVISE_CONTENT_MARKERS: tuple[str, ...] = (
+    "edit this document", "edit this pdf", "edit this file", "edit the pdf", "edit the file",
+    "update this document", "update this pdf", "update this file", "update the pdf",
+    "revise this document", "revise this pdf", "revise this file",
+    "correct this document", "correct this pdf", "correct this file",
+)
+_REPLACEMENT_PATTERN = re.compile(
+    r"\b(?:replace|change)\s+[\"'“‘]?(?P<old>.+?)[\"'”’]?\s+(?:with|to)\s+"
+    r"[\"'“‘]?(?P<new>.+?)[\"'”’]?"
+    r"(?=\s+(?:in|on|throughout)\s+(?:this|the|that|my|artifact)\b|\s*[.!?]*\s*$)",
+    re.IGNORECASE,
+)
+
+
+def document_conversion_intent(text: str) -> bool:
+    return _marker_present(text, _CONVERT_TO_DOCUMENT_MARKERS) and bool(_CONVERT_VERBS.search(str(text or "")))
+
+
+def _title_stem(title: object) -> str:
+    """A supplied file's name without its extension, for a derived
+    document's title - "timetable.pdf" -> "timetable"."""
+    name = str(title or "Document").strip() or "Document"
+    stem, dot, ext = name.rpartition(".")
+    return stem if dot and stem and 0 < len(ext) <= 8 else name
+
+
+def _document_from_content(
+    payload: Mapping[str, Any], units: "Sequence[ContentUnit]", *, title: "str | None" = None
+) -> "DocumentContent":
+    """Real, structured document content rebuilt from an artifact's own
+    text units - one section per unit. A document Alfred produced keeps its
+    own headings (its units read "heading: body"); a supplied file's units
+    are headed by their honest locator ("Page 2"). Nothing is added that
+    the source did not contain."""
+    from src.services.artifacts.models import DocumentContent, DocumentSection
+
+    sections = []
+    for unit in units:
+        heading, body = unit.locator.capitalize(), unit.text
+        if payload.get("type") == "document":
+            head, sep, rest = unit.text.partition(": ")
+            if sep and head.strip() and rest.strip():
+                heading, body = head, rest
+        sections.append(DocumentSection(heading=heading.strip(), body=body.strip()))
+    chosen_title = (title or str(payload.get("title") or "")).strip() or "Document"
+    return DocumentContent(title=chosen_title, sections=tuple(sections))
+
+
+def _apply_replacement(doc: "DocumentContent", old: str, new: str) -> "tuple[DocumentContent, int]":
+    """``doc`` with every occurrence of ``old`` replaced by ``new`` in its
+    title, headings and bodies, and how many were replaced. Exact matches
+    first; only when there are none anywhere is a case-insensitive match
+    used. Zero means nothing changed - the caller says so rather than
+    saving an "edit" that edited nothing."""
+    from src.services.artifacts.models import DocumentContent, DocumentSection
+
+    def run(flags: int) -> "tuple[DocumentContent, int]":
+        pattern = re.compile(re.escape(old), flags)
+        count = 0
+
+        def sub(value: str) -> str:
+            nonlocal count
+            result, n = pattern.subn(lambda _m: new, value)
+            count += n
+            return result
+
+        title = sub(doc.title)
+        sections = tuple(DocumentSection(heading=sub(s.heading), body=sub(s.body)) for s in doc.sections)
+        return DocumentContent(title=title, sections=sections), count
+
+    edited, count = run(0)
+    if count == 0:
+        edited, count = run(re.IGNORECASE)
+    return (edited, count) if count else (doc, 0)
+
+
 def create_artifact_intent(task: Task, participants: Sequence[str] = ()) -> bool:
-    return _marker_present(task.description, _HANDOUT_MARKERS)
+    return _marker_present(task.description, _HANDOUT_MARKERS) or document_conversion_intent(task.description)
 
 
 def create_artifact(request: CapabilityRequest) -> TaskResult:
@@ -2244,6 +2346,40 @@ def create_artifact(request: CapabilityRequest) -> TaskResult:
         )
 
     text = request.task.description
+
+    # REPAIR-01: a document produced from content already in play ("create
+    # a PDF version of this") - built deterministically from that content's
+    # own units and saved as a new artifact linked back to its source, which
+    # is never modified. Half-Brain-safe: no model is consulted. Only when
+    # no real source content can be found does this fall through to the
+    # ordinary composition path below.
+    if document_conversion_intent(text):
+        found = resolve_content_sources(
+            text, tools=request.tools, history=request.history, limit=1,
+            # "a PDF version of this" points at the most recent content even
+            # after the share has left the recent-conversation window; a
+            # request naming no content at all ("a PDF of my ideas") does not.
+            fallback_latest=content_reference_intent(text) or bool(_POINTING_WORD.search(text)),
+        )
+        if found:
+            payload, units = found[0]
+            source_id = str(payload.get("artifact_id"))
+            converted = _document_from_content(payload, units, title=f"{_title_stem(payload.get('title'))} (PDF version)")
+            outcome = request.tools.invoke(
+                "artifact_production",
+                {"operation": "derive_document", "content": f"{source_id}\n{converted.to_json()}"},
+            )
+            if not outcome.ok:
+                return TaskResult.failure(
+                    request.task, request.own_name,
+                    f"I prepared the document but couldn't save it: {outcome.error}",
+                )
+            return TaskResult.success(
+                request.task, request.own_name,
+                f"{outcome.output} (derived from artifact {source_id}; the original is unchanged)",
+                payload={"handled_by": "create_artifact", "derived_from": source_id},
+            )
+
     content = _parse_document_content(text)
 
     if content is None:
@@ -2298,7 +2434,10 @@ CREATE_ARTIFACT = ManagerCapability(
 
 
 def revise_artifact_intent(task: Task, participants: Sequence[str] = ()) -> bool:
-    return _marker_present(task.description, _REVISE_HANDOUT_MARKERS)
+    text = task.description
+    if _marker_present(text, _REVISE_HANDOUT_MARKERS) or _marker_present(text, _REVISE_CONTENT_MARKERS):
+        return True
+    return bool(_REPLACEMENT_PATTERN.search(text)) and content_reference_intent(text)
 
 
 def revise_artifact(request: CapabilityRequest) -> TaskResult:
@@ -2310,6 +2449,16 @@ def revise_artifact(request: CapabilityRequest) -> TaskResult:
     document this agent itself owns (``artifact_production``'s own
     ``find_latest`` operation) - real, deterministic evidence, never a
     guess among several equally-plausible candidates.
+
+    REPAIR-01 (PDF/document capability): also edits content the person
+    supplied - "in this PDF, replace X with Y", "edit this document: ...".
+    Which document is meant is resolved the same way every content request
+    resolves it (explicit id, then a file shared in this conversation, then
+    the most recent one). A literal replacement is applied deterministically
+    (Half-Brain-safe) and refuses honestly when the text is not there; a
+    free-form edit is composed by the Brain. A document Alfred produced is
+    revised under its own identity; a supplied file is never rewritten - the
+    edit becomes a new, derived document linked back to it.
     """
     if not request.tools.permits("artifact_production"):
         equipped = ", ".join(request.tools.names()) or "none"
@@ -2321,8 +2470,23 @@ def revise_artifact(request: CapabilityRequest) -> TaskResult:
 
     text = request.task.description
     match = _ARTIFACT_ID_PATTERN.search(text)
+    resolved = None
     if match:
         artifact_id = match.group(1)
+    elif not _marker_present(text, _REVISE_HANDOUT_MARKERS) and (
+        content_reference_intent(text)
+        or _marker_present(text, _REVISE_CONTENT_MARKERS)
+        or _REPLACEMENT_PATTERN.search(text)
+    ):
+        found = resolve_content_sources(text, tools=request.tools, history=request.history, limit=1)
+        if not found:
+            return TaskResult.failure(
+                request.task, request.own_name,
+                "I don't have a document or file to edit yet - share one first, or "
+                "reference it explicitly with 'artifact <id>'.",
+            )
+        resolved = found[0]
+        artifact_id = str(resolved[0].get("artifact_id"))
     else:
         lookup = request.tools.invoke(
             "artifact_production", {"operation": "find_latest", "content": "document"}
@@ -2335,11 +2499,19 @@ def revise_artifact(request: CapabilityRequest) -> TaskResult:
             )
         artifact_id = lookup.output.strip()
 
-    current = request.tools.invoke("artifact_production", {"operation": "get", "content": artifact_id})
-    if not current.ok:
-        return TaskResult.failure(
-            request.task, request.own_name, f"I couldn't find that handout to revise: {current.error}",
-        )
+    if resolved is None:
+        resolved = read_artifact_content(request.tools, artifact_id)
+    is_supplied = resolved is not None and resolved[0].get("type") == SUPPLIED_FILE_TYPE
+
+    if is_supplied:
+        current_text = _document_from_content(resolved[0], resolved[1]).as_plain_text()
+    else:
+        current = request.tools.invoke("artifact_production", {"operation": "get", "content": artifact_id})
+        if not current.ok:
+            return TaskResult.failure(
+                request.task, request.own_name, f"I couldn't find that handout to revise: {current.error}",
+            )
+        current_text = current.output
 
     # Context-Aware Agent Capability & Safety Governance's real
     # integration point for the existing document-artifact capability -
@@ -2362,7 +2534,20 @@ def revise_artifact(request: CapabilityRequest) -> TaskResult:
     if paused is not None:
         return paused
 
-    new_content = _parse_document_content(text)
+    replacement = _REPLACEMENT_PATTERN.search(text)
+    if replacement is not None and resolved is not None:
+        old_text = replacement.group("old").strip()
+        new_text = replacement.group("new").strip()
+        new_content, replaced = _apply_replacement(
+            _document_from_content(resolved[0], resolved[1]), old_text, new_text,
+        )
+        if replaced == 0:
+            return TaskResult.failure(
+                request.task, request.own_name,
+                f"I couldn't find \"{old_text}\" in '{resolved[0].get('title')}', so nothing was changed.",
+            )
+    else:
+        new_content = _parse_document_content(text)
     if new_content is None:
         if request.converse is None:
             return TaskResult.failure(
@@ -2372,7 +2557,7 @@ def revise_artifact(request: CapabilityRequest) -> TaskResult:
                 f"updated content already structured instead:\n{_DOCUMENT_FORMAT_INSTRUCTION}",
             )
         notes = (
-            f"The handout's current content is:\n{current.output}\n\n"
+            f"The handout's current content is:\n{current_text}\n\n"
             "The person asked for a revision. Apply their requested change and "
             "respond with the COMPLETE updated document. "
             + _DOCUMENT_FORMAT_INSTRUCTION,
@@ -2389,6 +2574,24 @@ def revise_artifact(request: CapabilityRequest) -> TaskResult:
                 request.task, request.own_name,
                 "I couldn't organize that revision into a real, structured handout.",
             )
+
+    if is_supplied:
+        edited = dataclass_replace(new_content, title=f"{_title_stem(resolved[0].get('title'))} (edited)")
+        derived = request.tools.invoke(
+            "artifact_production",
+            {"operation": "derive_document", "content": f"{artifact_id}\n{edited.to_json()}"},
+        )
+        if not derived.ok:
+            return TaskResult.failure(
+                request.task, request.own_name,
+                f"I prepared the edited version but couldn't save it: {derived.error}",
+            )
+        return TaskResult.success(
+            request.task, request.own_name,
+            f"{derived.output} (an edited copy of artifact {artifact_id}; the original file you "
+            "supplied is unchanged)",
+            payload={"handled_by": "revise_artifact", "derived_from": artifact_id},
+        )
 
     outcome = request.tools.invoke(
         "artifact_production",
@@ -5359,6 +5562,13 @@ DOCUMENT_REFERENCE_MARKERS: tuple[str, ...] = (
     "this spreadsheet", "in this spreadsheet", "read this spreadsheet",
     "this presentation", "in this presentation", "read this presentation",
     "this slide", "this slideshow",
+    # REPAIR-01 (PDF/document capability): a file the person supplied
+    # directly and is now pointing at - "what does this PDF say", "compare
+    # this with the other document", "summarize this". Format nouns and
+    # pointing words only, never a subject; the document itself is resolved
+    # through the artifact store (see knowledge.py's resolve_content_sources).
+    "this pdf", "in this pdf", "the other document", "the other pdf", "the other file",
+    "summarize this", "summarise this",
 )
 
 
@@ -5433,6 +5643,18 @@ def knowledge_intent(task: Task, participants: Sequence[str] = ()) -> bool:
     # what a voice generically is, instead of actually choosing one.
     if select_voice_intent(task, participants):
         return False
+    # REPAIR-01: "read page 2 to me" / "what does page 4 say" asks to hear
+    # the content itself, not an explanation of it - read_content's own
+    # request shape, answered deterministically rather than refused in
+    # Half Brain for want of a model to summarise with.
+    if read_content_intent(task, participants):
+        return False
+    # REPAIR-01: "in this PDF, replace X with Y" / "create a PDF version of
+    # this" point at a document too, but ask to change or produce one -
+    # revise_artifact's and create_artifact's own request shapes, never a
+    # question about what the document says.
+    if revise_artifact_intent(task, participants) or document_conversion_intent(text):
+        return False
     return True
 
 
@@ -5459,13 +5681,22 @@ def _knowledge_without_reasoning(
                 f"{missing}. I would rather say so than guess."
             ),
         )
+    # REPAIR-01: when the evidence includes a document the person pointed
+    # at, the one thing Half Brain *can* do with it is read it word for
+    # word - say so, rather than leaving only a refusal.
+    reading_hint = (
+        " I can still read it to you word for word - say \"read this document to me\" "
+        "or \"read page 1 to me\"."
+        if "supplied_content" in evidence.sources
+        else ""
+    )
     return TaskResult.failure(
         request.task,
         request.own_name,
         (
             f"I found {len(evidence.notes)} relevant passage(s) in your own "
             f"material, but I can't reason about them yet - {why} - so I "
-            "would rather say so than guess."
+            f"would rather say so than guess.{reading_hint}"
         ),
     )
 
@@ -5502,6 +5733,7 @@ def knowledge_inquiry(request: CapabilityRequest) -> TaskResult:
         request.task.description,
         tools=request.tools,
         recall=request.recall,
+        history=request.history,
     )
 
     if request.converse is None:
@@ -5568,6 +5800,117 @@ KNOWLEDGE = ManagerCapability(
         "knowledge - never a subject list, and never as current information."
     ),
     claims=knowledge_intent,
+)
+
+
+# ---------------------------------------------------------------------------
+# REPAIR-01 (PDF/document capability): Content -> Voice.
+#
+# "Read this PDF to me", "read page 2 to me", "what does page 4 say?" - the
+# person wants to hear the content itself. Deterministic end to end (the
+# artifact's own text units, a named locator, a bounded reading window), so
+# it works identically in Half Brain; the words then go through the one
+# canonical voice path every other answer already takes (exchange(...,
+# speak=True) -> Channel.deliver), marked speak_in_full so the whole passage
+# is spoken rather than a short first line. Never PDF-specific: a supplied
+# spreadsheet, presentation, text file or one of Alfred's own documents is
+# read by exactly the same handler.
+# ---------------------------------------------------------------------------
+
+_READ_ALOUD_MARKERS: tuple[str, ...] = ("to me", "aloud", "out loud", "read out", "read me")
+# Requests about the content that are NOT a request to hear it - explaining,
+# summarising, comparing belong to knowledge/open_conversation (the Brain).
+_NOT_A_READING_WORDS: tuple[str, ...] = (
+    "explain", "summar", "meaning", "what does it mean", "compare", "analy", "translate", "why ",
+)
+_POINTING_READ = re.compile(r"\bread\s+(?:me\s+)?(?:it|this|that|them)\b", re.IGNORECASE)
+_LOCATOR_VERBS = re.compile(r"\b(read|say|says|said|show|on)\b", re.IGNORECASE)
+
+
+def read_content_intent(task: Task, participants: Sequence[str] = ()) -> bool:
+    """Whether this request asks to hear a document's own words - a unit
+    locator with a reading verb ("what does page 4 say"), or "read" aimed at
+    content already in play with an aloud marker ("read this PDF to me",
+    "read it to me"). Recognised by shape only; which document is meant is
+    resolved by the handler, never guessed here."""
+    text = task.description
+    lowered = " ".join(str(text or "").lower().split())
+    if any(word in lowered for word in _NOT_A_READING_WORDS):
+        return False
+    locator = locator_in(text)
+    if locator is not None and _LOCATOR_VERBS.search(lowered) and (
+        "read" in lowered or "what" in lowered or content_reference_intent(text)
+    ):
+        return True
+    if re.search(r"\bread\b", lowered) and (content_reference_intent(text) or _POINTING_READ.search(lowered)):
+        return _marker_present(text, _READ_ALOUD_MARKERS)
+    return False
+
+
+def read_content(request: CapabilityRequest) -> TaskResult:
+    """Read a document's own words back to the person - the named unit, or
+    the beginning of the document bounded to one listening window, with an
+    honest pointer to where to continue."""
+    if not request.tools.permits("artifact_production"):
+        equipped = ", ".join(request.tools.names()) or "none"
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "I can read documents to you, but the underlying 'artifact_production' "
+            f"capability is not installed. Currently equipped: {equipped}.",
+        )
+
+    text = request.task.description
+    found = resolve_content_sources(text, tools=request.tools, history=request.history, limit=1)
+    if not found:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "I don't have a document or file with readable text to read yet - share one "
+            "(attach it in the conversation or add it in the Control Center), or name it "
+            "with 'artifact <id>'.",
+        )
+    payload, units = found[0]
+    title = str(payload.get("title") or "that document")
+    artifact_id = str(payload.get("artifact_id") or "")
+
+    locator = locator_in(text)
+    if locator is not None and not units_at(units, locator):
+        kinds = sorted({u.locator.split(" ", 1)[0] for u in units})
+        return TaskResult.failure(
+            request.task, request.own_name,
+            f"'{title}' has no {locator} - it has {len(units)} readable "
+            f"{'/'.join(kinds)} unit(s).",
+        )
+
+    selected, continue_from = reading_selection(units, text)
+    spoken_units = ", ".join(u.locator for u in selected)
+    body = "\n\n".join(u.text for u in selected)
+    tail = ""
+    if continue_from is not None:
+        tail = f"\n\n(That's where I'll pause - say \"read {continue_from} to me\" to continue.)"
+    return TaskResult.success(
+        request.task, request.own_name,
+        f"From '{title}' ({spoken_units}):\n\n{body}{tail}",
+        payload={
+            "handled_by": "read_content",
+            "artifact_id": artifact_id,
+            "locators": tuple(u.locator for u in selected),
+            "continue_from": continue_from,
+            "speak_in_full": True,
+        },
+    )
+
+
+READ_CONTENT = ManagerCapability(
+    name="read_content",
+    capabilities=frozenset({"read", "aloud"}),
+    handle=read_content,
+    description=(
+        "Reads the words of a supplied file or document aloud - a named page/section, "
+        "or the beginning with a pointer to continue - through the canonical voice "
+        "path; deterministic, so it works without a language model."
+    ),
+    claims=read_content_intent,
+    scoreable=False,
 )
 
 
@@ -6019,6 +6362,13 @@ def personal_context_intent(task: Task, participants: Sequence[str] = ()) -> boo
     return bool(_PERSONAL_CONTEXT_TIER2_MARKERS & tokenize(text))
 
 
+# REPAIR-01: a declaration that points at something rather than stating a
+# value ("this is my timetable", "here's my syllabus") - and how recently the
+# shared file must have appeared for "this" to mean it.
+_DOCUMENT_DECLARATION = re.compile(r"\b(?:this is|here is|here'?s)\s+my\b", re.IGNORECASE)
+_DOCUMENT_DECLARATION_HISTORY_LINES = 4
+
+
 def personal_context(request: CapabilityRequest) -> TaskResult:
     """Generalized user knowledge - the mechanism, never a catalog.
 
@@ -6096,7 +6446,40 @@ def personal_context(request: CapabilityRequest) -> TaskResult:
             request.task, request.own_name, "I don't have a way to remember that right now.",
         )
 
-    record = build_personal_context_record(candidate, agent_name=request.own_name)
+    # REPAIR-01 (PDF/document capability): "this is my timetable" said about
+    # a file the person *just* shared carries no typed value - the document
+    # is the value. Only its id is remembered (the governed, supersedable
+    # claim "this is the current one"); the text stays in the artifact
+    # store and is read fresh whenever it is relevant (see knowledge.py).
+    # A later "this is my updated timetable" about a newer file supersedes
+    # it through the identical topic key, the old document kept as history.
+    attached_id = ""
+    artifact_note = ""
+    if (
+        candidate.status == STATUS_CURRENT
+        and _DOCUMENT_DECLARATION.search(text)
+        and candidate.content.startswith("The user stated (regarding")
+        and request.history is not None
+    ):
+        recent = request.history
+        found = resolve_content_sources(
+            text, tools=request.tools,
+            history=lambda: tuple(recent())[-_DOCUMENT_DECLARATION_HISTORY_LINES:],
+            limit=1, fallback_latest=False,
+        )
+        if found:
+            payload, _units = found[0]
+            attached_id = str(payload.get("artifact_id") or "")
+            document_title = str(payload.get("title") or "the shared document")
+            candidate = PersonalContextCandidate(
+                topic=candidate.topic,
+                content=f"The user's current {candidate.topic} is the document '{document_title}' (artifact {attached_id}).",
+                category="document",
+                status=STATUS_CURRENT,
+            )
+            artifact_note = f" I'll use '{document_title}' as your current {candidate.topic}."
+
+    record = build_personal_context_record(candidate, agent_name=request.own_name, artifact_id=attached_id)
     verdict = request.retain(record)
     if not verdict.allowed:
         return TaskResult.failure(
@@ -6130,7 +6513,7 @@ def personal_context(request: CapabilityRequest) -> TaskResult:
     verb = "noted" if candidate.status == STATUS_CURRENT else "noted that this has ended"
     return TaskResult.success(
         request.task, request.own_name,
-        f"Got it - I've {verb} regarding {candidate.topic}.{calendar_note}",
+        f"Got it - I've {verb} regarding {candidate.topic}.{calendar_note}{artifact_note}",
         payload={
             "handled_by": "personal_context",
             "topic": candidate.topic,
@@ -6138,6 +6521,7 @@ def personal_context(request: CapabilityRequest) -> TaskResult:
             "category": candidate.category,
             "brain_assisted": brain_assisted,
             "calendar_linked": bool(calendar_note),
+            "artifact_id": attached_id,
         },
     )
 
@@ -6643,6 +7027,8 @@ MANAGER_CAPABILITIES: dict[str, ManagerCapability] = {
     PERSONAL_CONTEXT.name: PERSONAL_CONTEXT,
     # Generalized Personal Organization/Calendar checkpoint.
     CALENDAR.name: CALENDAR,
+    # REPAIR-01 (PDF/document capability): Content -> Voice.
+    READ_CONTENT.name: READ_CONTENT,
 }
 
 # Used when a task reaches the Manager without matching any handler's words.

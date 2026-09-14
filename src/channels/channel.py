@@ -58,6 +58,10 @@ logger = get_logger(__name__)
 # whole inbox returns pages; reading pages at somebody is not conversation.
 # The written response always carries the whole thing.
 SPOKEN_LIMIT = 400
+# The bound for an answer that is itself content to be read aloud (see
+# speakable's own speak_in_full branch). Larger than SPOKEN_LIMIT by design;
+# still finite, so a single read-aloud turn cannot hold the voice forever.
+READ_ALOUD_SPOKEN_LIMIT = 4000
 
 
 @dataclass(frozen=True)
@@ -99,6 +103,12 @@ def speakable(turn: ConversationTurn) -> str:
     text = (turn.outcome or "").strip()
     if not text:
         return "I have nothing to report for that."
+
+    # Content the person asked to have read to them is the whole point of
+    # the answer, not a summary line - speak all of it, still bounded so
+    # one turn can never hold the voice for an unbounded time.
+    if getattr(turn, "speak_in_full", False):
+        return text[:READ_ALOUD_SPOKEN_LIMIT]
 
     first = text.split("\n\n")[0].strip() or text
     if len(first) <= SPOKEN_LIMIT:

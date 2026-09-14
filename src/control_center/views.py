@@ -566,6 +566,11 @@ class ConversationTurn:
     # see src/providers/celebration.py's own docstring for why nothing
     # upstream of this field ever reaches a Brain or a Memory to produce it.
     celebration: dict[str, object] | None = None
+    # Content -> Voice: true when the answer *is* content the person asked
+    # to hear read ("read page 2 to me"), so the voice channel speaks the
+    # whole of it rather than only a short first paragraph. Set only from
+    # the handling capability's own payload, never inferred from the text.
+    speak_in_full: bool = False
 
 
 # ---------------------------------------------------------------------------

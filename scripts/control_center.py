@@ -66,7 +66,9 @@ from src.agents.tools.live_information import LiveInformationTool  # noqa: E402
 from src.agents.tools.web_search import WebSearchTool  # noqa: E402
 from src.agents.tools.document_generation import DocumentGenerationTool  # noqa: E402
 from src.agents.tools.artifact_production import ArtifactProductionTool  # noqa: E402
+from src.services.artifacts.content import read_artifact_units  # noqa: E402
 from src.services.artifacts.delivery import available_delivery_methods  # noqa: E402
+from src.services.artifacts.ingestion import IngestionError, ingest_supplied_file  # noqa: E402
 from src.agents.tools.media_production import MediaProductionTool  # noqa: E402
 from src.agents.tools.toolset import ToolSet  # noqa: E402
 from src.channels.channel import Channel  # noqa: E402
@@ -2434,6 +2436,42 @@ def run_command(
         # personal content" boundary the 'tasks' command above already
         # draws for the identical reason.
         artifact_id = rest.strip()
+
+        # REPAIR-01/02 (user-facing file ingestion): the terminal's own door
+        # for supplying a file - a path on the machine this terminal is
+        # running on, the local-terminal equivalent of a browser's file
+        # picker. Through the one governed ingestion mechanism every other
+        # door uses (src/services/artifacts/ingestion.py), never a second
+        # store. Refused over HTTP by serve_ui.py's route_command: a server
+        # filesystem path must never be accepted from the network - a
+        # browser supplies bytes through POST /upload instead.
+        if artifact_id.lower() == "add" or artifact_id.lower().startswith("add "):
+            raw_path = artifact_id[3:].strip().strip('"').strip("'")
+            if not raw_path:
+                return "usage: artifacts add <path to a file on this machine>"
+            source_path = Path(raw_path).expanduser()
+            if not source_path.is_file():
+                return f"no file found at '{raw_path}'"
+            try:
+                data = source_path.read_bytes()
+            except OSError as exc:
+                return f"could not read '{raw_path}': {exc}"
+            owner = centre.runtime.identity.name
+            try:
+                added, created = ingest_supplied_file(
+                    centre.runtime.artifacts, owner_agent=owner, filename=source_path.name,
+                    data=data, source="control_center",
+                )
+            except IngestionError as exc:
+                return f"not added: {exc}"
+            units = read_artifact_units(added)
+            readable = f"{len(units)} readable unit(s)" if units else "no readable text"
+            state = "added" if created else "already present (identical content)"
+            return (
+                f"{state}: {added.artifact_id} [{added.type}] {added.latest.title!r} "
+                f"owner={owner} ({readable}) - ask Alfred about it, or 'artifacts {added.artifact_id}'"
+            )
+
         artifacts = centre.runtime.artifacts.all()
 
         if not artifact_id:

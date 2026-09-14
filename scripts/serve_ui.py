@@ -95,6 +95,13 @@ Seven routes:
     POST /recording/clear {"agent": "..."} -> returns an agent to the
                          honest READY default once a SAVED/FAILED/
                          CANCELLED session has been acknowledged on screen.
+    POST /upload        {"agent": "...", "filename": "...", "mime_type": "...",
+                         "data_base64": "...", "source": "conversation" |
+                         "control_center"} -> REPAIR-01/02's one governed
+                         ingestion door for a user-supplied file (PDF,
+                         document, image, audio, video), registered as a
+                         supplied_file artifact; shared from the
+                         conversation, also recorded in the room.
     POST /workspace/enter {"agent": "..."} -> the one real acknowledgement
                          a served page calls once a person has genuinely
                          entered an agent's own 3D Workspace, through
@@ -147,7 +154,13 @@ from scripts.control_center import (  # noqa: E402
     classify_administrative_write,
     run_command,
 )
-from scripts.exchange import build_recording_record, exchange, memory_for, retain_for  # noqa: E402
+from scripts.exchange import (  # noqa: E402
+    build_recording_record,
+    exchange,
+    memory_for,
+    record_shared_file,
+    retain_for,
+)
 from src.services.audit.action_log import DEFAULT_ACTION_LOG_PATH, load_action_log  # noqa: E402
 from scripts.export_ui import render  # noqa: E402
 from src.config.settings import Settings  # noqa: E402
@@ -156,6 +169,8 @@ from src.control_center.observer import ControlCenter  # noqa: E402
 from src.control_center.render import render_overview  # noqa: E402
 from src.control_center.snapshot import snapshot  # noqa: E402
 from src.manager.proactive_experience import deliver_experience  # noqa: E402
+from src.services.artifacts.content import read_artifact_units  # noqa: E402
+from src.services.artifacts.ingestion import IngestionError, MAX_SUPPLIED_FILE_BYTES, ingest_supplied_file  # noqa: E402
 from src.services.artifacts.models import VoiceRecordingContent  # noqa: E402
 from src.services.artifacts.registration import register_new_artifact  # noqa: E402
 from src.services.identity.presence import (  # noqa: E402
@@ -911,6 +926,97 @@ def route_recording_save(
     )
 
 
+# REPAIR-01/02: where a supplied file may come from over HTTP. Two doors,
+# one mechanism - the conversation composer and Control Center's Manage.
+_UPLOAD_SOURCES = frozenset({"conversation", "control_center"})
+
+# The largest request body this server reads at all: a base64-encoded file
+# at the ingestion limit, plus its JSON envelope. Anything larger is refused
+# before it is read into memory.
+MAX_POST_BYTES = (MAX_SUPPLIED_FILE_BYTES * 4) // 3 + 64 * 1024
+
+
+def _json_error(status: int, message: str) -> tuple[int, bytes, str]:
+    return status, json.dumps({"error": message}).encode("utf-8"), "application/json; charset=utf-8"
+
+
+def route_upload(
+    agent: object, filename: object, mime_type: object, data_base64: object, source: object,
+    system: LiveSystem,
+) -> tuple[int, bytes, str]:
+    """Decide what to answer for `POST /upload`. No socket involved.
+
+    REPAIR-01/02 (user-facing file ingestion): the one HTTP door through
+    which a person supplies a real file - a PDF, a document, an image, a
+    recording, a video - as bytes, never as a server filesystem path.
+    Registered through the one governed ingestion mechanism
+    (``ingest_supplied_file``) into the identical ArtifactStore every other
+    artifact lives in; identical bytes supplied twice are recognised rather
+    than duplicated.
+
+    Shared from the conversation (``source == "conversation"``), the share
+    is also recorded in the room (``record_shared_file``) with the
+    artifact's id, so "what does this PDF say" in the person's next line
+    resolves to exactly this file. Added from the Control Center, it is
+    registered and nothing is said in the room.
+    """
+    if not isinstance(agent, str) or not agent.strip():
+        return _json_error(400, "agent must not be empty")
+    if not isinstance(data_base64, str) or not data_base64.strip():
+        return _json_error(400, "data_base64 must not be empty")
+    origin = source if isinstance(source, str) else ""
+    if origin not in _UPLOAD_SOURCES:
+        return _json_error(400, f"source must be one of: {', '.join(sorted(_UPLOAD_SOURCES))}")
+    if memory_for(system.manager, agent) is None:
+        return _json_error(404, f"no such agent: {agent!r}")
+    try:
+        data = base64.b64decode(data_base64, validate=True)
+    except (ValueError, TypeError):
+        return _json_error(400, "data_base64 is not valid base64")
+
+    with system.lock:
+        try:
+            artifact, created = ingest_supplied_file(
+                system.runtime.artifacts, owner_agent=agent, filename=filename, data=data,
+                source=origin, media_type=mime_type if isinstance(mime_type, str) else "",
+            )
+        except IngestionError as exc:
+            return _json_error(413 if len(data) > MAX_SUPPLIED_FILE_BYTES else 400, str(exc))
+
+        units = read_artifact_units(artifact)
+        kind = artifact.latest.metadata.get("content_kind", "other")
+        shared = False
+        if origin == "conversation":
+            readable = (
+                f"{len(units)} readable {units[0].locator.split(' ', 1)[0]}(s)" if units else "no readable text"
+            )
+            shared = record_shared_file(
+                system.conversation,
+                description=(
+                    f"[shared a file] {artifact.latest.title} "
+                    f"(artifact {artifact.artifact_id}, {kind}, {readable})"
+                ),
+                addressed=agent,
+            )
+
+    return (
+        200,
+        json.dumps(
+            {
+                "agent": agent,
+                "artifact_id": artifact.artifact_id,
+                "filename": artifact.latest.title,
+                "created": created,
+                "content_kind": kind,
+                "rendition_format": next(iter(artifact.latest.renditions), ""),
+                "readable_units": len(units),
+                "shared_in_conversation": shared,
+            }
+        ).encode("utf-8"),
+        "application/json; charset=utf-8",
+    )
+
+
 def route_recording_cancel(agent: object, system: LiveSystem) -> tuple[int, bytes, str]:
     """Decide what to answer for `POST /recording/cancel`. No socket
     involved. Discards an in-progress session without saving - refuses
@@ -1111,6 +1217,16 @@ def route_command(
 
     normalised = command.strip()
     verb = normalised.split(None, 1)[0].lower()
+    # REPAIR-01/02: "artifacts add <path>" reads a file from *this machine's*
+    # disk - the terminal's own local door. Over the network it would let a
+    # request name any server path, so it is refused here; a browser
+    # supplies the file's bytes through POST /upload instead.
+    if verb == "artifacts" and normalised.split(None, 2)[1:2] == ["add"]:
+        return _json_error(
+            400,
+            "'artifacts add' takes a path on the server's own disk and is refused over the "
+            "network - use the Add file control (POST /upload) to supply a file instead",
+        )
     if verb not in MANAGEMENT_VERBS:
         return (
             400,
@@ -1186,11 +1302,16 @@ class SnapshotHandler(BaseHTTPRequestHandler):
             "/recording/cancel",
             "/recording/failed",
             "/recording/clear",
+            "/upload",
         ):
             self._respond(404, b"not found", "text/plain; charset=utf-8")
             return
 
         length = int(self.headers.get("Content-Length") or 0)
+        if length > MAX_POST_BYTES:
+            status, body, content_type = _json_error(413, "request body too large")
+            self._respond(status, body, content_type)
+            return
         raw = self.rfile.read(length) if length > 0 else b""
         try:
             payload = json.loads(raw) if raw.strip() else {}
@@ -1249,6 +1370,12 @@ class SnapshotHandler(BaseHTTPRequestHandler):
         elif self.path == "/recording/clear":
             agent = payload.get("agent") if isinstance(payload, dict) else None
             status, body, content_type = route_recording_clear(agent, self.server.system)
+        elif self.path == "/upload":
+            get = payload.get if isinstance(payload, dict) else (lambda _key: None)
+            status, body, content_type = route_upload(
+                get("agent"), get("filename"), get("mime_type"), get("data_base64"), get("source"),
+                self.server.system,
+            )
         else:
             agent = payload.get("agent") if isinstance(payload, dict) else None
             fields = payload.get("fields") if isinstance(payload, dict) else None

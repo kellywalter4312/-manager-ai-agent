@@ -53,12 +53,14 @@ gets composed.
 
 from __future__ import annotations
 
+import json
 import uuid
 from pathlib import Path
 
 from src.agents.tools.tool import Tool, ToolSpec
 from src.providers.documents.pdf import DocumentRenderError, DocumentRenderer
 from src.providers.media.image import ImageError, ImageProvider
+from src.services.artifacts.content import TEXT_CONTENT_TYPES, read_artifact_units, units_to_json
 from src.services.artifacts.models import DocumentContent, ImageContent
 from src.services.artifacts.store import ArtifactError, ArtifactStore
 
@@ -114,9 +116,16 @@ class ArtifactProductionTool(Tool):
             return self._get(content)
         if operation == "find_latest":
             return self._find_latest(content)
+        if operation == "read_content":
+            return self._read_content(content)
+        if operation == "list_content":
+            return self._list_content(content)
+        if operation == "derive_document":
+            return self._derive_document(content)
         raise ValueError(
             f"unknown artifact_production operation {operation!r}; expected one of: "
-            "create_document, revise_document, create_image, revise_image, get, find_latest"
+            "create_document, revise_document, create_image, revise_image, get, find_latest, "
+            "read_content, list_content, derive_document"
         )
 
     # ------------------------------------------------------------------
@@ -150,7 +159,7 @@ class ArtifactProductionTool(Tool):
         renditions["pdf"] = pdf_path.as_posix()
         return renditions, ""
 
-    def _create_document(self, content: str) -> str:
+    def _create_document(self, content: str, *, related_artifact_ids: "tuple[str, ...]" = ()) -> str:
         doc = DocumentContent.from_json(content)
 
         artifact_id = uuid.uuid4().hex[:12]
@@ -168,8 +177,75 @@ class ArtifactProductionTool(Tool):
             title=doc.title,
             content_path=content_path.as_posix(),
             renditions=renditions,
+            related_artifact_ids=related_artifact_ids,
         )
         return self._describe("created", artifact, content_path, renditions, render_note)
+
+    def _derive_document(self, content: str) -> str:
+        """A brand-new document artifact produced *from* an existing one -
+        a PDF version of a supplied file, an edited copy of it - linked
+        back through ``related_artifact_ids``. The source itself is never
+        touched: a supplied file stays byte-for-byte what the person gave,
+        the identical "source of truth stays read-only" rule this
+        project's Memory already lives under."""
+        try:
+            source_id, json_part = content.split("\n", 1)
+        except ValueError:
+            raise ValueError(
+                "derive_document needs the source artifact id on the first line and the "
+                "new document JSON on the rest"
+            ) from None
+        source = self._owned(source_id)
+        return self._create_document(json_part, related_artifact_ids=(source.artifact_id,))
+
+    # ------------------------------------------------------------------
+    # content reading - any artifact whose content is text
+    # ------------------------------------------------------------------
+
+    def _owned(self, raw_artifact_id: str):
+        artifact_id = raw_artifact_id.strip().lower()
+        artifact = self._store.get(artifact_id)
+        if artifact is None or artifact.owner_agent != self._owner_agent:
+            raise ArtifactError(f"no artifact found with id {artifact_id!r}")
+        return artifact
+
+    def _read_content(self, content: str) -> str:
+        """Every real text unit of one owned artifact, as JSON - a
+        supplied PDF's pages, a spreadsheet's rows, a document's sections.
+        Raises honestly when there is no readable text (an image, a
+        recording, a scanned PDF with no text layer) rather than returning
+        an empty reading a caller could mistake for a blank document."""
+        artifact = self._owned(content)
+        units = read_artifact_units(artifact)
+        if not units:
+            raise ArtifactError(
+                f"artifact {artifact.artifact_id!r} ({artifact.latest.title!r}) has no readable text - "
+                "an image, recording or video needs a vision/transcription capability, a scanned "
+                "PDF has no text layer, and very large files are not read"
+            )
+        return units_to_json(artifact, units)
+
+    def _list_content(self, content: str) -> str:
+        """This agent's own text-bearing artifacts (supplied files and
+        documents), newest first, as JSON - how "the other document" is
+        resolved when a conversation named none explicitly."""
+        try:
+            limit = max(1, int(content.strip() or "5"))
+        except ValueError:
+            limit = 5
+        owned = sorted(
+            (
+                a for a in self._store.all()
+                if a.owner_agent == self._owner_agent and a.type in TEXT_CONTENT_TYPES
+            ),
+            key=lambda a: a.latest.created_at,
+            reverse=True,
+        )[:limit]
+        if not owned:
+            raise ArtifactError(f"no document or supplied file exists yet for {self._owner_agent!r}")
+        return json.dumps(
+            [{"artifact_id": a.artifact_id, "type": a.type, "title": a.latest.title} for a in owned]
+        )
 
     def _revise_document(self, content: str) -> str:
         try:

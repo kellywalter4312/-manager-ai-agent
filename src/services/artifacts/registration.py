@@ -27,6 +27,7 @@ respect it.
 from __future__ import annotations
 
 import uuid
+from typing import Mapping
 
 from src.services.artifacts.store import Artifact, ArtifactStore
 
@@ -42,6 +43,7 @@ def register_new_artifact(
     rendition_bytes: "bytes | None" = None,
     rendition_path: "str | None" = None,
     related_artifact_ids: "tuple[str, ...]" = (),
+    metadata: "Mapping[str, str] | None" = None,
 ) -> Artifact:
     """Write ``content_bytes`` to a brand-new artifact's own directory
     and register it with one real rendition, then register it - the
@@ -85,4 +87,5 @@ def register_new_artifact(
         content_path=content_path.as_posix(),
         renditions={rendition_format: real_rendition_path},
         related_artifact_ids=related_artifact_ids,
+        metadata=dict(metadata or {}),
     )

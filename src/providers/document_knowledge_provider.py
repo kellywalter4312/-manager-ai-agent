@@ -248,6 +248,26 @@ class DocumentKnowledgeProvider(KnowledgeSourceProvider):
             consulted_at=utc_now(),
         )
 
+    def passages(self, path: "str | Path") -> tuple[tuple[str, str], ...]:
+        """Every readable unit of one specific document, in order, each
+        with its honest locator ("page 3", "row 12", "slide 2",
+        "paragraph 4") - the identical per-format reading ``lookup`` above
+        already uses, exposed for a single file rather than a whole
+        folder search.
+
+        Exists so a file the user supplied *directly* (a supplied-file
+        artifact, see ``src/services/artifacts/content.py``) is read by
+        exactly this code rather than by a second PDF/spreadsheet/
+        presentation reader. ``path`` need not live under this provider's
+        own directory - reading a named file is not a search of the
+        folder. Nothing readable honestly yields an empty tuple, exactly
+        as an unreadable file already does for ``lookup``.
+        """
+        target = Path(path)
+        if not target.is_file():
+            return ()
+        return tuple((self._locator(target, index), text) for index, text in self._paragraphs(target))
+
     # ------------------------------------------------------------------
     # Reading
     # ------------------------------------------------------------------

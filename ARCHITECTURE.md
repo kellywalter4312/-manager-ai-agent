@@ -8525,3 +8525,97 @@ unexplained regressions.
 1 ✅, Phase 2 ✅, Phase 3 ✅, Whole-System Reality Audit ✅, Phase 4 ✅ all
 stand unchanged. AI Video Clipping, a real WhatsApp connection, and
 Phase 5 were explicitly not started by this checkpoint.
+
+
+### 52.30 REPAIR-01 - PDF / document capability (and the one governed ingestion mechanism)
+
+**Position.** Post-completion surgical repair, Pre-Stage-9 repair order item
+REPAIR-01. Phases 6-8 stay closed; nothing here reopens them. Status
+vocabulary used strictly: VERIFIED WORKING / VERIFIED PARTIAL / VERIFIED
+BROKEN / NOT VERIFIED / NOT FOUND / BLOCKED - "implemented" is not a status.
+
+**What CHECK found before any change.** PDF *rendering* was real
+(`SimplePDFRenderer`), PDF *reading* was real but only for files placed in the
+knowledge folder (`DocumentKnowledgeProvider`, pypdf), the artifact store was
+real and versioned. The genuine gap: **no user-facing way to supply a file at
+all** - no upload route, no attach control; `clip_video`/`image_analysis`
+needed a server path typed into the message. A supplied file could not be read
+aloud (the voice channel spoke only the first 400 characters), converted,
+edited, compared, or used as personal context.
+
+**What was built - on the existing architecture, no second PDF system.**
+
+- `src/services/artifacts/ingestion.py` - ONE governed ingestion mechanism for
+  every file type (PDF, document, image, audio, video): a `supplied_file`
+  artifact in the canonical `ArtifactStore`, bytes stored as supplied,
+  metadata (filename, media type, sha256, size, source, content kind),
+  identical bytes deduplicated per agent, filename reduced to a bare name,
+  size bounded. `SuppliedFileContent` added to `models.py`.
+- `src/services/artifacts/content.py` - the generalized Content -> units
+  pipeline: a supplied file is read by the knowledge folder's own reader
+  (`DocumentKnowledgeProvider.passages`, new public method), a document Alfred
+  produced by its own sections; locator selection ("page 2"), relevance-bounded
+  evidence selection, bounded reading windows. Formats the reader does not
+  support (images, audio, video, .docx) honestly yield no text.
+- `ArtifactProductionTool` - `read_content` / `list_content` / `derive_document`
+  (derivation always records `related_artifact_ids`; the source is never
+  modified; ownership enforced).
+- `src/manager/knowledge.py` - `resolve_content_sources` (explicit
+  `artifact <id>` -> file shared in the recent conversation -> latest), used by
+  `gather_knowledge_evidence` for requests that point at content ("this PDF",
+  "the other document", "summarize this"), and a current personal-context topic
+  that names a document contributes that document's relevant text, read fresh.
+- Capabilities: new `read_content` (Content -> Voice, deterministic, marked
+  `speak_in_full`); `create_artifact` gained "create a PDF version of this";
+  `revise_artifact` gained user-authorized editing of supplied files and
+  documents (literal replace deterministic and refused honestly when the text
+  is absent; free-form edits Brain-composed; a supplied file yields an edited
+  derived copy, one of Alfred's own documents a new version) through the
+  existing `_governance_check`; `personal_context` links "this is my timetable"
+  to the just-shared file (id only in Memory; supersession by topic key).
+- Voice: `ConversationTurn.speak_in_full` (from the capability's own payload)
+  lets `speakable` speak the whole passage, bounded at 4000 characters.
+- Doors: `POST /upload` (`scripts/serve_ui.py`, bytes never a server path,
+  body size bounded, a conversation share recorded in the room through
+  `scripts/exchange.py::record_shared_file`); `artifacts add <path>` in the
+  terminal Control Center (refused over `/command`); `ui/index.html` "+ file"
+  on the private line and "Add file" in Control Center Manage.
+
+**Defects found by verification and fixed in this repair (not hypothetical):**
+evidence selection counted "the"/"document" as relevance and silently dropped
+a page when comparing documents; a supplied image would have been read as
+garbage text; the live 5-second redraw wiped Control Center output and could
+discard a file chosen before "Add file" was clicked (upload now starts on the
+choice; `#cc-out` survives the redraw).
+
+**Verified.**
+
+- `tests/test_repair_01_documents.py` (57 tests); two capability-name pins
+  updated for `read_content`. Full suite fixed order: 7751 passed, 1 failed -
+  `test_calendar_capability.py::TestRetrieval::test_listing_reflects_real_added_items`,
+  which fails identically on untouched HEAD 457d837 (a hard-coded 2026-09-11
+  "upcoming" date that is now in the past) - pre-existing, unrelated.
+- Real served system (isolated scratch data directories) driven by real
+  headless Chromium over CDP: "+ file" upload -> share recorded -> "Read this
+  PDF to me" / "What does page 2 say?" / "Create a PDF version of this" / "This
+  is my timetable" answered from the real document; derived PDF downloaded
+  (200, application/pdf, %PDF-); Control Center "Add file" registered and its
+  result stayed visible; "+ file" reachable at 390x844; zero page exceptions;
+  screenshots inspected.
+- Real local Kokoro synthesis: "Read page 2 to me" -> the full 822-character
+  passage (past the 400-character ordinary limit) -> 40.6 s of non-silent audio,
+  captured at the playback call.
+
+**Honest status after this repair.**
+
+| Requirement | Status |
+|---|---|
+| PDF input through conversation and Control Center | VERIFIED WORKING |
+| PDF understanding - verbatim reading, named page | VERIFIED WORKING |
+| PDF understanding - summary / Q&A / compare | VERIFIED PARTIAL - real document text reaches the Brain (scripted provider); real vendor answer BLOCKED (unfunded) |
+| User-authorized editing - literal replace | VERIFIED WORKING; free-form edit VERIFIED PARTIAL (scripted Brain only); layout-preserving in-place PDF editing NOT VERIFIED (a regenerated text PDF is produced) |
+| PDF generation from supplied content | VERIFIED WORKING |
+| PDF -> voice | VERIFIED PARTIAL - real synthesis verified; speaker playback not verified; audio plays on the server machine, not on a phone's browser |
+| PDF -> memory/context, changing information | VERIFIED WORKING (link, supersession, restart) |
+| Cross-capability use - read, reason, convert, edit, personal context | VERIFIED WORKING; document -> calendar/task extraction NOT VERIFIED (needs Full Brain) |
+| General ingestion of image/audio/video | ingestion VERIFIED WORKING for the mechanism; type-specific capability consumption is REPAIR-02 |
