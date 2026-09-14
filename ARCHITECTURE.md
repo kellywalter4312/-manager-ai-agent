@@ -340,18 +340,18 @@ mechanism and specialist participation do not.
 | # | Requirement | Status | Where it lives / would live |
 |---|---|---|---|
 | A | Alfred: brain, memory, identity, capabilities | ✅ | `manager/`, `services/identity/identity.py` |
-| A | Alfred: own interface | 🟡 | declared via `describe_interface`; no dedicated surface |
-| A | Alfred: own workspace, voice, avatar | ❌ | — |
+| A | Alfred: own interface | ✅ (updated Pre-Stage-9 Campaign 5) | open, governed surfaces - `surface.<agent>.<kind>` through the evolution lifecycle, rendered by the page (§52.35) |
+| A | Alfred: own workspace, voice, avatar | ✅ (updated Pre-Stage-9 Campaign 13) | workspace (`/workspace/enter`), Kokoro `am_eric` voice, avatar and environment pickers - verified in a real browser (§52.35, §52.41) |
 | B | Specialists are real entities (brain/memory/identity) | ✅ for Arthur | `agents/specialists.py` derives name, memory owner, brain domain from **one** identity |
-| B | Specialist interface | 🟡 | `InterfaceDescriptor`; Arthur declares MAILBOX + OPPORTUNITIES as *planned* |
-| B | Specialist voice / avatar / workspace | ❌ | — |
+| B | Specialist interface | ✅ (updated Pre-Stage-9 Campaign 5) | declared kinds are the default; the owner grants or withdraws any kind through governance, live (§52.35) |
+| B | Specialist voice / avatar / workspace | ✅ (updated Pre-Stage-9 Campaign 13) | Arthur: Kokoro `bm_daniel`, avatar/environment pickers, a workspace granted through governance (§52.35) |
 | C | Separate brains, separate memories | ✅ | `test_capability_floor_and_brain_modes.py:455,459` assert Alfred and Arthur never share either |
 | C | **Shared conversation context** | ✅ domain | `src/conversation/conversation.py`; reachable from the Control Center's talk path |
 | D | Multi-agent conversation | ✅ domain | Unbounded participants ✅; delegated specialist joins and speaks as itself ✅; addressed participant answers directly ✅; a registered specialist can be **invited** by name ✅ (Phase 5). A specialist named after a capability word is invitable (Phase 5.1, §22). The Room *UI* remains ❌. |
 | ~~E~~ | ~~Voice as I/O~~ | **SUPERSEDED — see §52** | Real engines now exist (Windows, ElevenLabs, Kokoro) — output is no longer contractonly. |
-| E | Voice as addressing/routing | 🟡 | The addressing *model* is implemented and decides who answers (Phase 4). Voice as an input to it needs STT, which does not exist. |
+| E | Voice as addressing/routing | 🟡 | The addressing *model* is implemented and decides who answers (Phase 4). Local STT now exists (Windows recogniser, §52.33) but a physical microphone driving addressing is NOT VERIFIED (updated Pre-Stage-9 Campaign 13). |
 | ~~F~~ | ~~Agent-specific voices~~ | **SUPERSEDED — see §52** | Alfred (Kokoro `am_eric`) and Arthur (Kokoro `bm_daniel`) both genuinely speak, verified end to end. Not merely identity-declared — an engine now makes the sound. |
-| G | Specialist workspaces | 🟡 label only | see §2 |
+| G | Specialist workspaces | ✅ (updated Pre-Stage-9 Campaign 5) | a workspace kind granted to a specialist opens its real route (§52.35) |
 | H | Digital Humans | ❌ | — |
 | I | Persistent continuity | 🟡 | per-agent JSON memory is now the **default** ✅; still scoped per record, not per project ❌ |
 | J | Context / research graph | 🔵 | recorded here as direction only |
@@ -9435,3 +9435,60 @@ governed ingestion path with no new script and no second route.
 | VOI-03 voice reaches the user's own device | VERIFIED PARTIAL - the page speaks answers with the device's own speech synthesis; audibility on a phone NOT VERIFIED |
 | AMB-01 wake-phrase ambient voice | BLOCKED - needs a device with a microphone and speech recognition |
 | DEV-02, VOI-04, VIS-06, REC-03 physical headphones, microphone, phone GPU, iOS Safari | BLOCKED - physical devices |
+
+### 52.41 Pre-Stage-9 Campaign 13 - architecture truth and duplicates
+
+**What the Master Pre-Stage-9 Audit asked.** Whether dead prototype code
+(``src/agents/manager_agent.py``, ``AgentLoop``, ``ExtensionRegistry``) has any
+production caller - "trace it, then the owner decides; never delete silently"
+(ARCH-01) - and whether this document still matches the code (DOC-01).
+
+**Traced, not assumed.** ``scripts/repo_recovery.py::compute_reachability``
+walks the real import graph from the real entry points (``scripts/``):
+
+- **Production-reachable:** 236 modules.
+- **Unreachable:** exactly one - ``src/agents/manager_agent.py``, a 25-line
+  broken duplicate of the real orchestrator (``src/manager/manager.py``). It
+  is untracked, nothing imports it, and ``tests/test_repository_recovery.py``
+  already pins it as unreachable. **Not deleted** - reported for the owner's
+  decision.
+- **Test-only (real, tested, no production caller):** ``src.agents.loop``
+  (``AgentLoop``), ``src.channels.modality``, ``src.extensions``,
+  ``src.manager.actions``, ``src.manager.cognitive_loop``,
+  ``src.services.credentials.validation`` - the "prepared" modules this
+  document's status tables already name, confirmed by the graph.
+  ``src.extensions`` is **not dead**: ``src.evolution`` uses its extension
+  lifecycle. Only its ``ExtensionRegistry``/``ExtensionPlan`` classes have no
+  caller anywhere.
+- **Every module the Pre-Stage-9 campaigns added is production-reachable**
+  (re-measured on the final tree): ``src.services.profile.user_knowledge``,
+  ``src.services.memory.correction``, ``src.providers.media.local_transcription``,
+  ``src.providers.media.local_ocr``, ``src.providers.media.image_forensics`` -
+  nothing was added as a disconnected second implementation.
+- **Duplicate class names:** ``ManagerAgent`` (the dead stub above vs the real
+  orchestrator); ``ValidationResult`` (``src.evolution`` and ``src.extensions``
+  - two different results in two lifecycles); ``_HTTPResponse`` (a private
+  helper in two media providers). None is a second implementation of one
+  concern reachable in production.
+
+**Duplicate architecture avoided during the campaigns.** Every Pre-Stage-9
+repair extended the one existing mechanism rather than adding a parallel one:
+one personal-context store (Campaign 1), one correction path (2), one content
+pipeline for files, images, pages and books (3, 7), one composition root and
+brain builder for live provider switching (4), one evolution lifecycle for
+surfaces, reasoning modes, backends and runtime-registered categories (4, 5, 8,
+12), one proactive pipeline for reminders (6), one capability registry for
+read-back, image authenticity, the coach and translation (7-9), one
+confirmation resolver for outward actions (10).
+
+**This document, made true.** Rows the campaigns changed are annotated in
+place rather than rewritten, each naming the section that changed them: Alfred's
+and specialists' interfaces, workspaces, voices and avatars (§52.35), voice as
+an input (local STT exists; a physical microphone is not verified), specialist
+workspaces; conversation continuity across providers (§52.34).
+
+| Requirement | Status |
+|---|---|
+| ARCH-01 dead prototype code traced | VERIFIED WORKING - one unreachable module, reported, not deleted (awaiting the owner's decision) |
+| ARCH-01 no duplicate architecture in production | VERIFIED WORKING |
+| DOC-01 this document matches the code | VERIFIED WORKING for every row the Pre-Stage-9 campaigns changed |
