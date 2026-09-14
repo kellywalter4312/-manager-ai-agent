@@ -9322,3 +9322,51 @@ connection data held test fixtures pointing at 127.0.0.1 (CON-03).
 | CON-02 real Gmail read | BLOCKED - the saved token can no longer be refreshed; the owner must re-authorize Gmail (interactive sign-in). Read-only enforcement VERIFIED WORKING |
 | CON-03 production data holds no test fixtures | VERIFIED BROKEN - three verification fixtures remain; origin traced; removal awaits the owner's approval |
 | CON-05 real delivery (messages, calls) | BLOCKED - no authorized outward communication connection |
+
+### 52.40 Pre-Stage-9 Campaign 12 - the evolution and governance lifecycle, verified end to end
+
+**What the Master Pre-Stage-9 Audit found.** Inventory, propose and history
+worked (EVO-01). Approve, apply, verify, rollback and ``register_handler`` had
+never been exercised in a running system (EVO-02, NOT VERIFIED).
+
+**Found by this campaign's runtime verification.** ``register_handler`` added a
+working handler for a brand-new category, but the Control Center still answered
+"no such component": the inventory listed only the categories written into it,
+so "a new category needs no engine change" held for the engine and not for the
+owner's own Control Center.
+
+**The repair.** ``EvolutionHandler.governed_components(config=)`` - empty by
+default, so every built-in category is unchanged - lets a registered handler
+declare the components it governs. ``discover_components`` appends every
+registered handler's declarations it has not already discovered, and
+``registered_handlers()`` exposes the registration point read-only. A category
+added at runtime is then listed, proposed, run and rolled back through the
+ordinary Control Center lifecycle.
+
+**Verification.**
+
+- ``tests/test_campaign_12_evolution_lifecycle.py``: an unapproved run refused;
+  an approved run applied and independently re-verified; history shows both
+  proposals; rollback restores the value; a second rollback refused; the ledger
+  survives a restart; an unknown component and a fabricated reasoning mode
+  refused; without a handler a new category does not exist; with one registered
+  it is listed, proposed, applied, visible after a restart and rolled back;
+  built-in handlers declare nothing extra. Run alongside every evolution,
+  ecosystem, upgrade and governed-config suite.
+- Real served system through the served Control Center route (isolated
+  ledger/config/staging/backups, production ``data/`` hash unchanged): 37
+  components listed; ``capability.general_conversation`` proposed 6 -> 8, an
+  unapproved run refused ("not approved"), an approved run activated and wrote 8;
+  after a full restart the history still showed both proposals and the active
+  one; rollback restored 6 and a second rollback was refused; ``nothing.here``
+  and the reasoning mode "genius" refused; a handler registered at runtime put
+  ``demo.widget`` in the inventory, and it was proposed 0 -> 2, run (config 2)
+  and rolled back (config 0) through the same route.
+
+| Requirement | Status |
+|---|---|
+| EVO-01 inventory, propose, history | VERIFIED WORKING |
+| EVO-02 approve, apply, verify, rollback | VERIFIED WORKING |
+| EVO-02 ``register_handler`` - a new category with no engine change, through the Control Center | VERIFIED WORKING |
+| Governance refusals (unapproved, unknown, fabricated, double rollback) | VERIFIED WORKING |
+| A governed capability setting takes effect in the running session | VERIFIED PARTIAL - persisted and honoured by the next session; the running process says plainly it still holds the previous value |

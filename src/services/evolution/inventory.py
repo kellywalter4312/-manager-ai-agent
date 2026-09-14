@@ -439,6 +439,17 @@ def discover_components(
     manifest = upgrade_manifest(snapshot_version=SNAPSHOT_VERSION)
     components.extend(_system_components(manifest))
 
+    # Pre-Stage-9 Campaign 12: components a registered handler declares that
+    # nothing above discovered - a category added through register_handler.
+    from src.services.evolution.handlers import registered_handlers
+
+    known = {component.component_id for component in components}
+    for handler in registered_handlers():
+        for declared in handler.governed_components(config=config):
+            if declared.component_id not in known:
+                components.append(declared)
+                known.add(declared.component_id)
+
     return tuple(components)
 
 

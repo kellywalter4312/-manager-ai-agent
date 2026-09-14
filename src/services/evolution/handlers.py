@@ -111,6 +111,15 @@ class EvolutionHandler(ABC):
         (Pre-Stage-9 Campaign 5)."""
         return None
 
+    def governed_components(self, *, config) -> "tuple":
+        """The components this handler governs that the inventory does not
+        already discover - ``ComponentSnapshot`` values, read from the governed
+        ``config``. Empty by default: every built-in category is discovered by
+        the inventory itself. A category added through ``register_handler``
+        declares its own here, so it joins the Control Center's lifecycle with
+        no engine change (Pre-Stage-9 Campaign 12)."""
+        return ()
+
 
 def _model_segment(version: str) -> "str | None":
     """A ``provider.*`` component's version is always the full
@@ -564,6 +573,11 @@ def register_handler(handler: EvolutionHandler) -> None:
     governed extension point future components use, never a change to
     ``ecosystem_evolution.py`` itself."""
     _HANDLERS.append(handler)
+
+
+def registered_handlers() -> "tuple[EvolutionHandler, ...]":
+    """Every registered handler, built-in and added, in registration order."""
+    return tuple(_HANDLERS)
 
 
 def handler_for(component_id: str) -> "EvolutionHandler | None":
