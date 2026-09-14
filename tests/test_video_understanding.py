@@ -270,7 +270,7 @@ class TestMediaProductionToolTranscribeOperation:
 
     def test_missing_source_path_is_refused(self, tmp_path):
         tool = self._tool(tmp_path)
-        with pytest.raises(ValueError, match="real source video path"):
+        with pytest.raises(ValueError, match="real source (audio or )?video path"):
             tool.run(operation="transcribe", content="transcribe this please")
 
     def test_nonexistent_source_file_is_refused(self, tmp_path):
@@ -539,7 +539,7 @@ class TestBuildVideoUnderstanding:
     def test_available_backends(self):
         from src.providers.media.factory import available_video_understanding_backends
 
-        assert available_video_understanding_backends() == ["null", "whisper"]
+        assert available_video_understanding_backends() == ["null", "whisper", "windows"]
 
     def test_null_is_the_honest_default(self):
         from src.config.settings import Settings
@@ -658,7 +658,7 @@ class TestVideoUnderstandingProviderCategory:
 
         registry = build_ecosystem_registry(Settings.from_env(env={}))
         adapter = registry.adapter_for("video_understanding_provider")
-        assert {d.key for d in adapter.available()} == {"null", "whisper"}
+        assert {d.key for d in adapter.available()} == {"null", "whisper", "windows"}
 
     def test_validate_requires_a_credential_for_whisper_but_not_null(self):
         from src.config.settings import Settings

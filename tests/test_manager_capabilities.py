@@ -301,6 +301,7 @@ class TestHandlersAreSelectedThroughTheRegistry:
             "start_recording",
             "stop_recording",
             "temporal_derivation",
+            "transcribe_media",
             "update_task",
         ]
 

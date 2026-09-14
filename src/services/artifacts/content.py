@@ -60,6 +60,10 @@ DOCUMENT_TYPE = "document"
 # them. Kinds of artifact, never subjects.
 TEXT_CONTENT_TYPES: tuple[str, ...] = (SUPPLIED_FILE_TYPE, DOCUMENT_TYPE)
 
+# How a file shared in a conversation is recorded in the room (written by the
+# upload route, read by the shared-files accessor) - one constant, two sides.
+SHARED_FILE_PREFIX = "[shared a file]"
+
 ARTIFACT_ID_PATTERN = re.compile(r"\bartifact[:\s]+([0-9a-f]{6,32})\b", re.IGNORECASE)
 
 # "page 4", "section 2", "slide 3", "row 10", "paragraph 5" - the unit

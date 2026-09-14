@@ -87,11 +87,15 @@ logger = get_logger(__name__)
 # document pipeline. A future format is a new suffix handled in
 # _paragraphs, or a new provider behind the same contract.
 DEFAULT_SUFFIXES: tuple[str, ...] = (
-    ".md", ".markdown", ".txt", ".text", ".pdf", ".xlsx", ".csv", ".pptx",
+    ".md", ".markdown", ".txt", ".text", ".pdf", ".xlsx", ".csv", ".pptx", ".docx",
 )
 
 _SPREADSHEET_SUFFIXES = frozenset({".xlsx", ".csv"})
 _PRESENTATION_SUFFIXES = frozenset({".pptx"})
+# Word documents: an OOXML package (a zip of XML), read with the standard
+# library alone - no new dependency (Pre-Stage-9 Campaign 3).
+_WORD_SUFFIXES = frozenset({".docx"})
+_WORD_NAMESPACE = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 
 # A passage is a paragraph: the unit an author already chose. Splitting on
 # blank lines needs no knowledge of what the document is about, which is
@@ -289,6 +293,8 @@ class DocumentKnowledgeProvider(KnowledgeSourceProvider):
             return self._spreadsheet_rows(path)
         if suffix in _PRESENTATION_SUFFIXES:
             return self._presentation_slides(path)
+        if suffix in _WORD_SUFFIXES:
+            return self._word_paragraphs(path)
 
         try:
             if path.stat().st_size > MAX_DOCUMENT_BYTES:
@@ -479,6 +485,46 @@ class DocumentKnowledgeProvider(KnowledgeSourceProvider):
             # must not make every other document unreachable.
             logger.warning("could not read '%s': %s", path.name, exc)
             return ()
+
+    def _word_paragraphs(self, path: Path) -> Iterable[tuple[int, str]]:
+        """Real paragraph text from a Word document's own body - table cells
+        included, each its own paragraph, exactly as the document stores them.
+        Never a rendering and never OCR on embedded images.
+
+        A .docx is a zip of XML; the body lives in ``word/document.xml``. Read
+        with ``zipfile`` and ``xml.etree`` so an installation needs nothing
+        new to read one.
+        """
+        import zipfile
+        from xml.etree import ElementTree
+
+        try:
+            if path.stat().st_size > MAX_DOCUMENT_BYTES:
+                logger.warning(
+                    "skipping '%s': larger than %d bytes", path.name, MAX_DOCUMENT_BYTES
+                )
+                return ()
+            with zipfile.ZipFile(path) as package:
+                body = package.read("word/document.xml")
+            root = ElementTree.fromstring(body)
+        except (OSError, KeyError, zipfile.BadZipFile, ElementTree.ParseError) as exc:
+            # A malformed or password-protected document must not make every
+            # other document unreachable.
+            logger.warning("could not read '%s': %s", path.name, exc)
+            return ()
+
+        paragraphs = []
+        for element in root.iter(f"{_WORD_NAMESPACE}p"):
+            pieces = []
+            for node in element.iter():
+                if node.tag == f"{_WORD_NAMESPACE}t" and node.text:
+                    pieces.append(node.text)
+                elif node.tag in (f"{_WORD_NAMESPACE}tab", f"{_WORD_NAMESPACE}br"):
+                    pieces.append(" ")
+            text = " ".join("".join(pieces).split())
+            if text:
+                paragraphs.append((len(paragraphs) + 1, text))
+        return paragraphs
 
     def _locator(self, path: Path, index: int) -> str:
         suffix = path.suffix.lower()

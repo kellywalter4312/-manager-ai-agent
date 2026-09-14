@@ -169,7 +169,7 @@ from src.control_center.observer import ControlCenter  # noqa: E402
 from src.control_center.render import render_overview  # noqa: E402
 from src.control_center.snapshot import snapshot  # noqa: E402
 from src.manager.proactive_experience import deliver_experience  # noqa: E402
-from src.services.artifacts.content import read_artifact_units  # noqa: E402
+from src.services.artifacts.content import SHARED_FILE_PREFIX, read_artifact_units  # noqa: E402
 from src.services.artifacts.ingestion import IngestionError, MAX_SUPPLIED_FILE_BYTES, ingest_supplied_file  # noqa: E402
 from src.services.artifacts.models import VoiceRecordingContent  # noqa: E402
 from src.services.artifacts.registration import register_new_artifact  # noqa: E402
@@ -993,7 +993,7 @@ def route_upload(
             shared = record_shared_file(
                 system.conversation,
                 description=(
-                    f"[shared a file] {artifact.latest.title} "
+                    f"{SHARED_FILE_PREFIX} {artifact.latest.title} "
                     f"(artifact {artifact.artifact_id}, {kind}, {readable})"
                 ),
                 addressed=agent,

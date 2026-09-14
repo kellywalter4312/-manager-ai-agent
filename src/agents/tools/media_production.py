@@ -65,6 +65,11 @@ _ASSET_PATH_PATTERN = re.compile(r"\S+\.(?:png|wav)", re.IGNORECASE)
 # _ASSET_PATH_PATTERN already established, extended to the container
 # formats a real source video plausibly arrives in.
 _VIDEO_PATH_PATTERN = re.compile(r"\S+\.(?:mp4|mov|mkv|webm|avi)", re.IGNORECASE)
+# Pre-Stage-9 Campaign 3: any recorded or uploaded audio or video a
+# transcription can be taken from - audio containers as well as video.
+_MEDIA_PATH_PATTERN = re.compile(
+    r"\S+\.(?:mp4|mov|mkv|webm|avi|wav|mp3|m4a|ogg|oga|opus|flac|aac)", re.IGNORECASE
+)
 # One or more "<start>-<end>" ranges, each side either a bare number of
 # seconds ("130.5") or an H:MM:SS/M:SS timecode ("1:02:10", "2:40") - the
 # canonical, single format this tool's own content string is expected to
@@ -73,7 +78,8 @@ _VIDEO_PATH_PATTERN = re.compile(r"\S+\.(?:mp4|mov|mkv|webm|avi)", re.IGNORECASE
 # and where needed, Brain reasoning over given text) - never this tool's,
 # which only ever does the mechanical cut.
 _TIME_RANGE_PATTERN = re.compile(
-    r"((?:\d+:)?(?:\d+:)?\d+(?:\.\d+)?)\s*-\s*((?:\d+:)?(?:\d+:)?\d+(?:\.\d+)?)"
+    # "1:20-1:45" or, as people say it, "from 0:00 to 0:02".
+    r"((?:\d+:)?(?:\d+:)?\d+(?:\.\d+)?)\s*(?:-|to|until|through)\s*((?:\d+:)?(?:\d+:)?\d+(?:\.\d+)?)"
 )
 
 
@@ -95,6 +101,36 @@ def find_video_path(content: str) -> str | None:
     request shape without duplicating this pattern in a second module."""
     match = _VIDEO_PATH_PATTERN.search(content)
     return match.group(0) if match else None
+
+
+def find_media_path(content: str) -> str | None:
+    """The first referenced audio or video path in ``content``, or None."""
+    match = _MEDIA_PATH_PATTERN.search(content)
+    return match.group(0) if match else None
+
+
+def _source_and_rest(content: str, pattern: "re.Pattern[str]") -> "tuple[Path | None, str]":
+    """The source file a request names, and the rest of the request with that
+    path removed: an existing file on the request's own first line (how a
+    capability passes a stored artifact, whose path may contain spaces),
+    otherwise the first path the pattern finds.
+
+    The rest is what time ranges are read from - never the path itself, whose
+    own digits ("run-2079-4d6c") would otherwise read as a range. Found at
+    runtime, Pre-Stage-9 Campaign 3."""
+    text = str(content or "")
+    lines = text.splitlines()
+    first_line = lines[0].strip() if lines else ""
+    if first_line and Path(first_line).is_file():
+        return Path(first_line), "\n".join(lines[1:])
+    found = pattern.findall(text)
+    if not found:
+        return None, text
+    return Path(found[0]), text.replace(found[0], " ", 1)
+
+
+def _source_path(content: str, pattern: "re.Pattern[str]") -> "Path | None":
+    return _source_and_rest(content, pattern)[0]
 
 
 def parse_clip_specs(content: str) -> "list[ClipSpec]":
@@ -333,16 +369,15 @@ class MediaProductionTool(Tool):
         a Tool only ever does the mechanical work it is precisely told to
         do (see this module's own docstring).
         """
-        video_paths = _VIDEO_PATH_PATTERN.findall(content)
-        if not video_paths:
+        source_path, rest = _source_and_rest(content, _VIDEO_PATH_PATTERN)
+        if source_path is None:
             raise ValueError(
                 "clipping needs a real source video path in the request; none was found"
             )
-        source_path = Path(video_paths[0])
         if not source_path.exists():
             raise ValueError(f"the referenced source video does not exist: {source_path}")
 
-        specs = parse_clip_specs(content)
+        specs = parse_clip_specs(rest)
         if not specs:
             raise ValueError(
                 "clipping needs at least one explicit 'start-end' time range "
@@ -399,14 +434,13 @@ class MediaProductionTool(Tool):
         constructed with - ``NullTranscriptionProvider`` by default,
         which refuses honestly rather than inventing text.
         """
-        video_paths = _VIDEO_PATH_PATTERN.findall(content)
-        if not video_paths:
+        source_path = _source_path(content, _MEDIA_PATH_PATTERN)
+        if source_path is None:
             raise ValueError(
-                "transcription needs a real source video path in the request; none was found"
+                "transcription needs a real source audio or video path in the request; none was found"
             )
-        source_path = Path(video_paths[0])
         if not source_path.exists():
-            raise ValueError(f"the referenced source video does not exist: {source_path}")
+            raise ValueError(f"the referenced source audio or video does not exist: {source_path}")
 
         source_bytes = source_path.read_bytes()
         audio_bytes = extract_audio_wav(source_bytes)

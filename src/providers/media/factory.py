@@ -160,6 +160,20 @@ def _build_video_understanding(
     if provider_name == "null":
         return NullTranscriptionProvider()
 
+    if provider_name == "windows":
+        # Pre-Stage-9 Campaign 3: offline recognition through Windows' own
+        # speech engine - no vendor, no key, no network. Honestly refused on
+        # any other platform rather than pretending to exist there.
+        from src.providers.media.local_transcription import WindowsSpeechTranscriptionProvider
+
+        if not WindowsSpeechTranscriptionProvider.available():
+            raise ProviderConfigurationError(
+                "The 'windows' video-understanding provider uses Windows' own speech "
+                "recogniser and is only available on Windows. Set "
+                "MANAGER_VIDEO_UNDERSTANDING=null or whisper instead."
+            )
+        return WindowsSpeechTranscriptionProvider()
+
     if provider_name == "whisper":
         credential = account.credential if account is not None else _whisper_credential(env)
         if credential is None:
@@ -183,7 +197,7 @@ def available_video_understanding_backends() -> list[str]:
     configured - "null" (honestly unavailable) plus one real,
     credentialed vendor, the identical shape
     ``available_video_generation_backends`` already takes."""
-    return ["null", "whisper"]
+    return ["null", "whisper", "windows"]
 
 
 def _build_video_generation(

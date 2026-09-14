@@ -122,10 +122,12 @@ class ArtifactProductionTool(Tool):
             return self._list_content(content)
         if operation == "derive_document":
             return self._derive_document(content)
+        if operation == "describe":
+            return self._describe_artifact(content)
         raise ValueError(
             f"unknown artifact_production operation {operation!r}; expected one of: "
             "create_document, revise_document, create_image, revise_image, get, find_latest, "
-            "read_content, list_content, derive_document"
+            "read_content, list_content, derive_document, describe"
         )
 
     # ------------------------------------------------------------------
@@ -208,6 +210,26 @@ class ArtifactProductionTool(Tool):
         if artifact is None or artifact.owner_agent != self._owner_agent:
             raise ArtifactError(f"no artifact found with id {artifact_id!r}")
         return artifact
+
+    def _describe_artifact(self, content: str) -> str:
+        """What one owned artifact *is* - title, type, content kind, and the
+        stored rendition a media capability can open - as JSON, whether or
+        not it has readable text (Pre-Stage-9 Campaign 3). How "this video"
+        or "this image" reaches the capability that can actually use it,
+        and how "read this file" can say honestly that the file just shared
+        is a video rather than silently reading a different one."""
+        artifact = self._owned(content)
+        latest = artifact.latest
+        return json.dumps({
+            "artifact_id": artifact.artifact_id,
+            "type": artifact.type,
+            "title": latest.title,
+            "content_kind": str(latest.metadata.get("content_kind", "")),
+            "filename": str(latest.metadata.get("filename", "")),
+            "media_type": str(latest.metadata.get("media_type", "")),
+            "renditions": dict(latest.renditions),
+            "readable_units": len(read_artifact_units(artifact)),
+        })
 
     def _read_content(self, content: str) -> str:
         """Every real text unit of one owned artifact, as JSON - a

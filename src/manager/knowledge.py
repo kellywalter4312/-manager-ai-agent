@@ -222,6 +222,60 @@ def _history_lines(history: "Callable[[], Sequence[str]] | None") -> tuple[str, 
         return ()
 
 
+def _shared_ids(shared_files: "Callable[[], Sequence[str]] | None") -> tuple[str, ...]:
+    if shared_files is None:
+        return ()
+    try:
+        return tuple(str(item).lower() for item in shared_files() if str(item).strip())
+    except Exception as exc:  # noqa: BLE001 - an unreadable record must not
+        # take an answer down with it.
+        logger.warning("could not read the conversation's shared files: %s", exc)
+        return ()
+
+
+def describe_artifact(tools: ToolSet, artifact_id: str) -> "dict | None":
+    """What one owned artifact is (title, kind, renditions, readable units),
+    readable or not, or None when it is not this agent's or the tool is not
+    granted - never a guess."""
+    if not tools.permits(ARTIFACT_TOOL):
+        return None
+    outcome = tools.invoke(ARTIFACT_TOOL, {"operation": "describe", "content": artifact_id})
+    if not outcome.ok:
+        return None
+    try:
+        described = json.loads(outcome.output)
+    except ValueError:
+        return None
+    return described if isinstance(described, dict) else None
+
+
+def resolve_shared_media(
+    query: str,
+    *,
+    tools: ToolSet,
+    history: "Callable[[], Sequence[str]] | None" = None,
+    shared_files: "Callable[[], Sequence[str]] | None" = None,
+    kinds: "Sequence[str]" = (),
+) -> "dict | None":
+    """The file a request points at, described - an explicit ``artifact <id>``
+    first, then the newest file shared in this conversation (whatever its
+    kind, when ``kinds`` is empty; otherwise the newest of those kinds).
+    Returns the description even for a file with no readable text, so the
+    caller can answer honestly about *that* file."""
+    candidates: list[str] = []
+    for artifact_id in artifact_ids_in([query]) + artifact_ids_in(_history_lines(history)) + _shared_ids(shared_files):
+        if artifact_id not in candidates:
+            candidates.append(artifact_id)
+    wanted = {str(kind).lower() for kind in kinds}
+    for artifact_id in candidates:
+        described = describe_artifact(tools, artifact_id)
+        if described is None:
+            continue
+        if not wanted or str(described.get("content_kind", "")).lower() in wanted or str(described.get("type", "")).lower() in wanted:
+            return described
+    return None
+
+
 def read_artifact_content(tools: ToolSet, artifact_id: str) -> "tuple[dict, tuple[ContentUnit, ...]] | None":
     """One artifact's real text units through the governed artifact tool,
     or None when it is not this agent's, has no readable text, or the tool
@@ -245,13 +299,18 @@ def resolve_content_sources(
     history: "Callable[[], Sequence[str]] | None" = None,
     limit: int = 1,
     fallback_latest: bool = True,
+    shared_files: "Callable[[], Sequence[str]] | None" = None,
 ) -> "list[tuple[dict, tuple[ContentUnit, ...]]]":
     """Which real documents a request is about, most relevant first:
 
     1. an explicit ``artifact <id>`` in the request itself;
     2. files shared (or produced) recently in this conversation, newest first;
-    3. only when ``fallback_latest`` - this agent's own most recent documents
-       and supplied files.
+    3. every file shared in this conversation (``shared_files``), newest first -
+       a share that has left the recent-history window is still "this file";
+    4. only when ``fallback_latest`` *and nothing was shared in this
+       conversation at all* - this agent's own most recent documents and
+       supplied files. A conversation that shared something never silently
+       reads a file it did not share (Pre-Stage-9 Campaign 3).
 
     Each candidate is actually read before it counts, so an id that names
     nothing readable is skipped rather than reported as a source.
@@ -259,7 +318,8 @@ def resolve_content_sources(
     if not tools.permits(ARTIFACT_TOOL) or limit <= 0:
         return []
     candidates: list[str] = []
-    for artifact_id in artifact_ids_in([query]) + artifact_ids_in(_history_lines(history)):
+    shared = _shared_ids(shared_files)
+    for artifact_id in artifact_ids_in([query]) + artifact_ids_in(_history_lines(history)) + shared:
         if artifact_id not in candidates:
             candidates.append(artifact_id)
 
@@ -271,7 +331,7 @@ def resolve_content_sources(
         if read is not None:
             found.append(read)
 
-    if len(found) < limit and fallback_latest:
+    if len(found) < limit and fallback_latest and not shared:
         listing = tools.invoke(ARTIFACT_TOOL, {"operation": "list_content", "content": str(limit + len(candidates))})
         if listing.ok:
             try:

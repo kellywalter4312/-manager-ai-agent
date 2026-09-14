@@ -75,6 +75,8 @@ from src.manager.knowledge import (
     gather_knowledge_evidence,
     read_artifact_content,
     resolve_content_sources,
+    resolve_shared_media,
+    describe_artifact,
 )
 from src.services.artifacts.content import (
     ContentUnit,
@@ -87,7 +89,7 @@ from src.services.artifacts.ingestion import SUPPLIED_FILE_TYPE
 from src.manager.memory_policy import MemoryCategory
 from src.manager.recognition import Recognition
 from src.agents.tools.connection import tool_name_for
-from src.agents.tools.media_production import find_video_path, parse_clip_specs
+from src.agents.tools.media_production import find_media_path, find_video_path, parse_clip_specs
 from src.providers.celebration import CelebrationReaction
 from src.providers.connection import Connection
 from src.providers.connection_resolver import ConnectionResolver
@@ -391,6 +393,12 @@ class CapabilityRequest:
     # older caller) - every caller that reads this treats an absent or
     # empty history exactly as it already treats no notes at all.
     history: "Callable[[], Sequence[str]] | None" = None
+    # Pre-Stage-9 Campaign 3: the ids of every file shared in this
+    # conversation, newest first - the room's own record of what was handed
+    # over, never the Conversation object and never limited to the short
+    # recent-history window above (a file shared a dozen lines ago is still
+    # "this file"). None when no conversation reaches this request.
+    shared_files: "Callable[[], Sequence[str]] | None" = None
     # Final Pre-Phase Interaction Completion: where a pending
     # clarification question or an in-progress guided activity lives -
     # see src/manager/activity_session.py's own docstring for why this
@@ -2426,6 +2434,33 @@ IMAGE_ANALYSIS_MARKERS: tuple[str, ...] = (
 _IMAGE_PATH_PATTERN = re.compile(r"\S+\.(?:png|jpg|jpeg|gif|webp)", re.IGNORECASE)
 
 
+# Pre-Stage-9 Campaign 3: the stored rendition a media capability opens - in
+# the order a real file is most usefully read, never a guess at one.
+_MEDIA_RENDITION_ORDER = (
+    "mp4", "mov", "mkv", "webm", "avi", "wav", "mp3", "m4a", "ogg", "oga", "opus", "flac", "aac",
+    "png", "jpg", "jpeg", "gif", "webp",
+)
+_A_OR_AN = re.compile(r"^[aeiou]", re.IGNORECASE)
+
+
+def _rendition_path(described: "dict | None") -> "str | None":
+    renditions = (described or {}).get("renditions") or {}
+    for fmt in _MEDIA_RENDITION_ORDER:
+        if fmt in renditions:
+            return str(renditions[fmt])
+    return str(next(iter(renditions.values()))) if renditions else None
+
+
+def _shared_media(request: CapabilityRequest, kinds: "Sequence[str]") -> "tuple[dict | None, str | None]":
+    """The newest file of one of ``kinds`` this request points at or this
+    conversation shared, and the stored file it can be opened from."""
+    described = resolve_shared_media(
+        request.task.description, tools=request.tools, history=request.history,
+        shared_files=request.shared_files, kinds=kinds,
+    )
+    return described, _rendition_path(described)
+
+
 def image_analysis_intent(task: Task, participants: Sequence[str] = ()) -> bool:
     return _marker_present(task.description, IMAGE_ANALYSIS_MARKERS)
 
@@ -2455,16 +2490,22 @@ def image_analysis(request: CapabilityRequest) -> TaskResult:
             "so than guess.",
         )
 
-    match = _IMAGE_PATH_PATTERN.search(request.task.description)
-    if match is None:
-        return TaskResult.failure(
-            request.task, request.own_name,
-            "I don't see an image file referenced in that request.",
-        )
-
     from pathlib import Path
 
-    image_path = Path(match.group(0))
+    match = _IMAGE_PATH_PATTERN.search(request.task.description)
+    if match is not None:
+        image_path = Path(match.group(0))
+    else:
+        # Pre-Stage-9 Campaign 3: the image the person shared in this
+        # conversation, resolved to its stored file - no server path needed.
+        _described, shared_path = _shared_media(request, ("image",))
+        if shared_path is None:
+            return TaskResult.failure(
+                request.task, request.own_name,
+                "I don't see an image in that request or shared in this conversation - "
+                "attach one, or name it with 'artifact <id>'.",
+            )
+        image_path = Path(shared_path)
     if not image_path.is_file():
         return TaskResult.failure(
             request.task, request.own_name,
@@ -2757,6 +2798,7 @@ def create_artifact(request: CapabilityRequest) -> TaskResult:
     if document_conversion_intent(text):
         found = resolve_content_sources(
             text, tools=request.tools, history=request.history, limit=1,
+            shared_files=request.shared_files,
             # "a PDF version of this" points at the most recent content even
             # after the share has left the recent-conversation window; a
             # request naming no content at all ("a PDF of my ideas") does not.
@@ -2879,7 +2921,9 @@ def revise_artifact(request: CapabilityRequest) -> TaskResult:
         or _marker_present(text, _REVISE_CONTENT_MARKERS)
         or _REPLACEMENT_PATTERN.search(text)
     ):
-        found = resolve_content_sources(text, tools=request.tools, history=request.history, limit=1)
+        found = resolve_content_sources(
+            text, tools=request.tools, history=request.history, limit=1, shared_files=request.shared_files,
+        )
         if not found:
             return TaskResult.failure(
                 request.task, request.own_name,
@@ -3513,9 +3557,13 @@ def clip_video(request: CapabilityRequest) -> TaskResult:
     text = request.task.description
     video_path = find_video_path(text)
     if video_path is None:
+        # Pre-Stage-9 Campaign 3: the video shared in this conversation.
+        _described, video_path = _shared_media(request, ("video",))
+    if video_path is None:
         return TaskResult.failure(
             request.task, request.own_name,
-            "Which video? I don't see a video file referenced in this request.",
+            "Which video? I don't see a video referenced in this request or shared in "
+            "this conversation - attach one, or name it with 'artifact <id>'.",
         )
 
     if not request.tools.permits("media_production"):
@@ -3590,8 +3638,12 @@ def clip_video(request: CapabilityRequest) -> TaskResult:
                 "I read the transcript but couldn't settle on real clip "
                 f"boundaries from it ({decision.reason or 'no usable answer'}).",
             )
-        content = f"{video_path} {decision.reason}"
+        content = f"{video_path}\n{decision.reason}"
 
+    if not content.startswith(video_path):
+        # The source travels on its own first line: a stored artifact's path
+        # may contain spaces a path pattern cannot see.
+        content = f"{video_path}\n{content}"
     outcome = request.tools.invoke("media_production", {"operation": "clip", "content": content})
     if not outcome.ok:
         return TaskResult.failure(
@@ -6261,7 +6313,28 @@ def read_content(request: CapabilityRequest) -> TaskResult:
         )
 
     text = request.task.description
-    found = resolve_content_sources(text, tools=request.tools, history=request.history, limit=1)
+    # Pre-Stage-9 Campaign 3: "read this file" means the file just shared.
+    # When that file has no text (a video, an image, a recording) the honest
+    # answer is about *that* file - never a different file read instead.
+    if not _POINTS_AT_A_DOCUMENT.search(text):
+        newest = resolve_shared_media(
+            text, tools=request.tools, history=request.history, shared_files=request.shared_files,
+        )
+        if newest is not None and not int(newest.get("readable_units") or 0):
+            kind = str(newest.get("content_kind") or newest.get("type") or "file").replace("_", " ")
+            article = "an" if _A_OR_AN.match(kind) else "a"
+            hint = (
+                " Say \"transcribe this\" and I'll turn its speech into text."
+                if kind in ("audio", "video", "voice recording") else ""
+            )
+            return TaskResult.failure(
+                request.task, request.own_name,
+                f"'{newest.get('title')}', the file you shared most recently, is {article} {kind} "
+                f"with no readable text, so there are no words in it for me to read.{hint}",
+            )
+    found = resolve_content_sources(
+        text, tools=request.tools, history=request.history, limit=1, shared_files=request.shared_files,
+    )
     if not found:
         return TaskResult.failure(
             request.task, request.own_name,
@@ -6299,6 +6372,14 @@ def read_content(request: CapabilityRequest) -> TaskResult:
             "speak_in_full": True,
         },
     )
+
+
+# A request that names a document-like format ("read this PDF") is about a
+# document even when the newest share is something else. Format nouns only.
+_POINTS_AT_A_DOCUMENT = re.compile(
+    r"\b(?:pdf|document|doc|docx|spreadsheet|presentation|slides?|handout|word\s+file|text\s+file|notes?)\b",
+    re.IGNORECASE,
+)
 
 
 READ_CONTENT = ManagerCapability(
@@ -7389,6 +7470,98 @@ CALENDAR = ManagerCapability(
 # here and declared in IDENTITY.md - and ManagerAgent, the router and the
 # assessor are untouched, because none of them has ever known what a
 # capability is. They route to an agent; this decides what that agent does.
+
+# ---------------------------------------------------------------------------
+# Pre-Stage-9 Campaign 3: turning shared or recorded speech into text
+# ---------------------------------------------------------------------------
+
+# Phrasings that ask for spoken content as text - grammar, never a subject.
+_TRANSCRIBE_MARKERS: tuple[str, ...] = (
+    "transcribe this", "transcribe that", "transcribe the", "transcribe my", "transcribe it",
+    "make a transcript", "give me a transcript", "get a transcript",
+    "what does this recording say", "what does the recording say", "what does my recording say",
+    "what does this audio say", "what does the audio say", "what is said in this", "what's said in this",
+)
+
+
+# A request that names a recording rather than a shared file - grammar only.
+_NAMES_A_RECORDING = re.compile(r"\b(?:recording|recordings|voice\s+note|voice\s+memo)\b", re.IGNORECASE)
+
+def transcribe_media_intent(task: Task, participants: Sequence[str] = ()) -> bool:
+    return _marker_present(task.description, _TRANSCRIBE_MARKERS)
+
+
+def transcribe_media(request: CapabilityRequest) -> TaskResult:
+    """Real speech-to-text over the audio or video this request points at,
+    shared in this conversation, or recorded most recently - through the
+    governed ``media_production`` tool and whichever transcription provider
+    is actually configured. Never a fabricated transcript: an unconfigured
+    provider is reported as exactly that."""
+    if not request.tools.permits("media_production"):
+        equipped = ", ".join(request.tools.names()) or "none"
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "I can transcribe audio and video, but the underlying 'media_production' "
+            f"capability is not installed. Currently equipped: {equipped}.",
+        )
+
+    text = request.task.description
+    source = find_media_path(text)
+    title = source or ""
+    artifact_id = ""
+
+    def _latest_recording() -> "tuple[str | None, str, str]":
+        if request.recall is None:
+            return None, "", ""
+        for record in request.recall(kind="audio_recording", limit=1):
+            recorded = describe_artifact(request.tools, str((record.context or {}).get("artifact_id") or ""))
+            if recorded is not None:
+                return _rendition_path(recorded), str(recorded.get("title") or ""), str(recorded.get("artifact_id") or "")
+        return None, "", ""
+
+    # "Transcribe my recording" names a recording: the latest one is meant,
+    # even when a file was shared in this conversation too (found at runtime).
+    names_a_recording = bool(_NAMES_A_RECORDING.search(text))
+    if source is None and names_a_recording:
+        source, title, artifact_id = _latest_recording()
+    if source is None:
+        described, source = _shared_media(request, ("audio", "video", "voice_recording"))
+        if described is not None:
+            title, artifact_id = str(described.get("title") or ""), str(described.get("artifact_id") or "")
+    if source is None and not names_a_recording:
+        source, title, artifact_id = _latest_recording()
+    if source is None:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "Which recording? I don't see audio or video in this request, shared in this "
+            "conversation, or recorded yet.",
+        )
+
+    outcome = request.tools.invoke("media_production", {"operation": "transcribe", "content": source})
+    name = f"'{title}'" if title else "that recording"
+    if not outcome.ok:
+        return TaskResult.failure(
+            request.task, request.own_name, f"I couldn't transcribe {name}: {outcome.error}",
+        )
+    return TaskResult.success(
+        request.task, request.own_name, f"Transcript of {name}:\n{outcome.output}",
+        payload={"handled_by": "transcribe_media", "artifact_id": artifact_id},
+    )
+
+
+TRANSCRIBE_MEDIA = ManagerCapability(
+    name="transcribe_media",
+    capabilities=frozenset({"transcribe", "transcript", "transcription"}),
+    handle=transcribe_media,
+    description=(
+        "Turns the speech in shared, uploaded or recorded audio and video into a real, "
+        "timestamped transcript through the configured transcription provider - "
+        "honestly refused when none is configured."
+    ),
+    claims=transcribe_media_intent,
+    scoreable=False,
+)
+
 MANAGER_CAPABILITIES: dict[str, ManagerCapability] = {
     SELF_DESCRIPTION.name: SELF_DESCRIPTION,
     ROSTER_REPORT.name: ROSTER_REPORT,
@@ -7436,6 +7609,8 @@ MANAGER_CAPABILITIES: dict[str, ManagerCapability] = {
     CALENDAR.name: CALENDAR,
     # REPAIR-01 (PDF/document capability): Content -> Voice.
     READ_CONTENT.name: READ_CONTENT,
+    # Pre-Stage-9 Campaign 3: shared or recorded audio/video -> text.
+    TRANSCRIBE_MEDIA.name: TRANSCRIBE_MEDIA,
 }
 
 # Used when a task reaches the Manager without matching any handler's words.

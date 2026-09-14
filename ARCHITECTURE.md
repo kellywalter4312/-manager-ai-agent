@@ -8773,3 +8773,84 @@ in Half Brain was acknowledged behind a "no reasoning capability" refusal
 | MEM-06 plain acknowledgement of a pure "remember that" | VERIFIED WORKING |
 | Restart persistence of a correction | VERIFIED WORKING |
 | Specialist (Arthur) sees the corrected knowledge | VERIFIED WORKING |
+
+### 52.33 Pre-Stage-9 Campaign 3 - shared files and media are usable ecosystem artifacts
+
+**What the Master Pre-Stage-9 Audit found (runtime, Half Brain).** "Read this
+file to me" read a Control Center upload that was never shared in the
+conversation (FIL-04); an uploaded image got "I don't see an image file
+referenced" and an uploaded video or audio fell to open conversation, because
+image analysis, clipping and transcription all needed a server path typed into
+the request (FIL-05, IMG-02, VID-01); a Word document had no reader (RD-02);
+nothing could transcribe a recording (REC-04).
+
+**Root causes.** Capabilities only see the last six utterances, so a share
+older than that fell out of view and the resolver's fallback picked any owned
+file; media capabilities had no route from an artifact to its stored bytes.
+
+**The repair.**
+
+- `CapabilityRequest.shared_files` / `ManagerSkills.bind_shared_files`: a
+  narrow, read-only list of the artifact ids shared in this conversation,
+  bound in `scripts/control_center.py::build` from the room's own record
+  (`SHARED_FILE_PREFIX`, one constant shared with the upload route) - never
+  limited to the history window. `resolve_content_sources` checks explicit
+  ids, recent history, then every share, and falls back to the newest owned
+  file only when the conversation shared nothing.
+- `artifact_production` gained a `describe` operation (title, type, content
+  kind, stored renditions, readable-unit count, readable or not);
+  `knowledge.resolve_shared_media` returns the file a request points at even
+  when it has no text, so `read_content` answers honestly about *that* file
+  ("'movie.mp4', the file you shared most recently, is a video with no
+  readable text...") instead of reading a different one; "read this document"
+  still reads the document.
+- `image_analysis` and `clip_video` resolve the image/video shared in the
+  conversation to its stored file when no path is typed. The media tool reads
+  a stored source from the request's own first line (repository paths
+  contain spaces) and reads time ranges only from the rest of the request -
+  found at runtime, a path segment like "...-2079-4d6c..." had been read as
+  the range 2079-4. "from 0:00 to 0:01" is accepted as a time range.
+- `transcribe_media` (new capability): "transcribe this audio/video", "what
+  does this recording say" - a referenced path, the file shared in the
+  conversation, or the latest voice recording (preferred when the request
+  names a recording, found at runtime), through the governed
+  `media_production` transcribe operation, which now accepts audio as well
+  as video.
+- `src/providers/media/local_transcription.py`: `WindowsSpeechTranscriptionProvider`,
+  selectable as `video_understanding=windows` - Windows' own offline
+  recogniser reading the extracted WAV, real timestamped segments, no vendor,
+  key, network or new dependency; `requires_credential` is false for it in the
+  ecosystem registry. Honest boundary: recognised speech was machine-
+  synthesised speech, not a human voice on a physical microphone.
+- `DocumentKnowledgeProvider` reads `.docx` (standard library `zipfile` +
+  `xml.etree`, table cells included; a malformed file is skipped, never fatal).
+
+**Verification.**
+
+- `tests/test_campaign_03_file_media_interop.py` plus the neighbouring media,
+  clipping, transcription, document, artifact, ecosystem and routing suites.
+- Real served system (`scripts/serve_ui.py::build_live_system`, isolated
+  scratch data, no Brain provider, production `data/` hash unchanged), with
+  real files only (a real OOXML .docx, a real PNG, an FFmpeg-made MP4, Windows-
+  synthesised speech as WAV and WebM): a shared Word document read aloud by
+  paragraph; "read this file" after eight intervening turns read the
+  conversation's file, never the Control Center upload; with a video shared
+  last it named the video honestly while "read this document" still read the
+  document; the shared image reached image analysis (Half Brain: honest "no
+  reasoning capability"); "clip this video from 0:00 to 0:01" produced one
+  1.00s clip linked to its source and downloadable as real MP4; "transcribe this
+  audio" transcribed the shared WebM ("The meeting is moved to Friday
+  afternoon / please bring the quarterly report"); "transcribe my recording"
+  transcribed the saved recording ("Please bring the quarterly report"), not
+  the shared file; with no provider the refusal was honest; Control Center
+  listed `windows` with no credential required.
+
+| Requirement | Status |
+|---|---|
+| FIL-04 "this file" resolves the conversation's own share | VERIFIED WORKING |
+| FIL-05 shared media usable by capabilities without a server path | VERIFIED WORKING |
+| RD-02 Word documents read | VERIFIED WORKING |
+| IMG-02 shared image reaches image analysis | VERIFIED WORKING for resolution; the vision answer itself BLOCKED (no funded vision model) |
+| VID-01 basic clipping of a shared video | VERIFIED WORKING |
+| REC-04 / audio transcription (shared audio, video, recordings) | VERIFIED WORKING with the local Windows recogniser on synthesised speech; a live human voice on a physical microphone NOT VERIFIED; Whisper BLOCKED (unfunded) |
+| Honest refusal for a format a capability cannot process | VERIFIED WORKING |

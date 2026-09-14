@@ -86,6 +86,7 @@ class ManagerSkills(BaseAgent):
         connections: "ConnectionResolver | None" = None,
         calendar: "Calendar | None" = None,
         history: "Callable[[], Sequence[str]] | None" = None,
+        shared_files: "Callable[[], Sequence[str]] | None" = None,
         activity_sessions: "ActivitySessions | None" = None,
         activity_brain: "ActivityBrainOps | None" = None,
         discover_voices: "Callable[[], tuple[Any, ...]] | None" = None,
@@ -221,6 +222,9 @@ class ManagerSkills(BaseAgent):
         # bind_retain already performs. A handler that reads this before
         # it is bound gets an honest empty history, never a crash.
         self._history = history
+        # Pre-Stage-9 Campaign 3: the ids of files shared in this conversation,
+        # bound once the room exists - see bind_shared_files.
+        self._shared_files = shared_files
         # Final Pre-Phase Interaction Completion: where a pending
         # clarification question or an in-progress guided activity lives
         # while this Manager is running - see activity_session.py's own
@@ -319,6 +323,12 @@ class ManagerSkills(BaseAgent):
         never a second implementation of "what was recently said."
         """
         self._history = history
+
+    def bind_shared_files(self, shared_files: "Callable[[], Sequence[str]]") -> None:
+        """Wire in the room's own record of which files were shared, once the
+        room exists - the identical construction-order reason
+        bind_conversation_history has."""
+        self._shared_files = shared_files
 
     def bind_discover_voices(self, discover_voices: "Callable[[], tuple[Any, ...]]") -> None:
         """Wire the real, live voice-discovery call in, once the speech
@@ -649,6 +659,7 @@ class ManagerSkills(BaseAgent):
                 connections=self._connections,
                 calendar=self._calendar,
                 history=self._history,
+                shared_files=self._shared_files,
                 activity_sessions=self._activity_sessions,
                 activity_brain=self._activity_brain,
                 discover_voices=self._discover_voices,

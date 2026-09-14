@@ -66,7 +66,7 @@ from src.agents.tools.live_information import LiveInformationTool  # noqa: E402
 from src.agents.tools.web_search import WebSearchTool  # noqa: E402
 from src.agents.tools.document_generation import DocumentGenerationTool  # noqa: E402
 from src.agents.tools.artifact_production import ArtifactProductionTool  # noqa: E402
-from src.services.artifacts.content import read_artifact_units  # noqa: E402
+from src.services.artifacts.content import SHARED_FILE_PREFIX, artifact_ids_in, read_artifact_units  # noqa: E402
 from src.services.artifacts.delivery import available_delivery_methods  # noqa: E402
 from src.services.artifacts.ingestion import IngestionError, ingest_supplied_file  # noqa: E402
 from src.agents.tools.media_production import MediaProductionTool  # noqa: E402
@@ -705,6 +705,14 @@ def build(settings: Settings):
             lambda: [f"{u.speaker}: {u.text}" for u in conversation.latest(history_limit)]
             if len(conversation)
             else []
+        )
+        # Pre-Stage-9 Campaign 3: every file shared in this room, newest first,
+        # read from the room's own record of the shares - never limited to the
+        # short history window above.
+        manager.own_skills.bind_shared_files(
+            lambda: artifact_ids_in(
+                u.text for u in conversation.utterances if u.text.startswith(SHARED_FILE_PREFIX)
+            )
         )
         # Agent-autonomous voice selection checkpoint: bound to whichever
         # real speech adapter runtime.speech actually is - never a second

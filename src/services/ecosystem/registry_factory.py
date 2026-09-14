@@ -113,7 +113,8 @@ def build_ecosystem_registry(settings: Settings) -> EcosystemRegistry:
                 replace(settings, video_understanding=key),
                 video_understanding_account=_credentialed_account(key, credential),
             ),
-            requires_credential=lambda key: key != "null",
+            # "windows" is Windows' own offline recogniser - no key to hold.
+            requires_credential=lambda key: key not in ("null", "windows"),
             dependents=(
                 "the media_production capability's transcribe operation "
                 "(feeding clip_video's real, audio-derived moment selection)",
