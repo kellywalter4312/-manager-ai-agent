@@ -311,6 +311,9 @@ class TestThisIsNotASecondRouter:
             "create_diagram",
             "create_task", "current_datetime", "forget",
             "general_assistance", "generate_document", "image_analysis",
+            # Pre-Stage-9 Campaign 8: an authenticity question is recognised by
+            # its shape (an edited/fake/generated word about a picture, asked).
+            "image_authenticity",
             "knowledge", "list_recordings", "list_tasks", "live_information",
             "media_production",
             "milestone_recognition", "participant_invitation", "personal_context",

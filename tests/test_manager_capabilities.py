@@ -246,6 +246,9 @@ class TestHandlersAreSelectedThroughTheRegistry:
             # to whichever provider genuinely supports it (today:
             # Anthropic only).
             "image_analysis",
+            # Pre-Stage-9 Campaign 8: what an image itself shows about being
+            # edited or generated - evidence, never a verdict.
+            "image_authenticity",
             # Stage 18: settled general knowledge and history as one
             # capability for every subject - a kind of knowing, not a topic.
             # What the user is studying is personal context (Pre-Stage-9

@@ -2463,6 +2463,87 @@ def _shared_media(request: CapabilityRequest, kinds: "Sequence[str]") -> "tuple[
     return described, _rendition_path(described)
 
 
+# ---------------------------------------------------------------------------
+# Pre-Stage-9 Campaign 8 (IMG-03): whether an image may be edited or generated.
+#
+# "Was this photo edited?", "is this picture fake?", "check if this image is AI
+# generated". Answered from what the file itself shows - metadata, editor and
+# generator traces, Content Credentials, JPEG error-level analysis - through a
+# local examination with no model, so it works identically in Half Brain. Never
+# a verdict: the reply says plainly that certainty needs a trained forensic
+# model this system does not have.
+# ---------------------------------------------------------------------------
+
+_AUTHENTICITY_WORDS = re.compile(
+    r"\b(?:edited|photoshopped|manipulated|doctored|altered|tampered|retouched|faked?|genuine|authentic|"
+    r"ai[-\s]?generated|generated\s+by\s+ai|deepfake|real\s+or\s+fake|been\s+changed)\b",
+    re.IGNORECASE,
+)
+_AUTHENTICITY_SUBJECT = re.compile(r"\b(?:image|photo|picture|pic|screenshot|selfie|this|it)\b", re.IGNORECASE)
+_AUTHENTICITY_ASK = re.compile(r"\?|\b(?:is|was|has|have|did|does|check|tell\s+me|detect|find\s+out|can\s+you\s+see)\b", re.IGNORECASE)
+_NOT_AN_IMAGE_WORDS = re.compile(r"\b(?:document|pdf|doc|docx|file\s+name|text|essay|spreadsheet|video|recording)\b", re.IGNORECASE)
+
+
+def image_authenticity_intent(task: Task, participants: Sequence[str] = ()) -> bool:
+    text = str(task.description or "")
+    if _NOT_AN_IMAGE_WORDS.search(text) and not re.search(r"\b(?:image|photo|picture|pic|screenshot|selfie)\b", text, re.IGNORECASE):
+        return False
+    return bool(_AUTHENTICITY_WORDS.search(text) and _AUTHENTICITY_SUBJECT.search(text) and _AUTHENTICITY_ASK.search(text))
+
+
+def image_authenticity(request: CapabilityRequest) -> TaskResult:
+    """Examine the named or shared image and report the evidence."""
+    from pathlib import Path
+
+    from src.providers.media.image_forensics import ImageForensicsError, examine_image
+
+    described = None
+    match = _IMAGE_PATH_PATTERN.search(request.task.description)
+    if match is not None:
+        image_path = Path(match.group(0))
+    else:
+        described, shared_path = _shared_media(request, ("image",))
+        if shared_path is None:
+            return TaskResult.failure(
+                request.task, request.own_name,
+                "Which image? Share it in this conversation (or name it with 'artifact <id>') and I'll "
+                "check what it shows about being edited or generated.",
+            )
+        image_path = Path(shared_path)
+    if not image_path.is_file():
+        return TaskResult.failure(request.task, request.own_name, f"I couldn't find an image at '{image_path}'.")
+    try:
+        evidence = examine_image(image_path)
+    except ImageForensicsError as exc:
+        return TaskResult.failure(request.task, request.own_name, f"I couldn't examine that image: {exc}")
+    if described and described.get("title"):
+        # The file as the person shared it, never its stored rendition's name.
+        evidence = dataclass_replace(evidence, filename=str(described["title"]))
+    return TaskResult.success(
+        request.task, request.own_name, evidence.describe(),
+        payload={
+            "handled_by": "image_authenticity",
+            "editors_named": evidence.editors_named,
+            "generators_named": evidence.generators_named,
+            "content_credentials": evidence.content_credentials,
+            "uneven_recompression": evidence.uneven_recompression,
+        },
+    )
+
+
+IMAGE_AUTHENTICITY = ManagerCapability(
+    name="image_authenticity",
+    capabilities=frozenset({"image", "authenticity"}),
+    handle=image_authenticity,
+    description=(
+        "Reports what an image itself shows about being edited or AI-generated - metadata, editor and "
+        "generator traces, Content Credentials, JPEG error-level analysis - as evidence, never a verdict."
+    ),
+    claims=image_authenticity_intent,
+    scoreable=False,
+)
+
+
 def image_analysis_intent(task: Task, participants: Sequence[str] = ()) -> bool:
     return _marker_present(task.description, IMAGE_ANALYSIS_MARKERS)
 
@@ -7754,6 +7835,8 @@ MANAGER_CAPABILITIES: dict[str, ManagerCapability] = {
     CORRECT_MEMORY.name: CORRECT_MEMORY,
     LIVE_INFORMATION.name: LIVE_INFORMATION,
     IMAGE_ANALYSIS.name: IMAGE_ANALYSIS,
+    # Pre-Stage-9 Campaign 8: was this image edited or generated - evidence only.
+    IMAGE_AUTHENTICITY.name: IMAGE_AUTHENTICITY,
     GENERATE_DOCUMENT.name: GENERATE_DOCUMENT,
     CREATE_ARTIFACT.name: CREATE_ARTIFACT,
     REVISE_ARTIFACT.name: REVISE_ARTIFACT,

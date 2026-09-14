@@ -9128,3 +9128,67 @@ already own it; nothing is read a second way.**
 | RD-02 Word documents read aloud | VERIFIED WORKING (Campaign 3, suites re-run) |
 | REC-04 transcribe recordings and audio | VERIFIED WORKING (Campaign 3, suites re-run) |
 | Spoken output of long readings | VERIFIED WORKING for synthesis with real Kokoro; playback on this machine's speakers NOT VERIFIED |
+
+### 52.38 Pre-Stage-9 Campaign 8 - image generation on its own axis; honest evidence about edited images
+
+**What the Master Pre-Stage-9 Audit found.** Image generation was fixed inside
+whichever media backend was chosen, with no image category the Control Center
+could list or select (IMG-01 partial, PRV-07 not found); only the reasoning
+provider could be chosen from the Control Center at all, every other backend
+needed an environment variable. Nothing could say whether an image had been
+edited or generated (IMG-03). Clipping a shared video (VID-01) and resolving a
+shared image (IMG-02) were repaired in Campaign 3 and are re-verified here.
+
+**The repair.**
+
+- ``Settings.image_generation`` - "media" (the media backend's own illustrator,
+  unchanged default), "null", "local" or "pollinations".
+  ``build_media`` replaces only the illustrator; narration, composition,
+  clipping and transcription are untouched. ``image_generation_provider`` is
+  registered in the ecosystem registry, so it is listed and validated.
+- ``provider <category> use <backend>`` works for every backend category with a
+  Settings field (``GOVERNED_BACKEND_FIELDS``): the backend is checked against
+  the category's own catalog and constructed, the choice is saved as
+  ``provider.<category>`` in the governed config, and ``build`` applies every
+  saved choice (``governed_backend_settings``). These are bound into tools at
+  startup, so the reply says plainly the choice is live on the next start (or a
+  session ``reload``); the reasoning provider still switches live (Campaign 4).
+- ``src/providers/media/image_forensics.py`` - ``examine_image``: camera
+  metadata, capture time, the software that last wrote the file, editor and
+  generator names in metadata, Content Credentials (C2PA/JUMBF) markers,
+  generation settings in PNG text, and JPEG error-level analysis summarised by
+  cell (median, peak, fraction recompressing unusually). ``image_authenticity``
+  (new capability) answers "was this photo edited?", "is this picture fake?",
+  "check if this image is AI generated" for the named or shared image, naming it
+  as it was shared. Every answer is evidence and says certainty needs a trained
+  forensic model this system does not have. "What's in this image?" remains a
+  vision question.
+
+**Verification.**
+
+- ``tests/test_campaign_08_images.py`` (default illustrator kept; each backend
+  replaces only the illustrator; unknown backend refused; category listed;
+  ``use`` saved and honoured by a restart; confirmed write; camera metadata and
+  even recompression; editor trace and uneven region; generation settings;
+  refusal of a verdict; non-image error; question grammar and exclusions; shared
+  image examined; nothing shared asks which) plus the registry, settings,
+  capability-registry, identity-resolution and provider-switch suites.
+- Real served system (isolated scratch data, production ``data/`` hash
+  unchanged, Half Brain, no vendor reached): through the confirmed served route
+  ``image_generation_provider`` was listed and set to ``local``, a bogus backend
+  refused; a fresh start used the local renderer and produced a real 640x360
+  PNG; an uploaded JPEG saved with a painted region and a Photoshop tag was
+  reported with its editor and an uneven 5% region, an untouched camera JPEG as
+  even with its camera and time, a PNG with generation settings as carrying
+  generator traces - each named as shared; "I edited the essay yesterday" was
+  not claimed; "clip this video from 0:00 to 0:01" on an FFmpeg-made MP4
+  produced a real 1.00 s clip.
+
+| Requirement | Status |
+|---|---|
+| IMG-01 generate an image | VERIFIED WORKING with the local renderer; real AI image generation (pollinations, an outward call) NOT VERIFIED - not exercised without authorization |
+| PRV-07 image generation is a pluggable, Control-Center-selectable provider | VERIFIED WORKING |
+| Every backend category selectable from the Control Center | VERIFIED WORKING (saved and honoured on start; only the reasoning provider switches mid-session) |
+| IMG-03 whether an image was edited or generated | VERIFIED PARTIAL - metadata, editor/generator traces and JPEG error-level evidence VERIFIED WORKING on constructed images; a trained forensic verdict NOT FOUND (no model); real camera photographs and real generator outputs NOT VERIFIED |
+| IMG-02 a shared image reaches image analysis | VERIFIED WORKING for resolution (Campaign 3); the vision answer BLOCKED (no funded vision model) |
+| VID-01 clip a shared video | VERIFIED WORKING |

@@ -38,6 +38,7 @@ from src.providers.factory import available_providers, build_provider
 from src.providers.knowledge_factory import available_knowledge_providers, build_knowledge_provider
 from src.providers.live_info_factory import available_live_info_providers, build_live_info_provider
 from src.providers.media.factory import (
+    available_image_generation_backends,
     available_media_backends,
     available_video_generation_backends,
     available_video_understanding_backends,
@@ -130,6 +131,18 @@ def build_ecosystem_registry(settings: Settings) -> EcosystemRegistry:
             build=lambda key, credential: build_media(replace(settings, media=key)),
             requires_credential=lambda key: False,
             dependents=("the media_production capability's narrate/illustrate/compose operations",),
+        )
+    )
+
+    # Pre-Stage-9 Campaign 8 (PRV-07): image generation on its own axis.
+    registry.register(
+        GenericCategoryAdapter(
+            "image_generation_provider",
+            list_backends=available_image_generation_backends,
+            active_key=lambda: settings.image_generation,
+            build=lambda key, credential: build_media(replace(settings, image_generation=key)),
+            requires_credential=lambda key: False,
+            dependents=("the media_production capability's illustrate operation", "create_diagram"),
         )
     )
 

@@ -320,6 +320,32 @@ _BUILDERS: dict[str, Callable[[Settings, VideoGenerationProvider, TranscriptionP
 }
 
 
+def available_image_generation_backends() -> list[str]:
+    """Every image-generation backend that can be chosen on its own axis -
+    "media" (the media backend's own illustrator), none, the local renderer,
+    or a real AI image vendor."""
+    return ["media", "null", "local", "pollinations"]
+
+
+def _build_image_generation(settings: Settings) -> "ImageProvider | None":
+    """The illustrator chosen by ``settings.image_generation``, or None to
+    keep the media backend's own. Construction is inert - nothing is reached
+    until an image is actually requested."""
+    name = settings.image_generation
+    if name == "media":
+        return None
+    if name == "null":
+        return NullImageProvider()
+    if name == "local":
+        return LocalTitleCardImageProvider()
+    if name == "pollinations":
+        return PollinationsImageProvider()
+    raise ValueError(
+        f"Unknown image-generation backend {name!r}. "
+        f"Available: {', '.join(available_image_generation_backends())}"
+    )
+
+
 def available_media_backends() -> list[str]:
     """Every media backend name that can currently be configured."""
     return sorted(_BUILDERS)
@@ -358,5 +384,11 @@ def build_media(
     video_generator = _build_video_generation(settings, env, video_generation_account)
     transcriber = _build_video_understanding(settings, env, video_understanding_account)
     tools = builder(settings, video_generator, transcriber)
+    illustrator = _build_image_generation(settings)
+    if illustrator is not None:
+        # Pre-Stage-9 Campaign 8: only the image collaborator changes.
+        from dataclasses import replace as _replace
+
+        tools = _replace(tools, illustrator=illustrator)
     logger.info("media backend ready: %s", tools.name)
     return tools

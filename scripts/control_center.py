@@ -504,6 +504,37 @@ GOVERNED_REASONING_FIELDS = {
 }
 
 
+# Pre-Stage-9 Campaign 8: every other backend category the owner can choose,
+# and the Settings field each one sets. Bound into tools at startup, so a
+# persisted choice is honoured by every start.
+GOVERNED_BACKEND_FIELDS = {
+    "video_generation_provider": "video_generation",
+    "video_understanding_provider": "video_understanding",
+    "speech_provider": "speech",
+    "media": "media",
+    "image_generation_provider": "image_generation",
+    "avatar_provider": "avatar_provider",
+    "environment_provider": "environment_provider",
+    "knowledge_provider": "knowledge_provider",
+    "live_info_provider": "live_info_provider",
+    "communication_provider": "communication_provider",
+    "celebration_provider": "celebration_provider",
+    "calendar_event_provider": "calendar_event_provider",
+    "document_rendering_provider": "document_rendering",
+}
+
+
+def governed_backend_settings(settings: Settings, config) -> Settings:
+    """``settings`` with every non-reasoning backend choice the owner saved
+    through ``provider <category> use <backend>`` applied."""
+    overrides = {
+        field_name: value
+        for category, field_name in GOVERNED_BACKEND_FIELDS.items()
+        if (value := config.get(f"provider.{category}")) and value != getattr(settings, field_name)
+    }
+    return replace(settings, **overrides) if overrides else settings
+
+
 def governed_reasoning_settings(settings: Settings, config) -> Settings:
     """``settings`` with every reasoning choice the owner governed applied -
     the vendor, the Manager's reasoning mode, the specialists' reasoning mode -
@@ -596,7 +627,7 @@ def build(settings: Settings):
     # Pre-Stage-9 Campaign 4: the reasoning backend the owner chose in the
     # Control Center ("provider llm_provider use <backend>") is the one every
     # start uses.
-    settings = governed_reasoning_settings(settings, config)
+    settings = governed_backend_settings(governed_reasoning_settings(settings, config), config)
     runtime = build_runtime(
         settings,
         accounts=accounts,
@@ -1264,17 +1295,32 @@ def run_provider_command(centre: "ControlCenter", rest: str) -> str:
         # Pre-Stage-9 Campaign 4: switch which backend the running system
         # reasons through, live, without recreating Alfred - and persist the
         # choice only once the switch has genuinely succeeded.
-        if category != LLM_CATEGORY:
-            return (
-                f"'use' switches the live reasoning provider ('{LLM_CATEGORY}'). For '{category}', "
-                "select an account and restart - those providers are bound into tools at startup."
-            )
         if not action_args:
-            return f"usage: provider {LLM_CATEGORY} use <backend>"
+            return f"usage: provider {category} use <backend>"
         backend = action_args[0]
         backend_error = _require_backend(adapter, category, backend)
         if backend_error:
             return backend_error
+        if category != LLM_CATEGORY:
+            # Pre-Stage-9 Campaign 8: every backend category is chosen the same
+            # way. These are bound into tools at startup, so the validated
+            # choice is saved for every start rather than swapped mid-session.
+            field_name = GOVERNED_BACKEND_FIELDS.get(category)
+            if field_name is None:
+                return f"'use' is not available for '{category}' - it has no single backend choice to save."
+            outcome = adapter.validate(backend, credential=None)
+            if not outcome.ok:
+                return (
+                    f"FAILED: '{backend}' cannot be used for '{category}': {outcome.detail}. "
+                    "Nothing was saved."
+                )
+            config = load_governed_config(DEFAULT_CONFIG_PATH)
+            save_governed_config(config.with_value(f"provider.{category}", backend), DEFAULT_CONFIG_PATH)
+            return (
+                f"Saved: '{category}' now uses '{backend}' - the choice every start uses. It is bound "
+                f"into tools at startup, so restart (or 'reload {field_name}={backend}' for this session) "
+                "to make it live now."
+            )
         previous = centre.runtime.settings.provider
         governed = governed_reasoning_settings(centre.runtime.settings, load_governed_config(DEFAULT_CONFIG_PATH))
         candidate = replace(governed, provider=backend)

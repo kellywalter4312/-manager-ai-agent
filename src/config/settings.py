@@ -97,6 +97,11 @@ class Settings:
     #            FFmpeg composition "local" already uses - see
     #            src/providers/media/image.py for why this vendor
     media: str = "null"
+    # Pre-Stage-9 Campaign 8: which backend generates images, chosen on its
+    # own axis. "media" keeps the media backend's own illustrator (the
+    # default, unchanged behaviour); "null", "local" or "pollinations" choose
+    # one explicitly, whatever the media backend is.
+    image_generation: str = "media"
     # AI video-generation checkpoint: a genuinely independent axis from
     # `media` above - narration/image/composition ("local"/"ai_image")
     # is one choice, whether a real AI video-*generation* vendor is
@@ -361,6 +366,11 @@ class Settings:
         if not media:
             raise ValueError("Settings.media must not be empty")
         object.__setattr__(self, "media", media)
+
+        image_generation = self.image_generation.strip().lower()
+        if not image_generation:
+            raise ValueError("Settings.image_generation must not be empty")
+        object.__setattr__(self, "image_generation", image_generation)
 
         video_generation = self.video_generation.strip().lower()
         if not video_generation:
