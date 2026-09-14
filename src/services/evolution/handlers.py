@@ -447,6 +447,45 @@ class ConnectionAdapterHandler(EvolutionHandler):
         return HandlerResult(True, f"Gmail adapter restored to v{proposal.current_version}")
 
 
+class BrainModeHandler(EvolutionHandler):
+    """Whether an agent reasons with its provider at all - ``brain.manager``
+    (the Manager's own reasoning mode) and ``brain.specialist_default`` (every
+    specialist's) - a genuinely separate axis from which vendor answers
+    (Pre-Stage-9 Campaign 4). Validated against the brains that actually exist,
+    written to the governed config every start reads, independently re-read."""
+
+    SETTING_FOR = {"brain.manager": "brain", "brain.specialist_default": "specialist_brain"}
+
+    def applies_to(self, component_id: str) -> bool:
+        return component_id in self.SETTING_FOR
+
+    def _available(self, component_id: str) -> "list[str]":
+        if component_id == "brain.manager":
+            from src.manager.brain_factory import available_brains
+
+            return list(available_brains())
+        from src.agents.brain_factory import available_specialist_brains
+
+        return list(available_specialist_brains())
+
+    def apply(self, proposal: EvolutionProposal, *, context: HandlerContext) -> HandlerResult:
+        available = self._available(proposal.target)
+        if proposal.proposed_version not in available:
+            return HandlerResult(
+                False, f"'{proposal.proposed_version}' is not a real reasoning mode. Available: {', '.join(available)}",
+            )
+        config = load_governed_config(context.config_path).with_value(proposal.target, proposal.proposed_version)
+        save_governed_config(config, context.config_path)
+        if load_governed_config(context.config_path).get(proposal.target) != proposal.proposed_version:
+            return HandlerResult(False, "wrote the reasoning mode, but the independent re-read did not confirm it landed")
+        return HandlerResult(True, f"'{proposal.target}' is now '{proposal.proposed_version}' (independently re-read from disk)")
+
+    def rollback(self, proposal: EvolutionProposal, *, context: HandlerContext) -> HandlerResult:
+        config = load_governed_config(context.config_path).with_value(proposal.target, proposal.current_version)
+        save_governed_config(config, context.config_path)
+        return HandlerResult(True, f"'{proposal.target}' restored to '{proposal.current_version}'")
+
+
 # The open-ended registration point (Section 11's own requirement): a
 # future category registers one handler here (or calls
 # ``register_handler`` at import time from its own module) and needs no
@@ -457,6 +496,7 @@ _HANDLERS: "list[EvolutionHandler]" = [
     CapabilityConfigHandler(),
     ToolConfigHandler(),
     ConnectionAdapterHandler(),
+    BrainModeHandler(),
 ]
 
 

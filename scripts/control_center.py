@@ -67,6 +67,7 @@ from src.agents.tools.web_search import WebSearchTool  # noqa: E402
 from src.agents.tools.document_generation import DocumentGenerationTool  # noqa: E402
 from src.agents.tools.artifact_production import ArtifactProductionTool  # noqa: E402
 from src.services.artifacts.content import SHARED_FILE_PREFIX, artifact_ids_in, read_artifact_units  # noqa: E402
+from src.composition import reasoning_settings_fields, rebind_reasoning  # noqa: E402
 from src.services.artifacts.delivery import available_delivery_methods  # noqa: E402
 from src.services.artifacts.ingestion import IngestionError, ingest_supplied_file  # noqa: E402
 from src.agents.tools.media_production import MediaProductionTool  # noqa: E402
@@ -487,6 +488,54 @@ def _connection_tools(resolver: ConnectionResolver) -> "list[ConnectionActionToo
     return tools
 
 
+# Pre-Stage-9 Campaign 4: which provider category is the reasoning provider,
+# and where the owner's chosen backend for it is persisted (the governed
+# config every start reads - never an environment variable edited by hand).
+LLM_CATEGORY = "llm_provider"
+CHOSEN_LLM_BACKEND = "provider.llm_provider"
+
+
+# The governed components that decide how agents reason, and the Settings
+# field each one sets.
+GOVERNED_REASONING_FIELDS = {
+    CHOSEN_LLM_BACKEND: "provider",
+    "brain.manager": "brain",
+    "brain.specialist_default": "specialist_brain",
+}
+
+
+def governed_reasoning_settings(settings: Settings, config) -> Settings:
+    """``settings`` with every reasoning choice the owner governed applied -
+    the vendor, the Manager's reasoning mode, the specialists' reasoning mode -
+    so every start, and every live rebind, uses the same answer."""
+    overrides = {
+        field_name: value
+        for component_id, field_name in GOVERNED_REASONING_FIELDS.items()
+        if (value := config.get(component_id)) and value != getattr(settings, field_name)
+    }
+    return replace(settings, **overrides) if overrides else settings
+
+
+def _apply_reasoning_live(centre: "ControlCenter", store) -> str:
+    """Rebind the running session's reasoning in place from what the owner has
+    governed (vendor, account, reasoning modes) - the same Manager,
+    conversation, memory and identity continue. A failure changes nothing and
+    says so."""
+    settings = governed_reasoning_settings(centre.runtime.settings, load_governed_config(DEFAULT_CONFIG_PATH))
+    try:
+        runtime = rebind_reasoning(centre.runtime, centre.manager, settings, accounts=store)
+    except (ConfigurationError, ProviderConfigurationError, ValueError) as exc:
+        return (
+            f" Not applied to this running session: {exc}. The running session is unchanged."
+        )
+    centre.rebind_runtime(runtime)
+    return (
+        f" Applied live: this running session now reasons through '{settings.provider}' "
+        f"(Manager reasoning mode '{settings.brain}', specialists '{settings.specialist_brain}') "
+        "- same conversation, memory and identity."
+    )
+
+
 def build(settings: Settings):
     """Assemble the system exactly as the other entry points do.
 
@@ -516,6 +565,10 @@ def build(settings: Settings):
     """
     accounts = load_credential_store(DEFAULT_ACCOUNTS_PATH)
     config = load_governed_config(DEFAULT_CONFIG_PATH)
+    # Pre-Stage-9 Campaign 4: the reasoning backend the owner chose in the
+    # Control Center ("provider llm_provider use <backend>") is the one every
+    # start uses.
+    settings = governed_reasoning_settings(settings, config)
     runtime = build_runtime(
         settings,
         accounts=accounts,
@@ -1138,6 +1191,8 @@ def run_provider_command(centre: "ControlCenter", rest: str) -> str:
         )
         store.add(account)
         save_credential_store(store, DEFAULT_ACCOUNTS_PATH)
+        if category == LLM_CATEGORY and backend == centre.runtime.settings.provider:
+            return f"added {account.describe()} (active) - no secret is ever echoed back." + _apply_reasoning_live(centre, store)
         return (
             f"added {account.describe()} (active) - no secret is ever echoed back. "
             "Persisted only - not yet active on this running process. "
@@ -1156,6 +1211,8 @@ def run_provider_command(centre: "ControlCenter", rest: str) -> str:
         except KeyError as exc:
             return f"FAILED: {exc}"
         save_credential_store(store, DEFAULT_ACCOUNTS_PATH)
+        if category == LLM_CATEGORY and backend == centre.runtime.settings.provider:
+            return f"{backend}/{account_id} is now active." + _apply_reasoning_live(centre, store)
         return (
             f"{backend}/{account_id} is now active. "
             "Persisted only - not yet active on this running process. "
@@ -1171,7 +1228,43 @@ def run_provider_command(centre: "ControlCenter", rest: str) -> str:
             return backend_error
         store.revoke(backend, account_id)
         save_credential_store(store, DEFAULT_ACCOUNTS_PATH)
+        if category == LLM_CATEGORY and backend == centre.runtime.settings.provider:
+            return f"revoked {backend}/{account_id}." + _apply_reasoning_live(centre, store)
         return f"revoked {backend}/{account_id}"
+
+    if action == "use":
+        # Pre-Stage-9 Campaign 4: switch which backend the running system
+        # reasons through, live, without recreating Alfred - and persist the
+        # choice only once the switch has genuinely succeeded.
+        if category != LLM_CATEGORY:
+            return (
+                f"'use' switches the live reasoning provider ('{LLM_CATEGORY}'). For '{category}', "
+                "select an account and restart - those providers are bound into tools at startup."
+            )
+        if not action_args:
+            return f"usage: provider {LLM_CATEGORY} use <backend>"
+        backend = action_args[0]
+        backend_error = _require_backend(adapter, category, backend)
+        if backend_error:
+            return backend_error
+        previous = centre.runtime.settings.provider
+        governed = governed_reasoning_settings(centre.runtime.settings, load_governed_config(DEFAULT_CONFIG_PATH))
+        candidate = replace(governed, provider=backend)
+        try:
+            runtime = rebind_reasoning(centre.runtime, centre.manager, candidate, accounts=store)
+        except (ConfigurationError, ProviderConfigurationError, ValueError) as exc:
+            return (
+                f"FAILED: could not switch to '{backend}': {exc}. Nothing changed - this session "
+                f"still reasons through '{previous}', and no choice was saved."
+            )
+        centre.rebind_runtime(runtime)
+        config = load_governed_config(DEFAULT_CONFIG_PATH)
+        save_governed_config(config.with_value(CHOSEN_LLM_BACKEND, backend), DEFAULT_CONFIG_PATH)
+        return (
+            f"Switched the reasoning provider from '{previous}' to '{backend}' live - the same "
+            "conversation, memory, identity and specialists continue. Saved as the choice every "
+            "future start uses."
+        )
 
     if action == "validate":
         if not action_args:
@@ -1186,7 +1279,7 @@ def run_provider_command(centre: "ControlCenter", rest: str) -> str:
         )
         return detail
 
-    return f"unknown provider action '{action}'. Try: accounts, add, select, revoke, validate"
+    return f"unknown provider action '{action}'. Try: accounts, add, select, revoke, use, validate"
 
 
 # ---------------------------------------------------------------------------
@@ -2003,7 +2096,13 @@ def run_ecosystem_command(centre: "ControlCenter", rest: str) -> str:
         detail = (
             f"{'OK' if result.success else 'FAILED'}: {result.reason} (status: {status})"
         )
-        if result.success and component_id.startswith("provider."):
+        if result.success and component_id.startswith("brain."):
+            # Pre-Stage-9 Campaign 4: a reasoning mode applies to the running
+            # session in place, the same way a provider switch does.
+            detail += "\nPersisted and independently re-verified." + _apply_reasoning_live(
+                centre, load_credential_store(DEFAULT_ACCOUNTS_PATH)
+            )
+        elif result.success and component_id.startswith("provider."):
             detail += (
                 "\nPersisted and independently re-verified. This running process still "
                 "holds the previous object - type 'reload' to make it live in this "
@@ -2028,7 +2127,11 @@ def run_ecosystem_command(centre: "ControlCenter", rest: str) -> str:
             config_path=DEFAULT_CONFIG_PATH, staging_dir=DEFAULT_STAGING_DIR, backups_dir=DEFAULT_BACKUPS_DIR,
         )
         status = result.proposal.status.value if result.proposal else "(unknown)"
-        return f"{'OK' if result.success else 'FAILED'}: {result.reason} (status: {status})"
+        detail = f"{'OK' if result.success else 'FAILED'}: {result.reason} (status: {status})"
+        if result.success and component_id.startswith("brain."):
+            # A rolled-back reasoning mode is live in this session too.
+            detail += "\n" + _apply_reasoning_live(centre, load_credential_store(DEFAULT_ACCOUNTS_PATH)).lstrip()
+        return detail
 
     return f"unknown ecosystem action '{action}'. Try: propose, propose-content, run, rollback"
 
@@ -2121,8 +2224,10 @@ def classify_administrative_write(command: str) -> "tuple[bool, str]":
     if verb == "capabilities" and len(parts) >= 3 and parts[1].lower() in ("enable", "disable"):
         return True, f"{parts[1].lower()} the '{parts[2]}' capability"
 
-    if verb == "provider" and len(parts) >= 3 and parts[2].lower() in ("add", "select", "revoke"):
+    if verb == "provider" and len(parts) >= 3 and parts[2].lower() in ("add", "select", "revoke", "use"):
         category, action = parts[1], parts[2].lower()
+        if action == "use" and len(parts) >= 4:
+            return True, f"switch the live reasoning provider for '{category}' to '{parts[3]}'"
         if action == "add" and len(parts) >= 5:
             return True, (
                 f"add a new '{parts[3]}' account '{parts[4]}' to '{category}' "
@@ -2891,7 +2996,7 @@ def run_command(
     )
 
 
-def _reload_session(centre: "ControlCenter", command: str):
+def _reload_session(centre: "ControlCenter", command: str, *, channel=None, conversation=None):
     """Rebuild the whole session through the real ``build()`` every
     entry point already uses - the smallest safe activation this
     architecture supports (see ``interactive``'s own comment on why
@@ -2933,6 +3038,27 @@ def _reload_session(centre: "ControlCenter", command: str):
     settings = centre.runtime.settings
     if overrides:
         settings = replace(settings, **overrides)
+
+    if overrides and set(overrides) <= reasoning_settings_fields():
+        # Pre-Stage-9 Campaign 4: a reasoning-only change never recreates
+        # Alfred - the same Manager, conversation, memory and identity keep
+        # going; only the provider-bound pieces are rebound. Returns the very
+        # Control Center, channel and conversation it was given.
+        try:
+            runtime = rebind_reasoning(
+                centre.runtime, centre.manager, settings, accounts=load_credential_store(DEFAULT_ACCOUNTS_PATH),
+            )
+        except (ConfigurationError, ProviderConfigurationError, ValueError) as exc:
+            print(f"reload failed, nothing changed: {exc}")
+            return None
+        centre.rebind_runtime(runtime)
+        shown = ", ".join(f"{k}={v}" for k, v in overrides.items())
+        print(
+            f"Reloaded with this session's own override(s) ({shown}) - switched in place: the same "
+            "conversation, memory and identity continue. Session-scoped only, not persisted: "
+            f"'provider {LLM_CATEGORY} use <backend>' makes a backend the choice every start uses."
+        )
+        return centre, channel, conversation
 
     try:
         runtime, manager, channel, conversation = build(settings)
@@ -3005,7 +3131,7 @@ def interactive(
             # is what makes a backend choice the default on every future
             # start.
             print()
-            reloaded = _reload_session(centre, command)
+            reloaded = _reload_session(centre, command, channel=channel, conversation=conversation)
             if reloaded is not None:
                 centre, channel, conversation = reloaded
             continue

@@ -38,7 +38,7 @@ so a Control Center may construct all of this simply to look at it.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Mapping, Sequence
 
 from src.agents.brain_factory import (
@@ -341,6 +341,18 @@ class Runtime:
         )
 
 
+def _manager_reasoning(settings: Settings, provider: LLMProvider, personality) -> tuple:
+    """The Manager's provider-bound reasoning collaborators - router, brain,
+    opportunity interpreter - constructed in exactly one place, so startup
+    and a live provider switch (``rebind_reasoning``) can never build them
+    two different ways, and there is only ever one canonical brain at a time."""
+    return (
+        build_router(settings, provider),
+        build_brain(settings, provider, personality),
+        build_opportunity_interpreter(settings, provider),
+    )
+
+
 def build_runtime(
     settings: Settings,
     *,
@@ -439,7 +451,10 @@ def build_runtime(
                 settings,
                 build_provider(
                     settings,
-                    account=(specialist_accounts or {}).get(key),
+                    # Pre-Stage-9 Campaign 4: a specialist with no account of
+                    # its own uses the Manager's (one connection serves every
+                    # agent by default) - still its own provider instance.
+                    account=(specialist_accounts or {}).get(key) or manager_account,
                 ),
                 wiring.brain_domain,
                 personality=wiring.personality,
@@ -449,14 +464,15 @@ def build_runtime(
         for key, build in SPECIALISTS.items()
     }
 
+    router, manager_brain, interpreter = _manager_reasoning(settings, provider, identity.personality)
     runtime = Runtime(
         settings=settings,
         calendar=calendar,
         identity=identity,
         provider=provider,
-        router=build_router(settings, provider),
-        manager_brain=build_brain(settings, provider, identity.personality),
-        interpreter=build_opportunity_interpreter(settings, provider),
+        router=router,
+        manager_brain=manager_brain,
+        interpreter=interpreter,
         specialists=specialists,
         # Selected by name from settings.speech (Stage 10), the same pattern
         # build_provider already uses for the model - see
@@ -600,6 +616,91 @@ def build_conversation(manager: ManagerAgent, person: str = "you") -> Conversati
                 ParticipantKind.AGENT,
             ),
         )
+    )
+
+
+# ---------------------------------------------------------------------------
+# Pre-Stage-9 Campaign 4: switching the reasoning provider without recreating
+# Alfred.
+# ---------------------------------------------------------------------------
+
+# Settings fields that only decide *how* agents reason - which vendor answers,
+# which model, which reasoning mode, how the router chooses. Everything else
+# (identity, memory, voice, media, connections) is untouched by a reasoning
+# switch. Derived from the Settings dataclass itself, never a list that could
+# drift from it: any "<vendor>_model" field counts.
+def reasoning_settings_fields() -> frozenset[str]:
+    from dataclasses import fields as _fields
+
+    names = {f.name for f in _fields(Settings)}
+    core = {"provider", "brain", "specialist_brain", "router"} & names
+    return frozenset(core | {name for name in names if name.endswith("_model")})
+
+
+def rebind_reasoning(
+    runtime: Runtime,
+    manager: ManagerAgent,
+    settings: Settings,
+    *,
+    accounts: "CredentialStore | None" = None,
+    specialist_accounts: "Mapping[str, ProviderAccount] | None" = None,
+) -> Runtime:
+    """Swap the reasoning provider under a running system and keep everything
+    else: the same ManagerAgent, the same memory and personal context, the
+    same conversation, sessions, recordings, presence and governance log, the
+    same identity and personality, the same registered specialists.
+
+    **All or nothing.** Every new provider-bound collaborator (the Manager's
+    provider, router, brain and opportunity interpreter, each specialist's
+    own provider-backed brain) is built first, with the identical factories
+    ``build_runtime`` uses. Any failure - an unknown backend, a missing
+    credential - raises before a single live object has been touched, so a
+    bad switch leaves the running system exactly as it was.
+
+    Only then are the live references rebound: ``manager.brain`` and
+    ``manager.router``, the Manager's own bound Brain callables on
+    ``ManagerSkills``, and each registered specialist's ``brain`` and its
+    analyzers' interpreter. Returns the replacement ``Runtime`` (frozen, so
+    a new value) for whoever holds one.
+    """
+    manager_account = accounts.active(settings.provider) if accounts is not None else None
+    provider = build_provider(settings, account=manager_account)
+    router, manager_brain, interpreter = _manager_reasoning(settings, provider, runtime.identity.personality)
+    specialists = {}
+    for key, entry in runtime.specialists.items():
+        brain = build_specialist_brain(
+            settings,
+            # A specialist with no account of its own uses the Manager's -
+            # one connection serves every agent by default - through its own,
+            # separately constructed provider instance.
+            build_provider(settings, account=(specialist_accounts or {}).get(key) or manager_account),
+            entry.wiring.brain_domain,
+            personality=entry.wiring.personality,
+        )
+        specialists[key] = replace(entry, brain=brain)
+
+    manager.brain = manager_brain
+    manager.router = router
+    skills = manager.own_skills
+    if skills is not None:
+        skills._converse = manager_brain.converse
+        skills._analyze_image = manager_brain.analyze_image
+        skills._activity_brain = ActivityBrainOps.from_brain(manager_brain)
+        skills._assess_governance = manager_brain.assess_governance
+    specialist_names = {entry.wiring.name: key for key, entry in specialists.items()}
+    for agent in manager.registry.all_agents():
+        key = specialist_names.get(agent.name)
+        if key is None or agent is skills:
+            continue
+        if hasattr(agent, "brain"):
+            agent.brain = specialists[key].brain
+        for analyzer in getattr(agent, "analyzers", ()) or ():
+            if hasattr(analyzer, "_interpreter"):
+                analyzer._interpreter = interpreter
+
+    return replace(
+        runtime, settings=settings, provider=provider, router=router,
+        manager_brain=manager_brain, interpreter=interpreter, specialists=specialists,
     )
 
 

@@ -108,7 +108,7 @@ this section's writing):
 | Provider-specific credentials | ✅ COMPLETE | `src/providers/factory.py` (`_BUILDERS`, per-provider credential check) | same file, `TestCredentialIsolation` | Cross-provider credential substitution proven to fail closed, both directions |
 | Provider switching | ✅ COMPLETE | `src/providers/factory.py`, `src/manager/brain_factory.py` | same file, `TestProviderSwitchingThroughTheRealProductionPath` | A new, never-shipped provider name registered through the real `_BUILDERS` dict and answered through `exchange()` |
 | Memory continuity across providers | ✅ COMPLETE | `src/services/memory/*` (unchanged by provider) | same file, `TestMemoryContinuityAcrossProviderSwitching` | A fact survived Provider A→B→C in one process, and separately across a genuine two-`build()` restart against the same `PersistentMemory` file |
-| Conversation continuity across providers | ✅ COMPLETE | `src/conversation/conversation.py` | same file, `TestConversationHistoryContinuityAcrossProviderSwitching` | The *new* provider's own captured prompt text shown to contain pre-switch conversation content |
+| Conversation continuity across providers | ✅ COMPLETE | `src/conversation/conversation.py` | same file, `TestConversationHistoryContinuityAcrossProviderSwitching` | The *new* provider's own captured prompt text shown to contain pre-switch conversation content. Since Pre-Stage-9 Campaign 4 (§52.34) the switch itself is live and in place - the same Conversation object, transcript, pending activities and Manager continue |
 | Voice independence (Brain/provider/voice, all directions) | ✅ COMPLETE | `src/services/identity/voice.py`, `voice_preference.py`, `src/channels/channel.py` | same file, `TestVoiceIndependenceMatrix` | Full matrix: provider swapped twice with voice unchanged, then voice changed with Brain/provider proven unchanged (`is` identity) |
 | Alfred → Kokoro `am_eric` | ✅ COMPLETE | `src/providers/kokoro_speech_provider.py`; `IDENTITY.md` `## Voice` | `tests/test_kokoro_speech_provider.py` (22), `tests/test_kokoro_voice_installation.py` (11) | Real ONNX synthesis, real non-silent audio, through `exchange(..., speak=True)` |
 | Arthur → Kokoro `bm_daniel` | ✅ COMPLETE | same provider; `identities/email_agent.md` `## Voice` | same two files | Same, independently, distinct from Alfred's |
@@ -8061,6 +8061,9 @@ explicit rather than left implicit.**
   concept. ``reload provider=openai`` applies that one field as an
   override via ``dataclasses.replace`` and rebuilds - genuinely live,
   in this session, with no restart and no environment variable needed.
+  (Superseded in part by §52.34: a reasoning-only override now rebinds in
+  place - same conversation - and ``provider llm_provider use <backend>``
+  persists the choice.)
   **Deliberately session-scoped, not persisted**: nothing here writes a
   file or touches ``os.environ``, so it does not survive an actual
   restart on its own - the matching ``MANAGER_<FIELD>`` environment
@@ -8311,7 +8314,9 @@ not hidden or fabricated:**
 - Live, in-session activation of an evolved provider remains exactly
   the gap 52.27 already named and gave a real, honest answer to:
   ``reload`` (or ``reload provider=<backend>``) makes it live in this
-  session; a real restart is needed otherwise. This checkpoint's own
+  session; a real restart is needed otherwise. (Superseded for the
+  reasoning provider and reasoning modes by §52.34: they apply live, in
+  place.) This checkpoint's own
   ``ecosystem <component> run`` output says so explicitly, every time.
 - The graphical Control Center remains entirely future work; when
   built, it must expose ``run_ecosystem_command``'s own operations
@@ -8443,6 +8448,10 @@ records) - explicitly labelled as distinct from *which vendor answers*
 (``provider.llm_provider``), and proven, not merely stated, to be
 un-proposable: ``brain.manager`` is a real inventory component with no
 registered handler, and ``propose`` against it is refused by name.
+(Superseded by §52.34: ``BrainModeHandler`` now governs the reasoning
+*mode* - validated against the brains that really exist, so a fabricated
+"Brain version" is still refused - while Brain *development* stays
+read-only.)
 
 **Dependency/compatibility checking is real, not new machinery.**
 ``src.evolution.evaluate_proposal`` already rejects a proposal whose
@@ -8854,3 +8863,74 @@ file; media capabilities had no route from an artifact to its stored bytes.
 | VID-01 basic clipping of a shared video | VERIFIED WORKING |
 | REC-04 / audio transcription (shared audio, video, recordings) | VERIFIED WORKING with the local Windows recogniser on synthesised speech; a live human voice on a physical microphone NOT VERIFIED; Whisper BLOCKED (unfunded) |
 | Honest refusal for a format a capability cannot process | VERIFIED WORKING |
+
+### 52.34 Pre-Stage-9 Campaign 4 - switching the reasoning provider never recreates Alfred
+
+**What the Master Pre-Stage-9 Audit found.** Changing which vendor Alfred reasons
+through meant ``reload provider=<backend>``, which called ``build()`` and
+returned a brand-new Manager, Conversation and ActivitySessions: the room, its
+transcript and every pending confirmation died with the switch (PRV-03). The
+served Control Center had no switch at all - its held ``LiveSystem`` was
+assigned once - and a backend choice was never persisted, so the next start
+silently went back to the environment default (PRV-04, CC-02). A vendor switch
+alone also never turned reasoning on: ``settings.brain`` stayed ``null`` and no
+Control Center operation could change it. ARCHITECTURE §0 claimed conversation
+continuity across providers that the switch itself did not keep (DOC-01).
+
+**The repair.**
+
+- ``src/composition.py::rebind_reasoning(runtime, manager, settings, ...)``
+  constructs every provider-bound piece first (provider, router, Manager brain,
+  opportunity interpreter, specialist brains) and only then rebinds them onto
+  the *same* live Manager, ManagerSkills (converse / image analysis / activity
+  brain / governance assessor), analyzer and specialist agents, returning
+  ``dataclasses.replace(runtime, ...)``. A construction failure raises before
+  anything is touched. ``_manager_reasoning`` is the one place the router,
+  brain and interpreter are built, for startup and a switch alike, so there is
+  still exactly one ``build_brain(`` in the composition root. A specialist with
+  no account of its own uses the Manager's (one shared connection by default).
+- ``ControlCenter.rebind_runtime`` updates what the Control Center observes;
+  the served ``/command`` route re-reads it into ``LiveSystem.runtime``.
+- ``provider llm_provider use <backend>`` (a confirmed administrative write):
+  switch live, persist ``provider.llm_provider`` in the GovernedConfig only
+  after the switch succeeded; a failure says "Nothing changed" and saves
+  nothing. ``add`` / ``select`` / ``revoke`` of an account for the *active*
+  backend apply live the same way.
+- The reasoning *mode* is its own governed axis: ``BrainModeHandler``
+  (``brain.manager``, ``brain.specialist_default``) validates against
+  ``available_brains`` / ``available_specialist_brains``, writes the
+  GovernedConfig and re-reads it; ``ecosystem brain.manager run|rollback``
+  applies live. ``governed_reasoning_settings`` applies every governed
+  reasoning choice (vendor + both modes) identically on start, on ``use`` and on
+  every live rebind.
+- Terminal ``reload provider=<backend>`` (reasoning fields only) rebinds in
+  place and keeps the same channel and conversation; still session-scoped and
+  says so. Reloads touching other fields rebuild as before.
+
+**Verification.**
+
+- ``tests/test_campaign_04_live_provider_switch.py`` (switch keeps Manager,
+  skills, memory, sessions, identity, transcript; Arthur rebound; failed switch
+  changes and saves nothing; choice used on restart; active-account change
+  applies live; terminal reload in place; full brain on/off/rollback live;
+  fabricated mode refused; served confirmed write updates the held system),
+  plus manageability, open-ended conversation and ecosystem evolution suites.
+- Real served system (``build_live_system``, isolated scratch stores, credential
+  env vars removed, production ``data/`` hash unchanged, fake key, **no turn
+  taken while a vendor backend was live**): facts, a learning activity and a
+  task recorded; ``use anthropic`` through the confirmed route kept manager,
+  skills, memory, sessions, conversation id, transcript (6 lines), identity and
+  facts identical while Arthur's brain was rebound; ``use openai`` without a key
+  failed honestly and left anthropic live; ``use null`` resumed the same
+  conversation ("Your favourite colour is teal", the passport task listed,
+  transcript 6 -> 10); each restart honoured the persisted choice; the
+  ``brain.manager`` proposal ran NullBrain -> LLMManagerBrain on the same Manager
+  and survived a restart; rollback restored NullBrain live.
+
+| Requirement | Status |
+|---|---|
+| PRV-03 switching provider keeps Alfred (same conversation, memory, identity, pending activity) | VERIFIED WORKING (construction-level; a real vendor answer BLOCKED - unfunded key) |
+| PRV-04 backend choice persisted and used on the next start | VERIFIED WORKING |
+| CC-02 Control Center manages the reasoning provider and mode live, no code or env edits | VERIFIED WORKING |
+| Full Brain turned on/off from the Control Center | VERIFIED WORKING for the switch; Full Brain reasoning itself BLOCKED (unfunded key) |
+| DOC-01 provider-continuity claims match the code | VERIFIED WORKING (§0 row and superseded notes updated) |

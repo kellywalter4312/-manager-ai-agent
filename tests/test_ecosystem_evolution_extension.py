@@ -481,14 +481,21 @@ class TestBrainAndMemoryDevelopmentRemainReadOnly:
         assert "corrections learned      : 1" in output
         assert "explicit lessons learned : 1" in output
 
-    def test_brain_is_never_proposable_or_applicable(self):
+    def test_only_a_real_reasoning_mode_is_ever_applicable(self, tmp_path, monkeypatch):
+        # Pre-Stage-9 Campaign 4: brain.manager (the reasoning mode) is now
+        # governed like any other setting, but still never accepts a
+        # fabricated "Brain version" - only a mode that really exists applies.
+        import scripts.control_center as control_center_module
+
+        for name, leaf in (("DEFAULT_LEDGER_PATH", "state.json"), ("DEFAULT_CONFIG_PATH", "config.json"),
+                           ("DEFAULT_STAGING_DIR", "staging"), ("DEFAULT_BACKUPS_DIR", "backups")):
+            monkeypatch.setattr(control_center_module, name, tmp_path / leaf)
         runtime, manager, channel, conversation = real_system()
         centre = ControlCenter(runtime, manager)
-        result = run_ecosystem_command(centre, "brain.manager propose llm low r|b")
-        # brain.manager IS a real inventory component (reasoning mode),
-        # but has no registered handler - propose must refuse it, never
-        # silently accept a fabricated "Brain version".
-        assert "no evolution handler is registered" in result
+        proposed = run_ecosystem_command(centre, "brain.manager propose genius-v9 low r|b")
+        proposal_id = proposed.split("'")[1]
+        ran = run_ecosystem_command(centre, f"brain.manager run {proposal_id} yes")
+        assert ran.startswith("FAILED") and "not a real reasoning mode" in ran
 
     def test_memory_development_reports_lessons_distinctly_from_corrections(self):
         runtime, manager, channel, conversation = real_system()

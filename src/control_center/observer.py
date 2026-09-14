@@ -218,6 +218,12 @@ class ControlCenter:
         self._runtime = runtime
         self._manager = manager
 
+    def rebind_runtime(self, runtime: Any) -> None:
+        """Point this view at a runtime whose reasoning provider was switched
+        in place (Pre-Stage-9 Campaign 4) - the Manager it observes is the
+        same object, so nothing else about the view changes."""
+        self._runtime = runtime
+
     # ------------------------------------------------------------------
     # Agents
     # ------------------------------------------------------------------

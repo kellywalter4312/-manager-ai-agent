@@ -1262,6 +1262,10 @@ def route_command(
             system.centre, normalised, COMMAND_COLUMNS, system.channel, system.conversation,
             action_log_path=action_log_path,
         )
+        # Pre-Stage-9 Campaign 4: a provider switch rebinds the held Control
+        # Center's runtime in place; the held system follows it, so every later
+        # request reads the provider that is actually live.
+        system.runtime = system.centre.runtime
 
     if requires_confirmation:
         return (
