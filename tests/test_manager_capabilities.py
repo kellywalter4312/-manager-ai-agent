@@ -269,6 +269,9 @@ class TestHandlersAreSelectedThroughTheRegistry:
             # earlier one.
             "personal_context",
             "personal_recurring_events",
+            # Pre-Stage-9 Campaign 7: reads back kept notes, schedule and
+            # tasks in full, from the stores that already own them.
+            "read_back",
             # REPAIR-01 (PDF/document capability): Content -> Voice - reads a
             # supplied file's or document's own words aloud (a named page, or
             # the beginning with a pointer to continue), deterministically.

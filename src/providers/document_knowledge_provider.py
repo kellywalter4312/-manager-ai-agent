@@ -88,6 +88,7 @@ logger = get_logger(__name__)
 # _paragraphs, or a new provider behind the same contract.
 DEFAULT_SUFFIXES: tuple[str, ...] = (
     ".md", ".markdown", ".txt", ".text", ".pdf", ".xlsx", ".csv", ".pptx", ".docx",
+    ".html", ".htm", ".xhtml", ".epub",
 )
 
 _SPREADSHEET_SUFFIXES = frozenset({".xlsx", ".csv"})
@@ -96,6 +97,10 @@ _PRESENTATION_SUFFIXES = frozenset({".pptx"})
 # library alone - no new dependency (Pre-Stage-9 Campaign 3).
 _WORD_SUFFIXES = frozenset({".docx"})
 _WORD_NAMESPACE = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+# A saved web page and an e-book (an EPUB is a zip of XHTML chapters in reading
+# order) - standard library only (Pre-Stage-9 Campaign 7).
+_WEB_PAGE_SUFFIXES = frozenset({".html", ".htm", ".xhtml"})
+_EBOOK_SUFFIXES = frozenset({".epub"})
 
 # A passage is a paragraph: the unit an author already chose. Splitting on
 # blank lines needs no knowledge of what the document is about, which is
@@ -116,6 +121,65 @@ MAX_DOCUMENT_BYTES = 4_000_000
 SPREADSHEET_MAX_EXCERPTS = 40
 MAX_SPREADSHEET_ROWS = 500
 MAX_PRESENTATION_SLIDES = 200
+
+
+
+_BLOCK_TAGS = frozenset({
+    "p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote", "pre", "td", "th",
+    "dt", "dd", "figcaption", "caption", "article", "section", "div", "br", "tr",
+})
+_SKIPPED_TAGS = frozenset({"script", "style", "noscript", "nav", "header", "footer", "form", "svg", "button", "select", "template"})
+
+
+def html_blocks(markup: str) -> "list[str]":
+    """The readable blocks of an HTML/XHTML document, in document order -
+    text between block boundaries, whitespace collapsed, scripts, styles,
+    navigation and forms skipped. Standard library only."""
+    from html.parser import HTMLParser
+
+    class _Blocks(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__(convert_charrefs=True)
+            self.blocks: list[str] = []
+            self._current: list[str] = []
+            self._skipping = 0
+
+        def _flush(self) -> None:
+            text = " ".join("".join(self._current).split())
+            if text:
+                self.blocks.append(text)
+            self._current = []
+
+        def handle_starttag(self, tag, attrs):
+            tag = tag.lower()
+            if tag in _SKIPPED_TAGS:
+                self._skipping += 1
+            elif tag in _BLOCK_TAGS:
+                self._flush()
+
+        def handle_startendtag(self, tag, attrs):
+            if tag.lower() in _BLOCK_TAGS:
+                self._flush()
+
+        def handle_endtag(self, tag):
+            tag = tag.lower()
+            if tag in _SKIPPED_TAGS:
+                self._skipping = max(0, self._skipping - 1)
+            elif tag in _BLOCK_TAGS:
+                self._flush()
+
+        def handle_data(self, data):
+            if not self._skipping:
+                self._current.append(data)
+
+    parser = _Blocks()
+    try:
+        parser.feed(markup)
+        parser.close()
+    except Exception:  # noqa: BLE001 - malformed markup yields what was read so far
+        pass
+    parser._flush()
+    return parser.blocks
 
 
 class DocumentKnowledgeProvider(KnowledgeSourceProvider):
@@ -295,6 +359,10 @@ class DocumentKnowledgeProvider(KnowledgeSourceProvider):
             return self._presentation_slides(path)
         if suffix in _WORD_SUFFIXES:
             return self._word_paragraphs(path)
+        if suffix in _WEB_PAGE_SUFFIXES:
+            return self._web_page_paragraphs(path)
+        if suffix in _EBOOK_SUFFIXES:
+            return self._ebook_paragraphs(path)
 
         try:
             if path.stat().st_size > MAX_DOCUMENT_BYTES:
@@ -525,6 +593,63 @@ class DocumentKnowledgeProvider(KnowledgeSourceProvider):
             if text:
                 paragraphs.append((len(paragraphs) + 1, text))
         return paragraphs
+
+    def _web_page_paragraphs(self, path: Path) -> Iterable[tuple[int, str]]:
+        """The readable text of a saved web page, one paragraph per block
+        (heading, paragraph, list item, table cell, quote) - scripts, styles,
+        navigation chrome and forms skipped. Never a rendering of the page."""
+        try:
+            if path.stat().st_size > MAX_DOCUMENT_BYTES:
+                logger.warning("skipping '%s': larger than %d bytes", path.name, MAX_DOCUMENT_BYTES)
+                return ()
+            markup = path.read_bytes().decode("utf-8", errors="replace")
+        except OSError as exc:
+            logger.warning("could not read '%s': %s", path.name, exc)
+            return ()
+        return list(enumerate(html_blocks(markup), start=1))
+
+    def _ebook_paragraphs(self, path: Path) -> Iterable[tuple[int, str]]:
+        """Every paragraph of an EPUB, chapter by chapter in the book's own
+        reading order (its package spine) - DRM-protected or malformed books
+        honestly yield nothing."""
+        import posixpath
+        import zipfile
+        from xml.etree import ElementTree
+
+        try:
+            if path.stat().st_size > MAX_DOCUMENT_BYTES:
+                logger.warning("skipping '%s': larger than %d bytes", path.name, MAX_DOCUMENT_BYTES)
+                return ()
+            with zipfile.ZipFile(path) as book:
+                container = ElementTree.fromstring(book.read("META-INF/container.xml"))
+                rootfile = next(
+                    (node.get("full-path") for node in container.iter() if node.tag.endswith("rootfile")), None,
+                )
+                if not rootfile:
+                    return ()
+                package = ElementTree.fromstring(book.read(rootfile))
+                base = posixpath.dirname(rootfile)
+                manifest = {
+                    node.get("id"): node.get("href")
+                    for node in package.iter() if node.tag.endswith("item") and node.get("href")
+                }
+                spine = [node.get("idref") for node in package.iter() if node.tag.endswith("itemref")]
+                paragraphs: list[tuple[int, str]] = []
+                for idref in spine:
+                    href = manifest.get(idref)
+                    if not href:
+                        continue
+                    name = posixpath.normpath(posixpath.join(base, href)) if base else href
+                    try:
+                        chapter = book.read(name).decode("utf-8", errors="replace")
+                    except KeyError:
+                        continue
+                    for block in html_blocks(chapter):
+                        paragraphs.append((len(paragraphs) + 1, block))
+                return paragraphs
+        except (OSError, KeyError, zipfile.BadZipFile, ElementTree.ParseError, RuntimeError) as exc:
+            logger.warning("could not read '%s': %s", path.name, exc)
+            return ()
 
     def _locator(self, path: Path, index: int) -> str:
         suffix = path.suffix.lower()

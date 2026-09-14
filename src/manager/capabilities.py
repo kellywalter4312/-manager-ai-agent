@@ -6302,6 +6302,17 @@ _NOT_A_READING_WORDS: tuple[str, ...] = (
     "explain", "summar", "meaning", "what does it mean", "compare", "analy", "translate", "why ",
 )
 _POINTING_READ = re.compile(r"\bread\s+(?:me\s+)?(?:it|this|that|them)\b", re.IGNORECASE)
+# Pre-Stage-9 Campaign 7 (RD-04): asking for the words written in a picture -
+# "read the text in this photo", "what does this sign say?", "read this
+# screenshot to me". Shape only; which image is meant is resolved by the handler.
+_PICTURE_NOUNS = r"(?:image|photo|picture|screenshot|scan|sign|poster|label|whiteboard|receipt|menu)"
+_IMAGE_TEXT_READ = re.compile(
+    rf"\bread\b.{{0,40}}\b(?:text|words|writing)\b.{{0,40}}\b{_PICTURE_NOUNS}s?\b"
+    rf"|\bwhat\s+does\s+(?:this|the|that|my)\s+{_PICTURE_NOUNS}\s+say\b"
+    rf"|\bwhat(?:\s+is|\s+was|'s)?\s+written\s+(?:on|in)\s+(?:this|the|that|my)\s+{_PICTURE_NOUNS}\b"
+    rf"|\bread\s+(?:me\s+)?(?:this|the|that|my)\s+{_PICTURE_NOUNS}\b",
+    re.IGNORECASE,
+)
 _LOCATOR_VERBS = re.compile(r"\b(read|say|says|said|show|on)\b", re.IGNORECASE)
 
 
@@ -6322,7 +6333,7 @@ def read_content_intent(task: Task, participants: Sequence[str] = ()) -> bool:
         return True
     if re.search(r"\bread\b", lowered) and (content_reference_intent(text) or _POINTING_READ.search(lowered)):
         return _marker_present(text, _READ_ALOUD_MARKERS)
-    return False
+    return bool(_IMAGE_TEXT_READ.search(lowered))
 
 
 def read_content(request: CapabilityRequest) -> TaskResult:
@@ -6338,6 +6349,18 @@ def read_content(request: CapabilityRequest) -> TaskResult:
         )
 
     text = request.task.description
+    # Pre-Stage-9 Campaign 7 (RD-05): a request naming a web address is about
+    # that page - never a different, already-shared file read instead - and
+    # opening an arbitrary address is an outward action this capability does
+    # not take on its own.
+    if re.search(r"\bhttps?://\S+|\bwww\.\S+", text, re.IGNORECASE) and not re.search(
+        r"\bartifact[:\s]+[0-9a-f]{6,32}\b", text, re.IGNORECASE,
+    ):
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "I don't open web addresses myself. Save the page (or download the book) and share "
+            "the file here - a web page (.html) or an e-book (.epub) - and I'll read it to you.",
+        )
     # Pre-Stage-9 Campaign 3: "read this file" means the file just shared.
     # When that file has no text (a video, an image, a recording) the honest
     # answer is about *that* file - never a different file read instead.
@@ -6404,6 +6427,138 @@ def read_content(request: CapabilityRequest) -> TaskResult:
 _POINTS_AT_A_DOCUMENT = re.compile(
     r"\b(?:pdf|document|doc|docx|spreadsheet|presentation|slides?|handout|word\s+file|text\s+file|notes?)\b",
     re.IGNORECASE,
+)
+
+
+# ---------------------------------------------------------------------------
+# Pre-Stage-9 Campaign 7 (RD-03): read back what is kept for the person.
+#
+# "Read my notes to me", "read back my schedule for tomorrow", "go over my
+# tasks" - the same words the person would hear from the note store, the
+# calendar listing and the task listing, spoken in full. Each collection is
+# answered by the code that already owns it; this only recognises the request
+# and joins the answers. A request aimed at a file ("read my notes PDF to me")
+# stays read_content's.
+# ---------------------------------------------------------------------------
+
+_READ_BACK_VERB = re.compile(r"\b(?:read|go\s+over|run\s+through|recite)\b", re.IGNORECASE)
+_READ_BACK_FILE_WORDS = re.compile(
+    r"\b(?:pdf|document|doc|docx|file|spreadsheet|presentation|slides?|handout|artifact)\b", re.IGNORECASE,
+)
+_READ_BACK_COLLECTIONS: "tuple[tuple[str, re.Pattern[str]], ...]" = (
+    ("notes", re.compile(
+        r"\bmy\s+(?:saved\s+)?(?:notes?|memos?|recordings?\s+notes?)\b"
+        r"|\bwhat\s+i\s+(?:asked\s+you\s+to\s+(?:remember|record|note)|told\s+you\s+to\s+(?:remember|note))\b",
+        re.IGNORECASE,
+    )),
+    ("schedule", re.compile(r"\bmy\s+(?:schedule|calendar|agenda|appointments?|diary|plans)\b", re.IGNORECASE)),
+    ("tasks", re.compile(r"\bmy\s+(?:tasks?|to-?dos?|to-?do\s+list|reminders?|alarms?)\b", re.IGNORECASE)),
+)
+
+
+def read_back_collections(text: str) -> "tuple[str, ...]":
+    """Which kept collections a read-back request names, in the order they
+    were said - empty when it is not a read-back request at all."""
+    working = str(text or "")
+    lowered = " ".join(working.lower().split())
+    if not _READ_BACK_VERB.search(working) or _READ_BACK_FILE_WORDS.search(working):
+        return ()
+    reading_shape = (
+        _marker_present(working, _READ_ALOUD_MARKERS)
+        or re.search(r"\bread\s+(?:\w+\s+){0,3}back\b|\bread\s+back\b", lowered)
+        or re.search(r"\b(?:go\s+over|run\s+through|recite)\b", lowered)
+    )
+    if not reading_shape:
+        return ()
+    found = []
+    for name, pattern in _READ_BACK_COLLECTIONS:
+        match = pattern.search(working)
+        if match is not None:
+            found.append((match.start(), name))
+    return tuple(name for _position, name in sorted(found))
+
+
+def read_back_intent(task: Task, participants: Sequence[str] = ()) -> bool:
+    return bool(read_back_collections(task.description))
+
+
+def _kept_notes(request: CapabilityRequest) -> "list[str]":
+    from src.services.memory.session import RETAINED_KIND, RETAINED_SOURCE
+
+    notes = [
+        record for record in request.recall(kind=RETAINED_KIND, limit=200)
+        if (record.context or {}).get("source") == RETAINED_SOURCE
+    ]
+    notes.extend(request.recall(kind=MemoryCategory.RECORDING.value, limit=200))
+    notes.sort(key=lambda record: str(getattr(record, "created_at", "") or ""))
+    return [record.content for record in notes]
+
+
+def read_back(request: CapabilityRequest) -> TaskResult:
+    """Read the named kept collections back in full."""
+    if request.recall is None:
+        return TaskResult.failure(
+            request.task, request.own_name, "I don't have a way to read back what I keep for you right now.",
+        )
+    from dataclasses import replace as _replace
+
+    text = request.task.description
+    sections = []
+    for name in read_back_collections(text):
+        if name == "notes":
+            notes = _kept_notes(request)
+            body = "\n".join(f"- {note}" for note in notes) if notes else "You haven't asked me to note anything yet."
+            sections.append(("Your notes", body))
+        elif name == "schedule":
+            answer = _calendar_retrieve(request, text)
+            sections.append(("Your schedule", answer.output or answer.error or ""))
+        elif name == "tasks":
+            # Spoken, so no internal ids; a reminder says when it is due.
+            pending = request.recall(kind=MemoryCategory.TASK.value, tags={"task:pending"}, limit=50)
+            if not pending:
+                plain = _replace(request, task=Task(description="what are my tasks?"))
+                answer = list_tasks(plain)
+                sections.append(("Your tasks", answer.output or answer.error or ""))
+                continue
+            lines = []
+            for record in pending:
+                due = (record.context or {}).get("due_at")
+                when = ""
+                if due:
+                    try:
+                        from datetime import datetime as _datetime
+
+                        when = " - at " + _datetime.fromisoformat(str(due)).strftime("%H:%M on %A %d %B")
+                    except ValueError:
+                        when = ""
+                lines.append(f"- {record.content}{when}")
+            sections.append(("Your tasks", "\n".join(lines)))
+    if not sections:
+        return TaskResult.failure(request.task, request.own_name, "Read back what, exactly - your notes, schedule or tasks?")
+    if len(sections) == 1:
+        spoken = f"{sections[0][0]}:\n\n{sections[0][1]}"
+    else:
+        spoken = "\n\n".join(f"{title}:\n{body}" for title, body in sections)
+    return TaskResult.success(
+        request.task, request.own_name, spoken,
+        payload={
+            "handled_by": "read_back",
+            "collections": tuple(name for name in read_back_collections(text)),
+            "speak_in_full": True,
+        },
+    )
+
+
+READ_BACK = ManagerCapability(
+    name="read_back",
+    capabilities=frozenset({"read", "aloud"}),
+    handle=read_back,
+    description=(
+        "Reads back what is kept for the person - notes, schedule, tasks and reminders - "
+        "in full through the canonical voice path, from the stores that already own them."
+    ),
+    claims=read_back_intent,
+    scoreable=False,
 )
 
 
@@ -7636,6 +7791,8 @@ MANAGER_CAPABILITIES: dict[str, ManagerCapability] = {
     READ_CONTENT.name: READ_CONTENT,
     # Pre-Stage-9 Campaign 3: shared or recorded audio/video -> text.
     TRANSCRIBE_MEDIA.name: TRANSCRIBE_MEDIA,
+    # Pre-Stage-9 Campaign 7: kept notes, schedule and tasks, read back aloud.
+    READ_BACK.name: READ_BACK,
 }
 
 # Used when a task reaches the Manager without matching any handler's words.

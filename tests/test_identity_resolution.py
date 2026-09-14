@@ -315,6 +315,9 @@ class TestThisIsNotASecondRouter:
             "media_production",
             "milestone_recognition", "participant_invitation", "personal_context",
             "personal_recurring_events",
+            # Pre-Stage-9 Campaign 7: read-back is recognised by its reading
+            # shape plus a kept collection, never by the word "read" alone.
+            "read_back",
             "read_content",
             "recall_memory", "record_this", "reopen_task", "revise_artifact", "revise_diagram",
             "select_voice",

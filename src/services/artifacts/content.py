@@ -21,10 +21,13 @@ produced is read from its own canonical structured content, one unit per
 section. A future content type adds one branch in ``read_artifact_units``;
 nothing that *consumes* units changes.
 
-**Honest about what has no text.** An image, a recording or a video has no
-text units here - understanding those needs a vision or transcription
-capability, and this module never pretends otherwise. A scanned PDF with
-no text layer honestly yields nothing.
+**Honest about what has no text.** A recording or a video has no text units
+here - its speech needs a transcription capability, and this module never
+pretends otherwise. An image's units are the printed text actually recognised
+in it (``src/providers/media/local_ocr.py``, Pre-Stage-9 Campaign 7) - an image
+with no recognisable text, or a machine with no recogniser, honestly yields
+nothing; what the picture *shows* is still a vision question. A scanned PDF
+with no text layer honestly yields nothing.
 
 **Deterministic, no model.** Everything here - reading, locating "page 3",
 choosing which units answer a question - is literal and repeatable, so it
@@ -121,8 +124,25 @@ def read_artifact_units(artifact: Artifact) -> tuple[ContentUnit, ...]:
     if artifact.type == SUPPLIED_FILE_TYPE:
         from src.providers.document_knowledge_provider import DEFAULT_SUFFIXES, DocumentKnowledgeProvider
 
+        from src.providers.media.local_ocr import DEFAULT_OCR_READER, OCRError
+
         for rendition_path in latest.renditions.values():
             path = Path(rendition_path)
+            if DEFAULT_OCR_READER.reads(path):
+                # Pre-Stage-9 Campaign 7 (RD-04): an image's units are the
+                # lines of printed text recognised in it, top to bottom.
+                if not DEFAULT_OCR_READER.available():
+                    continue
+                try:
+                    lines = DEFAULT_OCR_READER.lines(path)
+                except OCRError:
+                    continue
+                if lines:
+                    return tuple(
+                        ContentUnit(locator=f"paragraph {index}", text=line)
+                        for index, line in enumerate(lines, start=1)
+                    )
+                continue
             # Only a format the reader genuinely understands is read. The
             # reader treats anything it does not recognise as plain text,
             # so an image, a recording or a .docx must never reach it - it

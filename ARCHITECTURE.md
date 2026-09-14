@@ -9062,3 +9062,69 @@ scheduler.**
 | TIM-04 a due reminder is raised proactively, served page and unattended heartbeat | VERIFIED WORKING (spoken/OS notification with the page closed NOT VERIFIED) |
 | TIM-02 reminders persist across restart | VERIFIED WORKING |
 | TIM-06 stale-date calendar test | VERIFIED WORKING |
+
+### 52.37 Pre-Stage-9 Campaign 7 - read anything aloud
+
+**What the Master Pre-Stage-9 Audit found.** Only supplied files could be read
+aloud. "Read my notes to me" and "read my schedule to me" fell to open
+conversation and were refused in Half Brain although the notes and calendar
+existed (RD-03); the printed text in a photo had no reader at all (RD-04); a web
+article or a book had no path (RD-05). Word documents and recording
+transcription were repaired in Campaign 3 (RD-02, REC-04) and are re-verified
+here.
+
+**The repair - every source feeds the one content pipeline or the stores that
+already own it; nothing is read a second way.**
+
+- ``read_back`` (new capability): "read my notes to me", "read back my schedule
+  for tomorrow", "go over my tasks", "read my notes and my agenda to me". Notes
+  are the records kept on request (``retention_requests``) and "record this"
+  captures; the schedule is ``_calendar_retrieve``'s own listing (its period
+  words included); tasks and reminders are the pending tasks, spoken without
+  internal ids and with each reminder's moment. Marked ``speak_in_full``. An
+  ordinary sentence ("I read my notes every morning") and a request aimed at a
+  file ("read my notes PDF") are never claimed.
+- ``src/providers/media/local_ocr.py``: ``WindowsOCRReader`` - Windows' offline
+  ``Windows.Media.Ocr`` engine, no vendor, key, network or dependency, a
+  ``_run_powershell`` seam, results cached per file state.
+  ``read_artifact_units`` gives an image its recognised lines as units, so
+  ``read_content`` ("read the text in this photo to me", "what does this sign
+  say?", "what's written on the whiteboard") and every other unit consumer work
+  unchanged. "What's in this image?" remains a vision question
+  (``image_analysis``).
+- ``DocumentKnowledgeProvider`` reads saved web pages (``.html/.htm/.xhtml`` -
+  ``html_blocks``: block text in order, scripts/styles/navigation/forms skipped)
+  and e-books (``.epub`` - chapters in the package spine's reading order), with
+  the standard library alone; ingestion files both as documents.
+- Opening an arbitrary web address is deliberately **not** added: the live
+  information boundary forbids arbitrary scraping and outward access belongs to
+  a governed, declared connection. A request naming an address is answered
+  honestly before any shared file is considered (found at runtime: with a book
+  already shared, the address had been ignored and the book read).
+
+**Verification.**
+
+- ``tests/test_campaign_07_read_anything.py`` (read-back grammar and exclusions;
+  notes/schedule/tasks read back; honest empty notes; picture-text grammar and
+  the vision boundary; recogniser seam, cache and honest failure; a real
+  Windows recognition of a rendered PNG through upload and ``read_content``;
+  HTML blocks; EPUB spine order; malformed book; article and book read through
+  upload; bare address and address-with-shared-file refused) plus the document,
+  artifact, ingestion, capability-registry, file/media and reminder suites.
+- Real served system with the **real local Kokoro voice** (isolated scratch
+  data, production ``data/`` hash unchanged, Half Brain; the finished WAV
+  captured at the playback call - synthesis verified, speaker playback not
+  claimed): kept notes and tasks read back and synthesised (3.3 s, 4.8 s); a PNG
+  with printed text rendered by Windows graphics uploaded and read aloud word for
+  word (7.8 s); a saved web page read without its script, navigation or footer
+  (13.4 s); an EPUB read in spine order and by paragraph (4.8 s); in every spoken
+  turn the synthesised text equalled the full answer.
+
+| Requirement | Status |
+|---|---|
+| RD-03 read back notes, schedule, tasks and reminders | VERIFIED WORKING |
+| RD-04 read the text in images | VERIFIED WORKING for printed text rendered into real images with the local Windows recogniser; camera photographs and handwriting NOT VERIFIED |
+| RD-05 read web articles and books aloud | VERIFIED PARTIAL - saved pages (.html) and e-books (.epub) VERIFIED WORKING; fetching a page from a web address NOT FOUND by design (needs a governed connection) |
+| RD-02 Word documents read aloud | VERIFIED WORKING (Campaign 3, suites re-run) |
+| REC-04 transcribe recordings and audio | VERIFIED WORKING (Campaign 3, suites re-run) |
+| Spoken output of long readings | VERIFIED WORKING for synthesis with real Kokoro; playback on this machine's speakers NOT VERIFIED |

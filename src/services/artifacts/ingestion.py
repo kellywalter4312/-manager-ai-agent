@@ -52,6 +52,8 @@ _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 _KIND_BY_EXTENSION: dict[str, str] = {
     **{ext: "document" for ext in ("pdf", "txt", "text", "md", "markdown", "csv", "xlsx", "pptx", "docx", "rtf")},
     **{ext: "image" for ext in ("png", "jpg", "jpeg", "gif", "webp", "bmp", "heic")},
+    # Pre-Stage-9 Campaign 7: a saved web page and an e-book are documents.
+    **{ext: "document" for ext in ("html", "htm", "xhtml", "epub")},
     **{ext: "audio" for ext in ("wav", "mp3", "m4a", "ogg", "webm", "aac", "flac")},
     **{ext: "video" for ext in ("mp4", "mov", "mkv", "avi")},
 }
