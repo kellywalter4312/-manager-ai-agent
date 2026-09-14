@@ -536,6 +536,34 @@ def _apply_reasoning_live(centre: "ControlCenter", store) -> str:
     )
 
 
+def _new_family_member(components, component_id: str):
+    """A component the inventory does not list yet that can genuinely begin
+    from nothing - its handler supplies a starting version - and joins a family
+    that really exists (a new surface kind for a real agent: ``surface.arthur.``
+    already has members). Anything else is still "no such component"."""
+    from src.services.evolution.handlers import handler_for
+    from src.services.evolution.inventory import ComponentSnapshot
+
+    handler = handler_for(component_id)
+    initial = handler.initial_version(component_id) if handler is not None else None
+    family, sep, member = component_id.rpartition(".")
+    sibling = next((c for c in components if sep and c.component_id.startswith(family + ".")), None)
+    if initial is None or sibling is None:
+        return None
+    return ComponentSnapshot(
+        component_id=component_id, category=sibling.category,
+        label=f"{member} (not declared yet)", version=initial,
+    )
+
+
+def _governed_control_center(runtime, manager) -> "ControlCenter":
+    """A Control Center view reading governed surface states from this
+    module's own config path, looked up at call time (Pre-Stage-9 Campaign 5)."""
+    centre = ControlCenter(runtime, manager)
+    centre.bind_governed_config(lambda: load_governed_config(DEFAULT_CONFIG_PATH).values)
+    return centre
+
+
 def build(settings: Settings):
     """Assemble the system exactly as the other entry points do.
 
@@ -2018,6 +2046,17 @@ def run_ecosystem_command(centre: "ControlCenter", rest: str) -> str:
     component_id, *rest_args = args
     component = next((c for c in components if c.component_id == component_id), None)
     if component is None:
+        from src.services.evolution.inventory import MANAGER_COMPONENT_ID, is_manager_component
+
+        if is_manager_component(component_id):
+            # A legacy Manager id ("alfred", HC-01) still addresses the Manager
+            # component, under its canonical role id - proposals are found by
+            # their own id, so nothing already recorded is orphaned.
+            component_id = MANAGER_COMPONENT_ID
+            component = next((c for c in components if c.component_id == MANAGER_COMPONENT_ID), None)
+    if component is None:
+        component = _new_family_member(components, component_id)
+    if component is None:
         known = ", ".join(c.component_id for c in components)
         return f"no such component '{component_id}'. Known components: {known}"
 
@@ -2101,6 +2140,11 @@ def run_ecosystem_command(centre: "ControlCenter", rest: str) -> str:
             # session in place, the same way a provider switch does.
             detail += "\nPersisted and independently re-verified." + _apply_reasoning_live(
                 centre, load_credential_store(DEFAULT_ACCOUNTS_PATH)
+            )
+        elif result.success and component_id.startswith("surface."):
+            detail += (
+                "\nPersisted and independently re-verified. Live now: surfaces are described "
+                "from the governed config on every read, so no reload is needed."
             )
         elif result.success and component_id.startswith("provider."):
             detail += (
@@ -3066,7 +3110,7 @@ def _reload_session(centre: "ControlCenter", command: str, *, channel=None, conv
         print(f"reload failed, nothing changed: {exc}")
         return None
 
-    new_centre = ControlCenter(runtime, manager)
+    new_centre = _governed_control_center(runtime, manager)
 
     message = "Reloaded"
     if overrides:
@@ -3168,7 +3212,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"configuration error: {exc}")
         return 2
 
-    centre = ControlCenter(runtime, manager)
+    centre = _governed_control_center(runtime, manager)
     columns = args.width or width()
 
     if not args.command:

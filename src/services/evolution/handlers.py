@@ -104,6 +104,13 @@ class EvolutionHandler(ABC):
     @abstractmethod
     def rollback(self, proposal: EvolutionProposal, *, context: HandlerContext) -> HandlerResult: ...
 
+    def initial_version(self, component_id: str) -> "str | None":
+        """The version a component this handler owns starts from when nothing
+        has recorded one yet - None (the default) keeps "discover it first",
+        so only a category that can genuinely begin from nothing supplies one
+        (Pre-Stage-9 Campaign 5)."""
+        return None
+
 
 def _model_segment(version: str) -> "str | None":
     """A ``provider.*`` component's version is always the full
@@ -217,10 +224,14 @@ class SpecialistIdentityHandler(EvolutionHandler):
     """
 
     def applies_to(self, component_id: str) -> bool:
-        return component_id == "alfred" or component_id.startswith("specialist.")
+        from src.services.evolution.inventory import is_manager_component
+
+        return is_manager_component(component_id) or component_id.startswith("specialist.")
 
     def _resolve_path(self, component_id: str, settings) -> Path:
-        if component_id == "alfred":
+        from src.services.evolution.inventory import is_manager_component
+
+        if is_manager_component(component_id):
             return Path(settings.identity_path)
         key = component_id.removeprefix("specialist.")
         return identity_path(settings.identities_dir, key)
@@ -248,7 +259,9 @@ class SpecialistIdentityHandler(EvolutionHandler):
         # touching the real file - a malformed document must never
         # land, even briefly.
         try:
-            if proposal.target == "alfred":
+            from src.services.evolution.inventory import is_manager_component
+
+            if is_manager_component(proposal.target):
                 from src.services.identity.identity import parse_identity
 
                 parse_identity(new_text)
@@ -486,6 +499,51 @@ class BrainModeHandler(EvolutionHandler):
         return HandlerResult(True, f"'{proposal.target}' restored to '{proposal.current_version}'")
 
 
+class SurfaceHandler(EvolutionHandler):
+    """An agent's own interaction surface - offered and rendered, offered and
+    planned, or withdrawn - governed like every other component (Pre-Stage-9
+    Campaign 5, SRF-03). ``surface.<agent>.<kind>``: any agent, any kind; the
+    agent's own declaration stays the default and this records the owner's
+    approved evolution of it, applied wherever a surface is described
+    (``InterfaceDescriptor.governed``)."""
+
+    def applies_to(self, component_id: str) -> bool:
+        from src.control_center.interfaces import SURFACE_COMPONENT_PREFIX
+
+        return component_id.startswith(SURFACE_COMPONENT_PREFIX) and component_id.count(".") == 2
+
+    def initial_version(self, component_id: str) -> "str | None":
+        """A surface kind an agent has never declared starts as "undeclared",
+        so the owner can grant a brand-new kind through governance."""
+        return "undeclared"
+
+    def apply(self, proposal: EvolutionProposal, *, context: HandlerContext) -> HandlerResult:
+        from src.control_center.interfaces import SURFACE_STATES, SurfaceKind
+
+        if proposal.proposed_version not in SURFACE_STATES:
+            return HandlerResult(False, f"'{proposal.proposed_version}' is not a surface state. Expected one of: {', '.join(SURFACE_STATES)}")
+        try:
+            SurfaceKind(proposal.target.rsplit(".", 1)[-1])
+        except ValueError as exc:
+            return HandlerResult(False, str(exc))
+        config = load_governed_config(context.config_path).with_value(proposal.target, proposal.proposed_version)
+        save_governed_config(config, context.config_path)
+        if load_governed_config(context.config_path).get(proposal.target) != proposal.proposed_version:
+            return HandlerResult(False, "wrote the surface state, but the independent re-read did not confirm it landed")
+        return HandlerResult(True, f"'{proposal.target}' is now {proposal.proposed_version} (independently re-read from disk)")
+
+    def rollback(self, proposal: EvolutionProposal, *, context: HandlerContext) -> HandlerResult:
+        from src.control_center.interfaces import SURFACE_STATES
+
+        config = load_governed_config(context.config_path)
+        if proposal.current_version in SURFACE_STATES:
+            config = config.with_value(proposal.target, proposal.current_version)
+        else:
+            config = config.without_value(proposal.target)
+        save_governed_config(config, context.config_path)
+        return HandlerResult(True, f"'{proposal.target}' restored to {proposal.current_version}")
+
+
 # The open-ended registration point (Section 11's own requirement): a
 # future category registers one handler here (or calls
 # ``register_handler`` at import time from its own module) and needs no
@@ -497,6 +555,7 @@ _HANDLERS: "list[EvolutionHandler]" = [
     ToolConfigHandler(),
     ConnectionAdapterHandler(),
     BrainModeHandler(),
+    SurfaceHandler(),
 ]
 
 

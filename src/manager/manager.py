@@ -379,16 +379,29 @@ class ManagerAgent:
         """
         if addressed:
             agent = self.registry.get(addressed)
-            if agent is not None:
+            own_name = self.own_skills.name if self.own_skills is not None else None
+            if agent is not None and agent.name == own_name:
+                # Pre-Stage-9 Campaign 5 (ART-01): addressing the orchestrator
+                # is asking the orchestrator - which includes asking it to hand
+                # work to whoever should do it. Found at runtime: on the Manager's
+                # own private line a request a registered specialist claims was
+                # answered by the Manager itself, never delegated, while the
+                # identical request unaddressed was delegated correctly. So
+                # an address to the Manager falls through to claims, the router
+                # and unclaimed work below - which still returns the Manager for
+                # anything no specialist should take.
+                logger.debug("the Manager was addressed; deciding who handles it as usual")
+            elif agent is not None:
                 return RoutingDecision(
                     agent_name=agent.name,
                     score=1,
                     reason="addressed directly by name",
                 )
-            logger.info(
-                "'%s' was addressed but is not registered; routing normally",
-                addressed,
-            )
+            else:
+                logger.info(
+                    "'%s' was addressed but is not registered; routing normally",
+                    addressed,
+                )
         if self.own_skills is not None:
             claims = getattr(self.own_skills, "claims", None)
             if claims is not None and claims(task):

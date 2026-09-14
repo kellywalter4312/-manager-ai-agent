@@ -170,7 +170,8 @@ def propose(
     still refused honestly, never silently accepted only to fail later
     at apply.
     """
-    if handler_for(component_id) is None:
+    handler = handler_for(component_id)
+    if handler is None:
         return StepResult(
             False,
             f"no evolution handler is registered for '{component_id}' - this category has no "
@@ -179,6 +180,11 @@ def propose(
         )
 
     current_version = state.ledger.version_of(component_id)
+    if current_version is None:
+        # A category that can genuinely begin from nothing supplies its own
+        # starting version (Pre-Stage-9 Campaign 5); every other category
+        # still has to be discovered first.
+        current_version = handler.initial_version(component_id)
     if current_version is None:
         return StepResult(False, f"'{component_id}' has no known current version yet - discover it first", None, state)
 
@@ -235,7 +241,9 @@ def propose_identity_content(
     """
     import hashlib
 
-    if handler_for(component_id) is None or not (component_id == "alfred" or component_id.startswith("specialist.")):
+    from src.services.evolution.inventory import is_manager_component
+
+    if handler_for(component_id) is None or not (is_manager_component(component_id) or component_id.startswith("specialist.")):
         return StepResult(False, f"'{component_id}' is not a specialist/identity component", None, state)
 
     current_version = state.ledger.version_of(component_id)

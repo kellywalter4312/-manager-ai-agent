@@ -255,14 +255,19 @@ class ArtifactProductionTool(Tool):
             limit = max(1, int(content.strip() or "5"))
         except ValueError:
             limit = 5
-        owned = sorted(
-            (
-                a for a in self._store.all()
-                if a.owner_agent == self._owner_agent and a.type in TEXT_CONTENT_TYPES
-            ),
-            key=lambda a: a.latest.created_at,
-            reverse=True,
-        )[:limit]
+        # Newest first; two files stored within the same clock tick keep the
+        # order they were stored in (found as an intermittent full-suite
+        # failure: equal timestamps left the order to chance).
+        owned = [
+            a for _position, a in sorted(
+                (
+                    (position, a) for position, a in enumerate(self._store.all())
+                    if a.owner_agent == self._owner_agent and a.type in TEXT_CONTENT_TYPES
+                ),
+                key=lambda pair: (pair[1].latest.created_at, pair[0]),
+                reverse=True,
+            )[:limit]
+        ]
         if not owned:
             raise ArtifactError(f"no document or supplied file exists yet for {self._owner_agent!r}")
         return json.dumps(

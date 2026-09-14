@@ -170,6 +170,7 @@ from src.control_center.render import render_overview  # noqa: E402
 from src.control_center.snapshot import snapshot  # noqa: E402
 from src.manager.proactive_experience import deliver_experience  # noqa: E402
 from src.services.artifacts.content import SHARED_FILE_PREFIX, read_artifact_units  # noqa: E402
+from src.services.evolution.governed_config import load_governed_config  # noqa: E402
 from src.services.artifacts.ingestion import IngestionError, MAX_SUPPLIED_FILE_BYTES, ingest_supplied_file  # noqa: E402
 from src.services.artifacts.models import VoiceRecordingContent  # noqa: E402
 from src.services.artifacts.registration import register_new_artifact  # noqa: E402
@@ -242,6 +243,19 @@ class LiveSystem:
     lock: threading.Lock
 
 
+def _governed_centre(runtime, manager) -> ControlCenter:
+    """A Control Center view that reads governed surface states from the
+    Control Center's own config path, looked up at call time so a redirected
+    path (a test, an isolated harness) is the one read."""
+    import scripts.control_center as control_center_module
+
+    centre = ControlCenter(runtime, manager)
+    centre.bind_governed_config(
+        lambda: load_governed_config(control_center_module.DEFAULT_CONFIG_PATH).values
+    )
+    return centre
+
+
 def build_live_system(settings: Settings) -> LiveSystem:
     """Assemble the one system this process will serve, once.
 
@@ -255,7 +269,7 @@ def build_live_system(settings: Settings) -> LiveSystem:
         manager=manager,
         channel=channel,
         conversation=conversation,
-        centre=ControlCenter(runtime, manager),
+        centre=_governed_centre(runtime, manager),
         lock=threading.Lock(),
     )
 
@@ -722,7 +736,7 @@ def route_workspace_enter(agent: object, system: LiveSystem) -> tuple[int, bytes
             json.dumps({"error": f"no such agent: {agent!r}"}).encode("utf-8"),
             "application/json; charset=utf-8",
         )
-    interface = describe_interface(resolved)
+    interface = describe_interface(resolved, governed=system.centre.governed_values())
     if not interface.can_render(InterfaceFeature.WORKSPACE):
         return (
             400,

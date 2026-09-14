@@ -32,6 +32,8 @@ nothing and predicting one would describe a mechanism it does not have.
 
 from __future__ import annotations
 
+from typing import Callable, Mapping
+
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
@@ -217,6 +219,22 @@ class ControlCenter:
     def __init__(self, runtime: Any, manager: ManagerAgent) -> None:
         self._runtime = runtime
         self._manager = manager
+        # Pre-Stage-9 Campaign 5: the governed config's values, read when a
+        # surface is described - bound by whoever knows which config file is
+        # real (the Control Center entry points), never read from a fixed
+        # path here. None: agents' own declarations only.
+        self._governed_values: "Callable[[], Mapping[str, str]] | None" = None
+
+    def bind_governed_config(self, values: "Callable[[], Mapping[str, str]]") -> None:
+        self._governed_values = values
+
+    def governed_values(self) -> "Mapping[str, str]":
+        if self._governed_values is None:
+            return {}
+        try:
+            return dict(self._governed_values())
+        except Exception:  # noqa: BLE001 - an unreadable config must not break a view
+            return {}
 
     def rebind_runtime(self, runtime: Any) -> None:
         """Point this view at a runtime whose reasoning provider was switched
@@ -257,7 +275,7 @@ class ControlCenter:
             memory=_memory_view(identity.name, self._manager.memory, identity.name),
             capabilities=_capability_views(skills, tools) if skills is not None else (),
             tools=_tool_views(tools),
-            interface=describe_interface(skills) if skills is not None else None,
+            interface=describe_interface(skills, governed=self.governed_values()) if skills is not None else None,
             # Stage 17: read from the Manager's own canonical Memory -
             # own_skills itself exposes no .memory (see presence.py's
             # own module docstring for why every presence function
@@ -319,7 +337,7 @@ class ControlCenter:
             # Asked of the agent, not decided here. A specialist that declares
             # a workspace gets one offered; one that declares nothing gets
             # conversation, and neither needs this file to know it exists.
-            interface=describe_interface(agent),
+            interface=describe_interface(agent, governed=self.governed_values()),
             # Stage 17: a specialist's own Memory is directly on the
             # agent (unlike the Manager's own_skills), so this reaches
             # it the same way _memory_view above already does.

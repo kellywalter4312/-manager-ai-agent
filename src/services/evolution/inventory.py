@@ -216,6 +216,33 @@ def _specialist_component(key: str, name: str, settings: Settings) -> ComponentS
     )
 
 
+def _surface_components(manager, config) -> tuple[ComponentSnapshot, ...]:
+    """Every surface every agent offers - the manager's own and each
+    registered specialist's - as a governable component whose version is its
+    current state (implemented / planned), the governed config applied."""
+    from src.control_center.interfaces import SURFACE_IMPLEMENTED, SURFACE_PLANNED, describe_interface, surface_component_id
+
+    if manager is None:
+        return ()
+    agents = []
+    if getattr(manager, "own_skills", None) is not None:
+        agents.append(manager.own_skills)
+    agents.extend(agent for agent in manager.registry.all_agents() if agent is not getattr(manager, "own_skills", None))
+    result = []
+    for agent in agents:
+        descriptor = describe_interface(agent, governed=config.values)
+        for kind in sorted(descriptor.features):
+            result.append(
+                ComponentSnapshot(
+                    component_id=surface_component_id(descriptor.agent, kind),
+                    category="surface",
+                    label=f"{descriptor.display_name}: {kind}",
+                    version=SURFACE_IMPLEMENTED if descriptor.can_render(kind) else SURFACE_PLANNED,
+                )
+            )
+    return tuple(result)
+
+
 def _brain_components(settings: Settings) -> tuple[ComponentSnapshot, ...]:
     """Which reasoning *mode* is selected - Full ("llm") or Half ("null") -
     a genuinely different axis from *which vendor* answers (that is
@@ -323,15 +350,40 @@ def _connection_adapter_components(config) -> tuple[ComponentSnapshot, ...]:
     )
 
 
-def alfred_component(settings: Settings) -> ComponentSnapshot:
+# Pre-Stage-9 Campaign 5 (HC-01): the orchestrator's identity component is
+# keyed by its role, never by whichever name its identity document currently
+# declares. "alfred" was the id before this and is still accepted everywhere a
+# component id is resolved (LEGACY_MANAGER_COMPONENT_IDS), so a ledger written
+# under it keeps working.
+MANAGER_COMPONENT_ID = "manager"
+LEGACY_MANAGER_COMPONENT_IDS = ("alfred",)
+
+
+def is_manager_component(component_id: str) -> bool:
+    return component_id == MANAGER_COMPONENT_ID or component_id in LEGACY_MANAGER_COMPONENT_IDS
+
+
+def manager_component(settings: Settings) -> ComponentSnapshot:
     path = Path(settings.identity_path)
+    name = "the Manager"
+    if path.exists():
+        try:
+            from src.services.identity.identity import load_identity
+
+            name = load_identity(path).name or name
+        except Exception:  # noqa: BLE001 - an unreadable document still has a component
+            pass
     return ComponentSnapshot(
-        component_id="alfred",
+        component_id=MANAGER_COMPONENT_ID,
         category="specialist",
-        label="Alfred (the Manager)",
+        label=f"{name} (the Manager)",
         version=_file_version(path) if path.exists() else "(no identity document)",
         detail=str(path),
     )
+
+
+# Kept for any caller written against the old name.
+alfred_component = manager_component
 
 
 def discover_components(
@@ -356,7 +408,7 @@ def discover_components(
     store = load_credential_store(accounts_path)
     config = load_governed_config(config_path)
 
-    components: list[ComponentSnapshot] = [alfred_component(settings)]
+    components: list[ComponentSnapshot] = [manager_component(settings)]
 
     for key, specialist in runtime.specialists.items():
         components.append(_specialist_component(key, specialist.name, settings))
@@ -379,6 +431,7 @@ def discover_components(
     components.extend(_connection_adapter_components(config))
 
     components.extend(_brain_components(settings))
+    components.extend(_surface_components(manager, config))
 
     components.extend(_capability_config_components(config))
     components.extend(_tool_config_components(config, settings))

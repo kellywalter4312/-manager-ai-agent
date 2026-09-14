@@ -450,9 +450,11 @@ class TestSpecialistIdentityEvolution:
         new_text = original_bytes.decode("utf-8") + "\n\n<!-- evolved by a governed proposal -->\n"
         _write(new_content_path, new_text)
 
+        # The legacy id "alfred" is still accepted; the Manager component is
+        # keyed by its role (Pre-Stage-9 Campaign 5, HC-01).
         propose_out = run_ecosystem_command(centre, f"alfred propose-content {new_content_path} low real update|clarity")
-        assert "proposed" in propose_out
-        result = run_ecosystem_command(centre, "alfred run alfred-1 yes")
+        assert "proposed 'manager-1'" in propose_out
+        result = run_ecosystem_command(centre, "manager run manager-1 yes")
         assert "OK" in result
 
         after_bytes = identity_path.read_bytes()

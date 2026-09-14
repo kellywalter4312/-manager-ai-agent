@@ -8934,3 +8934,75 @@ continuity across providers that the switch itself did not keep (DOC-01).
 | CC-02 Control Center manages the reasoning provider and mode live, no code or env edits | VERIFIED WORKING |
 | Full Brain turned on/off from the Control Center | VERIFIED WORKING for the switch; Full Brain reasoning itself BLOCKED (unfunded key) |
 | DOC-01 provider-continuity claims match the code | VERIFIED WORKING (§0 row and superseded notes updated) |
+
+### 52.35 Pre-Stage-9 Campaign 5 - agents own governed, open-ended surfaces; requests reach the right agent
+
+**What the Master Pre-Stage-9 Audit found.** ``InterfaceFeature`` was a closed
+enum, so an agent could only ever offer the kinds this repository already named,
+and nothing could change what an agent renders without editing its declaration
+(SRF-01, SRF-03). The Manager's evolution component was the hard-coded id
+``"alfred"`` - a name, not a role (HC-01). On the Manager's own private line a
+request a specialist claims was answered by the Manager itself, while the same
+request unaddressed was delegated (ART-01). "Arthur, what can you do?" in the
+Room looked answered by Alfred (ROOM-02) - re-examined in this campaign: the
+audit harness had addressed every message to Alfred; the Room itself routes by
+name correctly.
+
+**The repair.**
+
+- ``SurfaceKind`` is an open, validated string (lower-case word, ``-``/``_``
+  allowed); the ``InterfaceFeature`` members are simply the known kinds, the same
+  values. ``InterfaceDescriptor`` normalises every kind and gains
+  ``governed(values)``; ``describe_interface(agent, governed=...)`` applies the
+  owner's approved states. A future agent brings its own kind with no change
+  here.
+- ``SurfaceHandler`` (``surface.<agent>.<kind>``): states ``implemented`` /
+  ``planned`` / ``withdrawn``, written to the GovernedConfig and re-read; rollback
+  restores or removes. ``initial_version`` lets a handler say a component can
+  begin from nothing (a surface starts ``undeclared``), and the Control Center
+  accepts such a component only when it joins a family that really exists
+  (``surface.arthur.`` has members; ``surface.nobody.map`` is refused).
+- Inventory lists every surface of every agent (``_surface_components``); the
+  terminal and served Control Centers bind the governed config
+  (``bind_governed_config``), so snapshot, workspace entry and descriptions
+  read the approved state live - no reload.
+- ``MANAGER_COMPONENT_ID = "manager"`` with ``LEGACY_MANAGER_COMPONENT_IDS``
+  (``"alfred"``) accepted everywhere and mapped to the role id; the label comes
+  from the running identity.
+- ``ManagerAgent.decide``: an address to the Manager itself falls through to
+  claims, the router and unclaimed work, so delegation still happens on its own
+  line; a specialist addressed by name still answers directly.
+
+**Verification.**
+
+- ``tests/test_campaign_05_surfaces_and_routing.py`` plus the ecosystem
+  evolution, manageability, workspace, routing, identity, delegation and Room
+  suites (1066 focused tests).
+- Real served system (isolated scratch stores, production ``data/`` hash
+  unchanged, Half Brain): Arthur's ``mailbox`` went planned -> implemented and a
+  never-declared ``workspace`` undeclared -> implemented through the served,
+  confirmed ``ecosystem ... run`` route; the snapshot showed both at once,
+  ``/workspace/enter`` for Arthur changed 400 -> 200, and a fresh start kept both.
+  On Alfred's private line "scan my inbox for opportunities" was delegated to
+  Arthur (3 ranked opportunities) while "what's the date today?" stayed with
+  Alfred; in the Room "Arthur, what can you do?" and "Alfred, what can you do?"
+  were each answered by the agent named.
+
+- Real headless Chromium over CDP against the isolated served system, after
+  Arthur's surfaces were granted only through the governed Control Center
+  lifecycle: Arthur's private line showed ``mailbox`` and ``workspace`` as
+  rendered interface chips (``opportunities`` still planned); the Presentation
+  page's Surfaces pair showed the same; the Workspace switcher offered an
+  ARTHUR tab discovered from his interface alone; no page errors.
+- Found by the full suite, unrelated to surfaces: ``artifact_production``'s
+  ``list_content`` sorted only by ``created_at``, so two files stored within one
+  clock tick listed in arbitrary order (an intermittent REPAIR-01 test failure).
+  It now breaks ties by storage order, keeping "newest first" deterministic.
+
+| Requirement | Status |
+|---|---|
+| SRF-01 agents declare open-ended surface kinds | VERIFIED WORKING |
+| SRF-03 surfaces evolve through governance, live and persisted | VERIFIED WORKING |
+| HC-01 Manager component keyed by role, legacy id honoured | VERIFIED WORKING |
+| ROOM-02 in the Room, the agent named answers | VERIFIED WORKING (audit harness artefact, no code defect) |
+| ART-01 addressing the Manager still delegates specialist work | VERIFIED WORKING |

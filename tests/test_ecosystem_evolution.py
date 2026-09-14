@@ -88,7 +88,7 @@ class TestInventoryDiscovery:
         components = discover_components(runtime, manager, accounts_path=control_center_module.DEFAULT_ACCOUNTS_PATH)
         by_id = {c.component_id: c for c in components}
 
-        assert by_id["alfred"].category == "specialist"
+        assert by_id["manager"].category == "specialist"
         assert by_id["specialist.email_agent"].category == "specialist"
         assert by_id["provider.llm_provider"].category == "provider"
         assert by_id["connection.connection"].category == "connection"
@@ -129,8 +129,8 @@ class TestInventoryDiscovery:
         first = discover_components(runtime, manager, accounts_path=control_center_module.DEFAULT_ACCOUNTS_PATH)
         second = discover_components(runtime, manager, accounts_path=control_center_module.DEFAULT_ACCOUNTS_PATH)
         assert (
-            next(c for c in first if c.component_id == "alfred").version
-            == next(c for c in second if c.component_id == "alfred").version
+            next(c for c in first if c.component_id == "manager").version
+            == next(c for c in second if c.component_id == "manager").version
         )
 
 
@@ -422,7 +422,7 @@ class TestNoDestructiveCoupling:
             c.component_id: c.version
             for c in discover_components(runtime, manager, accounts_path=control_center_module.DEFAULT_ACCOUNTS_PATH)
         }
-        for component_id in ("provider.avatar_provider", "provider.environment_provider", "brain.manager", "alfred", "specialist.email_agent"):
+        for component_id in ("provider.avatar_provider", "provider.environment_provider", "brain.manager", "manager", "specialist.email_agent"):
             assert before[component_id] == after[component_id], component_id
 
     def test_disconnecting_one_service_never_affects_another(self):
