@@ -4994,6 +4994,25 @@ _SEND_TO_PATTERN = re.compile(r"^(?:please\s+)?send\s+(.+?)\s+to\s+(.+)$", re.IG
 _SEND_PARTY_PATTERN = re.compile(
     r"^(?:please\s+)?send\s+(\S+)\s+(?:a|an|the)?\s*message\b\s*(.*)$", re.IGNORECASE
 )
+# Pre-Stage-9 Campaign 10 (CON-04): "send a message to Mum saying I'll be late",
+# "text a note to Sam: running late", "message Kai to say hello". The message
+# noun and the joining word are grammar; the party and the words are what the
+# person said.
+_MESSAGE_TO_PARTY_PATTERN = re.compile(
+    r"^(?:please\s+)?(?:send|text|message|write)\s+(?:(?:a|an|the)\s+)?(?:quick\s+)?(?:message|text|note|msg)\s+"
+    r"to\s+(?P<party>.+?)(?:\s*(?::|,)?\s+(?:saying|that\s+says|that|to\s+say|telling\s+(?:them|him|her))\s+|\s*:\s*)(?P<content>.+)$",
+    re.IGNORECASE,
+)
+_MESSAGE_TO_PARTY_ONLY_PATTERN = re.compile(
+    r"^(?:please\s+)?(?:send|text|write)\s+(?:(?:a|an|the)\s+)?(?:quick\s+)?(?:message|text|note|msg)\s+to\s+(?P<party>.+)$",
+    re.IGNORECASE,
+)
+_CONTENT_LEAD = re.compile(r"^(?:saying|that\s+says|that|to\s+say)\s+", re.IGNORECASE)
+# "message Kai to say hello", "message Dr. Okafor saying the results are in".
+_MESSAGE_PARTY_PATTERN = re.compile(
+    r"^(?:please\s+)?message\s+(?P<party>.+?)\s+(?:saying|that\s+says|that|to\s+say|telling\s+(?:them|him|her))\s+(?P<content>.+)$",
+    re.IGNORECASE,
+)
 _REPLY_PATTERN = re.compile(r"^(?:please\s+)?repl(?:y|ies)\s+(?:to\s+)?(.+)$", re.IGNORECASE)
 
 # Read has no party or content to extract - a fixed marker set, the same
@@ -5029,6 +5048,18 @@ def _communication_shape(text: str) -> tuple[str, str, str] | None:
     if _marker_present(text, READ_MARKERS):
         return ("read", "", "")
 
+    match = _MESSAGE_TO_PARTY_PATTERN.match(working)
+    if match:
+        return ("send", match.group("party").strip(" :,."), match.group("content").strip())
+
+    match = _MESSAGE_TO_PARTY_ONLY_PATTERN.match(working)
+    if match:
+        return ("send", match.group("party").strip(" :,."), "")
+
+    match = _MESSAGE_PARTY_PATTERN.match(working)
+    if match:
+        return ("send", match.group("party").strip(" :,."), match.group("content").strip())
+
     match = _SEND_TO_PATTERN.match(working)
     if match:
         content, party = match.group(1).strip(), match.group(2).strip()
@@ -5044,7 +5075,7 @@ def _communication_shape(text: str) -> tuple[str, str, str] | None:
     if match:
         parts = match.group(1).strip().split(None, 1)
         party = parts[0].strip(" :,.") if parts else ""
-        content = parts[1].strip() if len(parts) > 1 else ""
+        content = _CONTENT_LEAD.sub("", parts[1].strip()) if len(parts) > 1 else ""
         return ("send", party, content)
 
     match = _REPLY_PATTERN.match(working)

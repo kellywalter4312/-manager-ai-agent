@@ -632,7 +632,7 @@ class ManagerSkills(BaseAgent):
         )
 
         self._last_selected = (task.id, capability.name)
-        return capability.handle(
+        result = capability.handle(
             CapabilityRequest(
                 task=task,
                 identity=self._identity,
@@ -668,3 +668,10 @@ class ManagerSkills(BaseAgent):
                 assess_governance=self._assess_governance,
             )
         )
+        # Pre-Stage-9 Campaign 10 (CON-04): a pending confirmation or
+        # clarification is resolved through open conversation on behalf of the
+        # capability that raised it - the trail names the one that answered.
+        handled_by = (result.payload or {}).get("handled_by") if result is not None else None
+        if isinstance(handled_by, str) and handled_by != capability.name and handled_by in self._capabilities:
+            self._last_selected = (task.id, handled_by)
+        return result

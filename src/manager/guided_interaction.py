@@ -111,7 +111,11 @@ def _try_resolve_confirmation(
         return TaskResult.success(
             request.task, request.own_name,
             f"Okay, I won't {pending.operation} on {target}." if pending.connection
-            else f"Okay, I won't {pending.operation} {pending.party}.",
+            else (
+                f'Okay, I won\'t send "{pending.content}" to {pending.party}.'
+                if pending.operation == "send" and pending.content
+                else f"Okay, I won't {pending.operation} {pending.party}."
+            ),
             payload={
                 "handled_by": "connected_action" if pending.connection else "communication",
                 "operation": pending.operation, "confirmed": False,
@@ -144,6 +148,19 @@ def _try_resolve_confirmation(
     return None
 
 
+def _credited(result: TaskResult, capability: str) -> TaskResult:
+    """A resolved confirmation's result names the capability it was resolved
+    for, even when that capability's own failure carried no payload - so the
+    trail credits the one that answered (Pre-Stage-9 Campaign 10, CON-04)."""
+    payload = dict(result.payload or {})
+    if payload.get("handled_by"):
+        return result
+    payload["handled_by"] = capability
+    from dataclasses import replace as _replace
+
+    return _replace(result, payload=payload)
+
+
 def guided_interaction_response(request) -> "TaskResult | None":
     """The one entry point ``open_conversation`` calls. Returns a
     TaskResult when this remark was handled as part of an in-progress or
@@ -165,7 +182,7 @@ def guided_interaction_response(request) -> "TaskResult | None":
     if confirmation is not None:
         resolved = _try_resolve_confirmation(request, confirmation, sessions, agent_key)
         if resolved is not None:
-            return resolved
+            return _credited(resolved, "connected_action" if confirmation.connection else "communication")
         # Neither a clear yes nor a clear no - leave it pending, the
         # person may simply be saying something else first; fall through
         # exactly as an unresolved clarification already does below.

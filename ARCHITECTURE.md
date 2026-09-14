@@ -9251,3 +9251,74 @@ conversation and were refused in Half Brain.
 | TRN-01 real-time spoken translation | BLOCKED - needs a language model plus speech recognition and voices in other languages, none installed |
 | IMG-03 image authenticity (recovered) | see §52.38 - VERIFIED PARTIAL |
 | REC-04 recording transcription (recovered) | see §52.33 - VERIFIED WORKING |
+
+### 52.42 Pre-Stage-9 Campaign 10 - connections and outward-action integrity
+
+**What the Master Pre-Stage-9 Audit found.** Outward actions asked first and a
+"no" was honoured (CON-04), but a decline was recorded under an unrelated
+capability. Real Gmail reading had never been verified (CON-02). Production
+connection data held test fixtures pointing at 127.0.0.1 (CON-03).
+
+**Found by this campaign's runtime verification.**
+
+- "Send a message to Mum saying I'll be late" asked 'Send "a message" to Mum
+  saying I'll be late?'. The generic "send X to Y" shape took the message noun
+  as the words and everything after "to" as the person. The decline then read
+  "Okay, I won't send Mum saying I'll be late."
+- Every yes/no answer to a pending confirmation was credited to
+  ``open_conversation``, the router that resolves it, not to the capability that
+  asked. A confirmed send that failed carried no payload at all.
+
+**The repair.**
+
+- Message grammar (``_communication_shape``) now reads the party and the words
+  first:
+  - "send/text/write a message|text|note to <party> saying|that|to say|: <words>";
+  - "message <party> saying|to say <words>";
+  - "send a message to <party>" with no words asks what to send;
+  - "text <party> that <words>" drops the joining word.
+  It is grammar only: no names, no contact list.
+- A declined send says back exactly what was not sent:
+  'Okay, I won't send "I'll be late" to Mum.'
+- ``ManagerSkills.execute`` credits the capability a result reports handling,
+  when this Manager really has it. ``guided_interaction._credited`` marks a
+  resolved confirmation's result, a failure included, with the capability that
+  raised it.
+- Gmail stays read-only by construction. ``read_email`` is its only operation;
+  anything else is ``UNSUPPORTED``, and a successful read reports only a count.
+- **Nothing in production connection data was deleted.** Its origin was traced.
+  ``reservablething`` (``services.json``) and ``fixturesite``/``govsite``
+  (``sites.json``), all at 127.0.0.1, were declared into the default
+  production paths by the Stage 16 live-verification scripts of 2026-09-10/11.
+  They are verification leftovers, not the owner's data, and remain listed for
+  the owner's decision.
+
+**Verification.**
+
+- ``tests/test_campaign_10_connections.py``:
+  - party and words for eight phrasings;
+  - a declined send said back exactly;
+  - each answer credited to ``communication``;
+  - a wordless message asks what to send;
+  - a confirmed send with no connection fails honestly, is credited correctly and sends nothing;
+  - Gmail through its real class with an in-memory mailbox: count-only read, no write operation, honest failure.
+
+  Run alongside the communication, guided-interaction, governance, Gmail,
+  connection, trail and Stage 15/16 suites.
+- On the real served system (isolated scratch data, no communication connection):
+  - both declines were honoured and said back exactly;
+  - both answers were credited to ``communication``;
+  - "send a message to Rema" asked what to send;
+  - a "yes" failed honestly ("no authorized communication connection is configured") - nothing was sent.
+- **Real Gmail, read-only and count-only:**
+  - the production composition's own connection builder was pointed at a scratch copy of the token, so a refresh could never rewrite production data;
+  - the connection reported authorized, but the read failed honestly - the saved token could not be refreshed - and availability became UNAVAILABLE;
+  - ``send_email`` was ``UNSUPPORTED``;
+  - the scratch copy was deleted, and the production ``data/`` hash (token included) was unchanged.
+
+| Requirement | Status |
+|---|---|
+| CON-04 outward actions ask first, honour "no", said back exactly, credited correctly | VERIFIED WORKING |
+| CON-02 real Gmail read | BLOCKED - the saved token can no longer be refreshed; the owner must re-authorize Gmail (interactive sign-in). Read-only enforcement VERIFIED WORKING |
+| CON-03 production data holds no test fixtures | VERIFIED BROKEN - three verification fixtures remain; origin traced; removal awaits the owner's approval |
+| CON-05 real delivery (messages, calls) | BLOCKED - no authorized outward communication connection |
