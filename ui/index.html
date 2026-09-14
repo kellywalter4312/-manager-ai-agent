@@ -1943,7 +1943,7 @@
           <div class="glass say private-say">${cut}
             <span class="addressed">A private line to ${esc(a.name)}</span>
             <input class="composer" data-to="${esc(a.name)}" placeholder="Message ${esc(a.name)}"${LIVE ? "" : " disabled"}>
-            <label class="attach" title="Share a file with ${esc(a.name)}">+ file<input type="file" class="attach-input" data-to="${esc(a.name)}" hidden${LIVE ? "" : " disabled"}></label>
+            <label class="attach" title="Share a file with ${esc(a.name)}">+ file<input type="file" class="attach-input" data-to="${esc(a.name)}" hidden${LIVE ? "" : " disabled"}></label><label class="attach" title="Take a photo and share it with ${esc(a.name)}">+ photo<input type="file" class="attach-input" accept="image/*" capture="environment" data-to="${esc(a.name)}" hidden${LIVE ? "" : " disabled"}></label>
             <span class="state">${esc(heard)}</span>
           </div>
         </div>

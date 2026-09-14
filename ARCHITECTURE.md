@@ -9370,3 +9370,57 @@ ordinary Control Center lifecycle.
 | EVO-02 ``register_handler`` - a new category with no engine change, through the Control Center | VERIFIED WORKING |
 | Governance refusals (unapproved, unknown, fabricated, double rollback) | VERIFIED WORKING |
 | A governed capability setting takes effect in the running session | VERIFIED PARTIAL - persisted and honoured by the next session; the running process says plainly it still holds the previous value |
+
+### 52.43 Pre-Stage-9 Campaign 11 - visual and device verification
+
+**What the Master Pre-Stage-9 Audit left open.** The phone layout was
+cluttered (VIS-03). Environment and avatar pickers were "not found" (VIS-04):
+the audit probe used the wrong selector. Speaking, listening and thinking states
+were never run (VIS-05), and the environment catalog was unconfirmed (SRF-02).
+The page had no camera capture (DEV-01). A secure origin for a phone's
+microphone was untested (DEV-03), and audible playback, voice on the user's own
+device and the wake phrase had never been exercised (VOI-02, VOI-03, AMB-01).
+
+**The repair.** A "+ photo" control sits beside "+ file" on every private line.
+It is the same ``attach-input`` bound to the same agent, restricted to images
+with ``capture="environment"``, so a phone opens its camera. The existing upload
+handler binds every ``.attach-input`` by class, so a photo goes through the one
+governed ingestion path with no new script and no second route.
+
+**Verification - real headless Chromium over CDP against an isolated served system.**
+
+- **SRF-02:** the snapshot serves the avatar catalog (4) and the environment
+  catalog (4: quiet_study, open_workspace, evening_lounge, technical_bay).
+- **VIS-04:** the Presentation page renders real pickers (8 avatar, 12
+  environment buttons). Clicking one of Arthur's unselected environments
+  (quiet_study) and avatars (warm_formal) changed what the server holds, and the
+  page still showed both choices after its own redraw. No page errors.
+- **VIS-05:** the listening and speaking states render distinctly on the private
+  line (border 0.2 idle -> listening 0.5 -> speaking in the speaking colour). The
+  voice control switches listening/thinking/speaking during a voice turn, and the
+  3D stage has its own speaking and listening motion driven by live presence.
+  Triggering those states from a real spoken turn needs a microphone.
+- **DEV-01:** Alfred's private line renders "+ file" and "+ photo"
+  (``accept="image/*"``, ``capture="environment"``), both enabled. UI, upload and
+  interface suites pass (1017).
+- **VIS-03:** at 390x844 the stage is on screen (70% of the viewport), with no
+  horizontal scroll, and every control is reachable. The dimmed avatar still sits
+  behind the "A private line to Alfred" greeting.
+- **DEV-03:** ``scripts/dev_tls.py`` generated a CA and a server certificate into
+  a scratch directory, never ``data/tls``. The real ``LiveServer``, wrapped with
+  ``build_ssl_context`` exactly as ``serve_ui.py --https`` does, served the
+  snapshot over TLS to a client trusting only that CA (200, both agents). A client
+  without the CA was refused. Production ``data/`` was unchanged.
+
+| Requirement | Status |
+|---|---|
+| SRF-02 environment catalog served | VERIFIED WORKING |
+| VIS-04 choose environment and avatar | VERIFIED WORKING |
+| VIS-05 speaking/listening/thinking states | VERIFIED PARTIAL - states and motion branches exist and render; driven by a real spoken turn NOT VERIFIED |
+| VIS-03 phone layout usable | VERIFIED PARTIAL - usable, no overflow; the avatar is still obscured by the greeting |
+| DEV-01 camera capture | VERIFIED PARTIAL - camera control renders and uses the governed upload path; a physical camera opening NOT VERIFIED |
+| DEV-03 secure origin for a phone's microphone | VERIFIED WORKING on this machine (trusted chain, untrusted refused); a physical phone NOT VERIFIED |
+| VOI-02 audible playback on a speaker | NOT VERIFIED - synthesis verified (real Kokoro WAVs), never played aloud |
+| VOI-03 voice reaches the user's own device | VERIFIED PARTIAL - the page speaks answers with the device's own speech synthesis; audibility on a phone NOT VERIFIED |
+| AMB-01 wake-phrase ambient voice | BLOCKED - needs a device with a microphone and speech recognition |
+| DEV-02, VOI-04, VIS-06, REC-03 physical headphones, microphone, phone GPU, iOS Safari | BLOCKED - physical devices |
