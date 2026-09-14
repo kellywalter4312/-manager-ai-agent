@@ -306,6 +306,9 @@ class TestThisIsNotASecondRouter:
             "calendar",
             "cancel_recording",
             "clip_video",
+            # Pre-Stage-9 Campaign 9: coaching and translation are each
+            # recognised by their own request shape.
+            "coach",
             "communication", "complete_task", "connected_action", "correct_memory",
             "create_artifact",
             "create_diagram",
@@ -324,7 +327,7 @@ class TestThisIsNotASecondRouter:
             "read_content",
             "recall_memory", "record_this", "reopen_task", "revise_artifact", "revise_diagram",
             "select_voice",
-            "small_talk", "start_recording", "stop_recording", "temporal_derivation", "transcribe_media", "update_task",
+            "small_talk", "start_recording", "stop_recording", "temporal_derivation", "transcribe_media", "translate", "update_task",
         ]
 
 

@@ -211,6 +211,9 @@ class TestHandlersAreSelectedThroughTheRegistry:
             # Brain-assisted (over given text only, never raw video/
             # audio) when asked to find moments instead.
             "clip_video",
+            # Pre-Stage-9 Campaign 9: the Manager's own ruthless personal coach,
+            # from kept goals, open tasks and missed reminders.
+            "coach",
             "communication",
             # Phase 5.1 (Tasks): an outstanding, actionable item with real
             # state - four handlers, one per operation, each recognised by
@@ -308,6 +311,8 @@ class TestHandlersAreSelectedThroughTheRegistry:
             "stop_recording",
             "temporal_derivation",
             "transcribe_media",
+            # Pre-Stage-9 Campaign 9: translation, named and honest.
+            "translate",
             "update_task",
         ]
 

@@ -9192,3 +9192,62 @@ shared image (IMG-02) were repaired in Campaign 3 and are re-verified here.
 | IMG-03 whether an image was edited or generated | VERIFIED PARTIAL - metadata, editor/generator traces and JPEG error-level evidence VERIFIED WORKING on constructed images; a trained forensic verdict NOT FOUND (no model); real camera photographs and real generator outputs NOT VERIFIED |
 | IMG-02 a shared image reaches image analysis | VERIFIED WORKING for resolution (Campaign 3); the vision answer BLOCKED (no funded vision model) |
 | VID-01 clip a shared video | VERIFIED WORKING |
+
+### 52.39 Pre-Stage-9 Campaign 9 - recovered capabilities: the ruthless personal coach and translation
+
+**What was recovered.** The owner stated four requirements that had no trace in
+the project record: real-time voice translation (TRN-01), a ruthless personal
+coach as a capability of Alfred himself - never a separate agent (COACH-01),
+image authenticity (delivered in Campaign 8, §52.38) and transcription of
+recordings (delivered in Campaign 3, §52.33). Before this campaign "coach me",
+"hold me accountable" and "translate good morning into French" all fell to open
+conversation and were refused in Half Brain.
+
+**The repair.**
+
+- ``coach`` (new capability of Alfred): "coach me", "hold me accountable", "how
+  am I doing on my goals?", "am I on track?", "what have I been putting off",
+  "be my ruthless coach", "be harder on me", "go easy on me". The answer is built
+  only from what Alfred keeps - current goals from canonical personal context,
+  open tasks and how many days they have been open, reminders whose moment has
+  passed - so it is exact in Half Brain and never invents progress. The style
+  (ruthless, direct by default, or gentle) is the person's own setting, stored as
+  ordinary personal context ("my coaching style is ruthless"), so it persists,
+  can be corrected and forgotten like any other fact, and changes the wording,
+  never the facts. A goal with no task is called out; "I need a coach for my
+  football team" is not claimed.
+- ``translate`` (new capability): "translate X into L", "how do you say X in
+  L?", "say X in L", "what's 'X' in L" (quoted, so "what's the weather in Paris"
+  is never taken for a translation). The phrase and target language go to the
+  one canonical Brain (``request.converse``) and a decided answer is returned and
+  spoken through the voice path; with no language model the answer says exactly
+  what is missing and refuses to guess, including that live spoken translation
+  also needs speech recognition and a voice in that language - only English
+  (en-US recogniser; en-US/en-GB voices; English Kokoro voices) is installed, and
+  no offline translation library is present.
+
+**Verification.**
+
+- ``tests/test_campaign_09_coach_and_translation.py`` (coach grammar and
+  exclusions; empty state asks for a goal; goals, open tasks and a missed
+  reminder named after time moves; style stored as personal context and applied;
+  a goal without a task called out; translation grammar and exclusions; honest
+  refusal with no model; a deciding Brain's answer returned as the translation,
+  through a scripted in-process Brain - never a vendor) plus the capability
+  registry, identity resolution, personal context, task and conversation suites.
+- Real served system (isolated persistent scratch memory, production ``data/``
+  hash unchanged, Half Brain; time advanced only through ``Calendar.now``):
+  "coach me" with nothing kept asked for a goal; after a marathon goal, two tasks
+  and a reminder, "be my ruthless coach" switched style; after a full restart and
+  four days, "hold me accountable" named the goal, the missed 'stretch' reminder,
+  a task open for 4 days and the open-task count in the ruthless voice, and "go
+  easy on me" gave the same facts gently; translation requests were routed to
+  ``translate`` and refused honestly, "what's the weather in Paris" was not.
+
+| Requirement | Status |
+|---|---|
+| COACH-01 ruthless personal coach, a capability of Alfred | VERIFIED WORKING (from kept goals, tasks and reminders; richer model-composed coaching BLOCKED - no funded model) |
+| TRN-01 translation | VERIFIED PARTIAL - recognised, routed and honest; an actual translation BLOCKED (no funded language model, no offline translation library) |
+| TRN-01 real-time spoken translation | BLOCKED - needs a language model plus speech recognition and voices in other languages, none installed |
+| IMG-03 image authenticity (recovered) | see §52.38 - VERIFIED PARTIAL |
+| REC-04 recording transcription (recovered) | see §52.33 - VERIFIED WORKING |

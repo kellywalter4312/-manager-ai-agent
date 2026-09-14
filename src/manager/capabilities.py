@@ -51,7 +51,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field, replace as dataclass_replace
-from datetime import date, time, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any, Callable, Mapping, Sequence
 
 from src.agents.base_agent import BaseAgent
@@ -6630,6 +6630,235 @@ def read_back(request: CapabilityRequest) -> TaskResult:
     )
 
 
+# ---------------------------------------------------------------------------
+# Pre-Stage-9 Campaign 9 (COACH-01): a ruthless personal coach - Alfred's own
+# capability, answered from the goals, open tasks and missed reminders he
+# actually keeps. No invented progress, no pep talk standing in for facts.
+# ---------------------------------------------------------------------------
+
+_COACH_ASK = re.compile(
+    r"\bcoach\s+me\b|\bhold\s+me\s+(?:to\s+account|accountable)\b|\bkeep\s+me\s+accountable\b"
+    r"|\bhow\s+am\s+i\s+doing\s+(?:on|with)\s+my\s+(?:goals?|tasks?|plans?|resolutions?)\b"
+    r"|\bam\s+i\s+on\s+track\b|\bcheck\s+(?:in\s+)?on\s+my\s+(?:goals?|progress)\b"
+    r"|\bwhat\s+have\s+i\s+been\s+putting\s+off\b|\bwhat\s+am\s+i\s+avoiding\b",
+    re.IGNORECASE,
+)
+_COACH_STYLE = re.compile(
+    r"\bbe\s+(?:my\s+)?(?:a\s+)?(?P<style>ruthless|brutal|tough|strict|harsh|gentle|kind|soft)\s+(?:with\s+me|coach)\b"
+    r"|\bbe\s+(?P<harder>harder|tougher|stricter)\s+on\s+me\b|\bgo\s+(?P<easy>easy|easier)\s+on\s+me\b"
+    r"|\bdon'?t\s+(?P<nosugar>sugar[-\s]?coat)\b",
+    re.IGNORECASE,
+)
+_GOAL_TOPIC = re.compile(r"\b(?:goal|aim|ambition|resolution|target|plan|objective|dream)s?\b", re.IGNORECASE)
+COACH_STYLE_TOPIC = "coaching style"
+_RUTHLESS_WORDS = ("ruthless", "brutal", "tough", "strict", "harsh", "harder", "tougher", "stricter", "no sugar")
+
+
+def coach_intent(task: Task, participants: Sequence[str] = ()) -> bool:
+    text = str(task.description or "")
+    return bool(_COACH_ASK.search(text) or _COACH_STYLE.search(text))
+
+
+def _requested_style(text: str) -> "str | None":
+    match = _COACH_STYLE.search(text)
+    if match is None:
+        return None
+    if match.group("easy") or (match.group("style") or "").lower() in ("gentle", "kind", "soft"):
+        return "gentle"
+    return "ruthless"
+
+
+def _days_open(record, today) -> int:
+    created = getattr(record, "created_at", None)
+    try:
+        return max(0, (today - created.date()).days)
+    except (AttributeError, TypeError):
+        return 0
+
+
+def coach(request: CapabilityRequest) -> TaskResult:
+    """Coach the person from the facts Alfred keeps, in their chosen style."""
+    if request.recall is None:
+        return TaskResult.failure(request.task, request.own_name, "I can't see your goals or tasks right now.")
+    text = request.task.description
+    calendar = request.calendar if request.calendar is not None else Calendar.utc()
+    now = calendar.now()
+    today = calendar.today()
+
+    context = all_current_personal_context(recall=request.recall, limit=200)
+    style_record = next((item for item in context if item.topic_key == COACH_STYLE_TOPIC), None)
+    style = "direct"
+    if style_record is not None:
+        stored = f"{style_record.value} {style_record.content}".lower()
+        style = "ruthless" if any(word in stored for word in _RUTHLESS_WORDS) else ("gentle" if "gentle" in stored else "direct")
+
+    requested = _requested_style(text)
+    changed_style = ""
+    if requested is not None and requested != style:
+        candidate = extract_personal_context_candidate(f"my coaching style is {requested}")
+        if candidate is not None and request.retain is not None:
+            verdict = request.retain(build_personal_context_record(candidate, agent_name=request.own_name))
+            if verdict.allowed:
+                style = requested
+                changed_style = f"Done - I'll coach you {requested}ly from now on." if requested == "ruthless" else "Done - I'll go easier on you from now on."
+
+    goals = [item for item in context if item.status == STATUS_CURRENT and _GOAL_TOPIC.search(item.topic)]
+    pending = list(request.recall(kind=MemoryCategory.TASK.value, tags={"task:pending"}, limit=200))
+    missed = []
+    for record in pending:
+        due = (record.context or {}).get("due_at")
+        if not due:
+            continue
+        try:
+            moment = datetime.fromisoformat(str(due))
+        except ValueError:
+            continue
+        if moment < now:
+            missed.append((moment, record))
+    stale = sorted(
+        (record for record in pending if not (record.context or {}).get("due_at")),
+        key=lambda record: _days_open(record, today), reverse=True,
+    )
+
+    lines = []
+    if changed_style:
+        lines.append(changed_style)
+    if not goals and not pending:
+        if style == "ruthless":
+            lines.append("There's nothing to hold you to - you haven't told me a single goal or given me one task. Tell me what you're working towards (\"my goal this year is ...\") and what you'll do about it.")
+        else:
+            lines.append("I don't know your goals yet. Tell me one (\"my goal this year is ...\") and add a task for the next step, and I'll keep you honest about it.")
+        return TaskResult.success(request.task, request.own_name, "\n".join(lines),
+                                  payload={"handled_by": "coach", "style": style, "goals": 0, "pending": 0, "missed": 0})
+
+    if goals:
+        told = "; ".join(describe_for_user(item).strip().rstrip(".") for item in goals[:5])
+        lines.append(f"What you told me you're working towards: {told}.")
+    else:
+        lines.append("You haven't told me a goal, so these tasks aren't tied to anything you said matters.")
+    if missed:
+        missed.sort(key=lambda pair: pair[0])
+        names = ", ".join(f"'{record.content}' (due {moment.strftime('%H:%M %A %d %B')})" for moment, record in missed[:5])
+        lines.append(
+            (f"You missed {len(missed)} reminder(s): {names}. That's a decision you made, not something that happened to you."
+             if style == "ruthless" else f"These reminders have passed and are still open: {names}.")
+        )
+    if stale:
+        oldest = stale[0]
+        age = _days_open(oldest, today)
+        if age >= 1:
+            lines.append(
+                (f"'{oldest.content}' has been sitting open for {age} day(s). Do it today or admit you're not going to."
+                 if style == "ruthless" else f"'{oldest.content}' has been open for {age} day(s) - is it still worth doing?")
+            )
+    open_count = len(pending)
+    if open_count:
+        lines.append(
+            (f"{open_count} task(s) open. Pick the one that moves a goal forward and finish it before anything else."
+             if style == "ruthless" else f"You have {open_count} open task(s). Which one moves a goal forward most?")
+        )
+    elif goals:
+        lines.append(
+            ("Not one task is working towards those goals. A goal without a next step is a wish - add one now."
+             if style == "ruthless" else "There's no task for any of those goals yet - what's one small next step?")
+        )
+    return TaskResult.success(
+        request.task, request.own_name, "\n".join(lines),
+        payload={"handled_by": "coach", "style": style, "goals": len(goals), "pending": open_count, "missed": len(missed)},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Pre-Stage-9 Campaign 9 (TRN-01): translation, named and honest.
+# ---------------------------------------------------------------------------
+
+_LANGUAGE_WORD = r"(?P<language>[A-Za-z][A-Za-z\- ]{1,30}?)"
+_TRANSLATE_PATTERNS = (
+    re.compile(rf"^\s*(?:please\s+)?translate\s+(?P<phrase>.+?)\s+(?:in)?to\s+{_LANGUAGE_WORD}\s*[?.!]*\s*$", re.IGNORECASE),
+    re.compile(rf"^\s*how\s+(?:do|would)\s+(?:you|i)\s+say\s+(?P<phrase>.+?)\s+in\s+{_LANGUAGE_WORD}\s*[?.!]*\s*$", re.IGNORECASE),
+    re.compile(rf"^\s*what(?:'s|\s+is)\s+(?P<phrase>.+?)\s+in\s+{_LANGUAGE_WORD}\s*[?.!]*\s*$", re.IGNORECASE),
+    re.compile(rf"^\s*say\s+(?P<phrase>.+?)\s+in\s+{_LANGUAGE_WORD}\s*[?.!]*\s*$", re.IGNORECASE),
+)
+# "What's the weather in Paris" names a place, not a language; a translation
+# request's target is a language word, never a subject list - so the phrase
+# must be quoted, or the verb must be translate/say.
+_QUOTED = re.compile(r"^['\"\u2018\u201c].+['\"\u2019\u201d]$")
+
+
+def translation_request(text: str) -> "tuple[str, str] | None":
+    """``(phrase, target language)`` for a translation request, or None."""
+    working = str(text or "").strip()
+    for index, pattern in enumerate(_TRANSLATE_PATTERNS):
+        match = pattern.match(working)
+        if match is None:
+            continue
+        phrase = match.group("phrase").strip()
+        language = " ".join(match.group("language").split()).strip()
+        if index == 2 and not _QUOTED.match(phrase):
+            continue
+        phrase = phrase.strip("'\"\u2018\u2019\u201c\u201d ")
+        if phrase and language:
+            return phrase, language
+    return None
+
+
+def translate_intent(task: Task, participants: Sequence[str] = ()) -> bool:
+    return translation_request(task.description) is not None
+
+
+def translate(request: CapabilityRequest) -> TaskResult:
+    found = translation_request(request.task.description)
+    if found is None:
+        return TaskResult.failure(request.task, request.own_name, "Translate what, into which language?")
+    phrase, language = found
+    decision = None
+    if request.converse is not None:
+        decision = request.converse(
+            Task(description=(
+                f"Translate the following into {language}. Reply with only the translation, nothing else.\n\n{phrase}"
+            )),
+            (),
+        )
+    if decision is None or not decision.is_decided or not decision.reason.strip():
+        why = decision.reason if decision is not None else "no reasoning capability is configured"
+        return TaskResult.failure(
+            request.task, request.own_name,
+            f"I can't translate that into {language} right now - translation needs a language model, and I "
+            f"don't have one available ({why}). I won't guess at a translation. Live spoken translation would "
+            "also need speech recognition and a voice for that language, and only English is installed here.",
+        )
+    return TaskResult.success(
+        request.task, request.own_name, decision.reason.strip(),
+        payload={"handled_by": "translate", "language": language, "phrase": phrase},
+    )
+
+
+TRANSLATE = ManagerCapability(
+    name="translate",
+    capabilities=frozenset({"translate", "language"}),
+    handle=translate,
+    description=(
+        "Translates a phrase into a named language through the Brain and speaks it through the voice path; "
+        "honest when no language model is available."
+    ),
+    claims=translate_intent,
+    scoreable=False,
+)
+
+
+COACH = ManagerCapability(
+    name="coach",
+    capabilities=frozenset({"coach", "accountability"}),
+    handle=coach,
+    description=(
+        "The Manager's own personal coach: holds the person to the goals they taught it, their open tasks and "
+        "missed reminders, in the style they chose (ruthless, direct or gentle) - from real records only."
+    ),
+    claims=coach_intent,
+    scoreable=False,
+)
+
+
 READ_BACK = ManagerCapability(
     name="read_back",
     capabilities=frozenset({"read", "aloud"}),
@@ -7876,6 +8105,10 @@ MANAGER_CAPABILITIES: dict[str, ManagerCapability] = {
     TRANSCRIBE_MEDIA.name: TRANSCRIBE_MEDIA,
     # Pre-Stage-9 Campaign 7: kept notes, schedule and tasks, read back aloud.
     READ_BACK.name: READ_BACK,
+    # Pre-Stage-9 Campaign 9: Alfred's own ruthless personal coach.
+    COACH.name: COACH,
+    # Pre-Stage-9 Campaign 9: translation, named and honest.
+    TRANSLATE.name: TRANSLATE,
 }
 
 # Used when a task reaches the Manager without matching any handler's words.
