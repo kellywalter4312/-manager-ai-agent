@@ -152,6 +152,19 @@ def read_artifact_units(artifact: Artifact) -> tuple[ContentUnit, ...]:
             passages = DocumentKnowledgeProvider(path.parent).passages(path)
             if passages:
                 return tuple(ContentUnit(locator=loc, text=text) for loc, text in passages)
+            if path.suffix.lower() == ".pdf" and DEFAULT_OCR_READER.available():
+                # A PDF with no text layer is usually a scan: its pages are
+                # pictures of text, read by the same offline recogniser.
+                try:
+                    pages = DEFAULT_OCR_READER.pdf_pages(path)
+                except OCRError:
+                    pages = ()
+                units = tuple(
+                    ContentUnit(locator=f"page {index}", text=text)
+                    for index, text in enumerate(pages, start=1) if text
+                )
+                if units:
+                    return units
         return ()
     return ()
 

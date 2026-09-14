@@ -58,6 +58,49 @@ try {
 """
 
 
+# One page per output block, separated by a marker line no recognised text can
+# produce, so a page with no text still counts as a page.
+_PAGE_MARKER = "\u241e-page-\u241e"
+MAX_PDF_PAGES = 200
+
+_PDF_SCRIPT = r"""
+$ErrorActionPreference = 'Stop'
+try {
+  Add-Type -AssemblyName System.Runtime.WindowsRuntime
+  $asTaskOp = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0]
+  $asTaskAction = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncAction' })[0]
+  function Await($op, [Type]$type) { $t = $asTaskOp.MakeGenericMethod($type).Invoke($null, @($op)); $t.Wait(-1) | Out-Null; $t.Result }
+  function AwaitAction($op) { $t = $asTaskAction.Invoke($null, @($op)); $t.Wait(-1) | Out-Null }
+  $null = [Windows.Storage.StorageFile, Windows.Storage, ContentType = WindowsRuntime]
+  $null = [Windows.Data.Pdf.PdfDocument, Windows.Data.Pdf, ContentType = WindowsRuntime]
+  $null = [Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType = WindowsRuntime]
+  $null = [Windows.Graphics.Imaging.BitmapDecoder, Windows.Graphics, ContentType = WindowsRuntime]
+  $null = [Windows.Storage.Streams.InMemoryRandomAccessStream, Windows.Storage.Streams, ContentType = WindowsRuntime]
+  $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
+  if (-not $engine) { [Console]::Error.WriteLine("no OCR language is installed for this user"); exit 2 }
+  $file = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync("__PDF__")) ([Windows.Storage.StorageFile])
+  $document = Await ([Windows.Data.Pdf.PdfDocument]::LoadFromFileAsync($file)) ([Windows.Data.Pdf.PdfDocument])
+  $count = [Math]::Min([int]$document.PageCount, __MAXPAGES__)
+  for ($i = 0; $i -lt $count; $i++) {
+    $page = $document.GetPage($i)
+    $stream = New-Object Windows.Storage.Streams.InMemoryRandomAccessStream
+    $options = New-Object Windows.Data.Pdf.PdfPageRenderOptions
+    $options.DestinationWidth = [uint32]([Math]::Max(1600, $page.Size.Width * 2))
+    AwaitAction ($page.RenderToStreamAsync($stream, $options))
+    $decoder = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
+    $bitmap = Await ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
+    $result = Await ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
+    [Console]::Out.WriteLine("__MARKER__")
+    foreach ($line in $result.Lines) { [Console]::Out.WriteLine($line.Text) }
+    $page.Dispose()
+  }
+} catch {
+  [Console]::Error.WriteLine($_.Exception.Message)
+  exit 1
+}
+"""
+
+
 class OCRError(RuntimeError):
     """Text recognition could not run on this image."""
 
@@ -110,6 +153,43 @@ class WindowsOCRReader:
         found = tuple(" ".join(line.split()) for line in (result.stdout or "").splitlines() if line.strip())
         self._cache[key] = found
         return found
+
+
+def _pdf_pages(reader: "WindowsOCRReader", path: "str | Path") -> "tuple[str, ...]":
+    """The text recognised on each page of a PDF, page by page (a page with no
+    text is an empty string). Raises ``OCRError`` when rendering or recognition
+    cannot run."""
+    document = Path(path)
+    if not reader.available():
+        raise OCRError("text recognition in scanned documents is only available on Windows")
+    if not document.is_file():
+        raise OCRError(f"no document at '{document}'")
+    stat = document.stat()
+    key = ("pdf", str(document.resolve()), stat.st_size, int(stat.st_mtime_ns))
+    if key in reader._cache:
+        return reader._cache[key]
+    script = (
+        _PDF_SCRIPT.replace("__PDF__", str(document.resolve()).replace('"', '`"'))
+        .replace("__MAXPAGES__", str(MAX_PDF_PAGES)).replace("__MARKER__", _PAGE_MARKER)
+    )
+    try:
+        result = _run_powershell(script, timeout=_TIMEOUT_SECONDS * 5)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise OCRError(f"scanned-page recognition could not run: {exc}") from exc
+    if result.returncode != 0:
+        raise OCRError(f"scanned-page recognition failed: {(result.stderr or 'recognition failed').strip()}")
+    pages: list[list[str]] = []
+    for line in (result.stdout or "").splitlines():
+        if line.strip() == _PAGE_MARKER:
+            pages.append([])
+        elif pages and line.strip():
+            pages[-1].append(" ".join(line.split()))
+    found = tuple(" ".join(page) for page in pages)
+    reader._cache[key] = found
+    return found
+
+
+WindowsOCRReader.pdf_pages = _pdf_pages
 
 
 # One process-wide reader, so its cache is shared by every caller.

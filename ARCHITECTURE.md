@@ -9128,6 +9128,17 @@ already own it; nothing is read a second way.**
 | RD-02 Word documents read aloud | VERIFIED WORKING (Campaign 3, suites re-run) |
 | REC-04 transcribe recordings and audio | VERIFIED WORKING (Campaign 3, suites re-run) |
 | Spoken output of long readings | VERIFIED WORKING for synthesis with real Kokoro; playback on this machine's speakers NOT VERIFIED |
+| PDF-06 scanned PDFs (no text layer) read | VERIFIED WORKING (follow-up below) |
+
+**Follow-up - scanned PDFs (PDF-06).** A PDF whose pages are pictures of text
+had no units; the answer was honestly "nothing to read". ``Windows.Data.Pdf``
+now renders each page to an image in memory and the same offline recogniser
+reads it (``WindowsOCRReader.pdf_pages``), only when the document reader finds
+no text layer - a PDF with text never reaches the recogniser. Verified with real
+image-only PDFs written by Pillow: the text layer was empty, both pages were
+recognised in 4.4 s, the uploaded scan reported 2 readable units, and "read this
+document to me" / "read page 2 to me" read them word for word through
+``read_content``. Handwriting and photographed pages are NOT VERIFIED.
 
 ### 52.38 Pre-Stage-9 Campaign 8 - image generation on its own axis; honest evidence about edited images
 
