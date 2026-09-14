@@ -9006,3 +9006,59 @@ name correctly.
 | HC-01 Manager component keyed by role, legacy id honoured | VERIFIED WORKING |
 | ROOM-02 in the Room, the agent named answers | VERIFIED WORKING (audit harness artefact, no code defect) |
 | ART-01 addressing the Manager still delegates specialist work | VERIFIED WORKING |
+
+### 52.36 Pre-Stage-9 Campaign 6 - reminders and alarms, delivered at their moment
+
+**What the Master Pre-Stage-9 Audit found.** There were no reminders or alarms:
+"remind me at 5pm to call Mum" became an undated task that nothing ever raised
+(TIM-03, TIM-04). The proactive pipeline only knew whole days and delivered only
+celebrations, so it could not say something at a time. One calendar test
+hard-coded a date that had since passed (TIM-06).
+
+**The repair - one more source for the existing proactive pipeline, no second
+scheduler.**
+
+- ``tasks.extract_reminder(text, *, now)`` - grammar only: a real time phrase
+  ("at 5pm", "at 7", "17:30", "noon"), a relative moment ("in 20 minutes"), and an
+  optional day ("tonight", "tomorrow", a weekday, "3rd October", "2026-09-20").
+  Numbers inside the title are never read as the time; a named day that cannot be
+  read returns nothing rather than a guess. "Remind me what/of/who ..." is a
+  question, never a reminder.
+- ``create_task`` stores a reminder as a pending task tagged ``reminder`` with
+  ``due_at`` in the person's own timezone and says the moment back; a bare
+  "set an alarm" asks when; "remind me to X" with no time stays an ordinary task.
+- ``due_proactive_events(now=)`` adds source ``reminder`` for pending reminders
+  whose moment has passed - only when the caller knows the time, never guessed
+  from a date. ``evaluate_and_persist_experiences`` turns one into an experience
+  carrying the reminder's own words (``message``) without needing any celebration
+  provider, deduplicated by the reminder's id and moment.
+- The observer, snapshot, heartbeat and page carry ``now`` and ``message``: the
+  page's toast shows the words and posts delivery through the existing
+  ``POST /experience``; the heartbeat report lists it as a reminder.
+- TIM-06: the calendar listing test computes a date ahead of the real today.
+
+**Verification.**
+
+- ``tests/test_campaign_06_reminders.py`` (phrasings, questions excluded, stored
+  moment, untimed task, alarm asks when, due only at the moment, delivered with no
+  celebration provider and once, survives a restart, unattended heartbeat report,
+  served snapshot message and delivery) plus the proactive, calendar, task,
+  heartbeat, reporting, snapshot and experience suites.
+- Real served system (isolated persistent scratch memory, production ``data/``
+  hash unchanged, Half Brain; time advanced only through ``Calendar.now``): three
+  reminders set in ordinary words with correct moments; nothing pending before
+  the moment; after a full restart the due reminder appeared in the served
+  snapshot with its message; the scheduled heartbeat, building its own system,
+  wrote a report naming it as a reminder; delivery through the served route
+  cleared it and it did not return half an hour later.
+- Real headless Chromium over CDP against that served system with a reminder set
+  in ordinary words and the clock past its moment: the page itself raised the
+  toast "Alfred · reminder - join the standup", its own delivery emptied the
+  pending list on the server, and no page errors occurred.
+
+| Requirement | Status |
+|---|---|
+| TIM-03 reminders set in ordinary words at a time | VERIFIED WORKING |
+| TIM-04 a due reminder is raised proactively, served page and unattended heartbeat | VERIFIED WORKING (spoken/OS notification with the page closed NOT VERIFIED) |
+| TIM-02 reminders persist across restart | VERIFIED WORKING |
+| TIM-06 stale-date calendar test | VERIFIED WORKING |

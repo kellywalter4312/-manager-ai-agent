@@ -65,6 +65,13 @@ _CREATE_MARKERS: tuple[str, ...] = (
     "add a task", "add task", "create a task", "new task",
     "add this task", "remind me to",
 )
+# Pre-Stage-9 Campaign 4 of time: asking to be reminded or woken at a time -
+# grammar only. "remind me what/of/who/how ..." is a question about what is
+# already known, never a new reminder.
+_REMINDER_MARKERS: tuple[str, ...] = (
+    "remind me", "set a reminder", "set an alarm", "set alarm", "wake me up", "wake me",
+)
+_NOT_A_REMINDER = re.compile(r"\bremind\s+me\s+(?:what|of|who|how|why|where|which)\b", re.IGNORECASE)
 _LIST_MARKERS: tuple[str, ...] = (
     "what are my tasks", "show my tasks", "list my tasks",
     "what tasks do i have", "my task list", "what do i need to do",
@@ -129,8 +136,111 @@ def _after_marker(text: str, markers: tuple[str, ...]) -> str:
 
 
 def create_task_intent(text: str) -> bool:
-    """The ``claims=`` predicate for creating a task."""
-    return _marker_present(text, _CREATE_MARKERS)
+    """The ``claims=`` predicate for creating a task - including a reminder
+    or alarm set for a time."""
+    if _marker_present(text, _CREATE_MARKERS):
+        return True
+    return reminder_intent(text)
+
+
+def reminder_intent(text: str) -> bool:
+    return _marker_present(text, _REMINDER_MARKERS) and not _NOT_A_REMINDER.search(str(text or ""))
+
+
+# "in 10 minutes", "in 2 hours" - a relative moment. Grammar only.
+_RELATIVE_MOMENT = re.compile(r"\bin\s+(\d{1,3})\s*(minutes?|mins?|hours?|hrs?)\b", re.IGNORECASE)
+_DATE_WORDS = re.compile(
+    r"\b(?:today|tonight|tomorrow|(?:on\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)"
+    r"|\d{4}-\d{2}-\d{2}|(?:on\s+)?\d{1,2}(?:st|nd|rd|th)?\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*"
+    r"|(?:on\s+)?(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2}(?:st|nd|rd|th)?)\b",
+    re.IGNORECASE,
+)
+_TIME_PHRASE = re.compile(
+    r"\b(?:at\s+|for\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm)\b|\b(?:at\s+|for\s+)?\d{1,2}:\d{2}\b"
+    r"|\b(?:at\s+|for\s+)?(?:noon|midnight)\b|\bat\s+\d{1,2}\b(?!\s*(?:-\s*\d|to\s+\d|st\b|nd\b|rd\b|th\b))",
+    re.IGNORECASE,
+)
+
+
+def extract_reminder(text: str, *, now) -> "tuple[str, object] | None":
+    """``(title, due_at)`` for a request to be reminded or woken at a time,
+    or None when the request names no time. ``now`` is a timezone-aware
+    datetime in the person's own timezone - "5pm" means their 5pm.
+
+    A time with no date is today if it is still ahead, otherwise tomorrow;
+    "tomorrow"/a weekday/a date moves it to that day; "in 20 minutes" is
+    relative to now. The title is what is left once the marker, the moment
+    and joining words are removed ("to call Mum" -> "call Mum"); an alarm
+    with nothing else named is simply an alarm."""
+    from datetime import datetime, timedelta
+
+    from src.services.memory.calendar_items import find_time_range, parse_calendar_date
+
+    working = str(text or "")
+    if not reminder_intent(working):
+        return None
+
+    relative = _RELATIVE_MOMENT.search(working)
+    if relative is not None:
+        amount = int(relative.group(1))
+        unit = relative.group(2).lower()
+        delta = timedelta(hours=amount) if unit.startswith("h") else timedelta(minutes=amount)
+        due_at = (now + delta).replace(microsecond=0)
+        remainder = working.replace(relative.group(0), " ")
+    else:
+        # The moment is a real time phrase ("at 5pm", "at 7", "17:30",
+        # "noon") - never the first number anywhere, so "buy 2 apples at 5pm"
+        # is due at 5pm, not 2am.
+        phrase_match = _TIME_PHRASE.search(working)
+        if phrase_match is None:
+            return None
+        spoken = phrase_match.group(0).lower()
+        if "noon" in spoken:
+            from datetime import time as _time
+            clock = _time(12, 0)
+        elif "midnight" in spoken:
+            from datetime import time as _time
+            clock = _time(0, 0)
+        else:
+            found = find_time_range(re.sub(r"^(?:at|for)\s+", "", spoken))
+            if found is None:
+                return None
+            clock = found[0]
+        date_match = _DATE_WORDS.search(working)
+        day = None
+        if date_match is not None:
+            phrase = re.sub(r"^on\s+", "", date_match.group(0), flags=re.IGNORECASE)
+            if phrase.lower() == "tonight":
+                phrase = "today"
+            phrase = re.sub(r"(\d)(?:st|nd|rd|th)\b", r"\1", phrase, flags=re.IGNORECASE)
+            # "3 October" is read the way "October 3" already is.
+            phrase = re.sub(r"^(\d{1,2})\s+([a-z]+)$", r"\2 \1", phrase.strip(), flags=re.IGNORECASE)
+            day = parse_calendar_date(phrase, today=now.date())
+            if day is None:
+                # A date was named but could not be read - never guess a day.
+                return None
+        if day is None:
+            day = now.date()
+            candidate = datetime.combine(day, clock, tzinfo=now.tzinfo)
+            if candidate <= now:
+                day = day + timedelta(days=1)
+        due_at = datetime.combine(day, clock, tzinfo=now.tzinfo)
+        remainder = _TIME_PHRASE.sub(" ", working)
+        if date_match is not None:
+            remainder = remainder.replace(date_match.group(0), " ")
+
+    lowered = remainder.lower()
+    for marker in _REMINDER_MARKERS:
+        position = lowered.find(marker)
+        if position != -1:
+            remainder = remainder[position + len(marker):]
+            break
+    title = re.sub(r"\b(?:for|at|on|in|me)\b\s*$", "", " ".join(remainder.split()), flags=re.IGNORECASE)
+    title = _LEADING_JOINER.sub("", title.strip(" ,.:;?!-")).strip(" ,.:;?!-")
+    title = re.sub(r"^(?:for|at|on)\s+", "", title, flags=re.IGNORECASE).strip()
+    if not title:
+        title = "Alarm" if re.search(r"\b(?:alarm|wake)\b", working, re.IGNORECASE) else "Reminder"
+    return title, due_at
 
 
 def extract_task_title(text: str) -> str:
@@ -138,10 +248,21 @@ def extract_task_title(text: str) -> str:
     return _after_marker(text, _CREATE_MARKERS)
 
 
-def build_task_record(text: str, *, agent_name: str) -> MemoryRecord | None:
+def build_task_record(text: str, *, agent_name: str, reminder: "tuple[str, object] | None" = None) -> MemoryRecord | None:
     """One candidate pending task from an explicit creation request, or
     None when nothing followed the marker (an honest "add a task" with
-    no content named)."""
+    no content named). ``reminder`` - ``(title, due_at)`` from
+    ``extract_reminder`` - makes it a timed reminder: the due moment is
+    stored with the task, which is what the proactive check reads."""
+    if reminder is not None:
+        title, due_at = reminder
+        return MemoryRecord(
+            id=uuid.uuid4().hex[:12],
+            content=title,
+            kind=TASK_KIND,
+            tags={"task", f"task:{PENDING}", "reminder"},
+            context={"status": PENDING, "created_by": agent_name, "due_at": due_at.isoformat()},
+        )
     title = extract_task_title(text)
     if not title:
         return None

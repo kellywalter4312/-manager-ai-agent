@@ -159,6 +159,11 @@ def render_proactive_report(
                 content = getattr(record, "content", str(record))
             lines.append(f"- **{label}**: {content}")
 
+            if getattr(record, "source", None) == "reminder":
+                # A reminder is a message the person asked for, never a
+                # celebration (Pre-Stage-9 Campaign 6).
+                lines.append(f"  - reminder: {content}")
+                continue
             reaction = (celebrations or {}).get(getattr(record, "dedup_key", ""))
             if reaction and reaction.get("enabled"):
                 lines.append(

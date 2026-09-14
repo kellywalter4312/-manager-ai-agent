@@ -182,8 +182,16 @@ class TestRetrieval:
         assert "nothing" in result.output.lower()
 
     def test_listing_reflects_real_added_items(self):
+        # Pre-Stage-9 Campaign 6 (TIM-06): the listing looks ahead from the
+        # real today, so the date is computed from it - a fixed date stops
+        # being "upcoming" the day after it passes.
+        from datetime import timedelta
+
+        from src.services.memory.day import Calendar
+
         runtime, manager, channel, conversation = real_system()
-        manager.handle_task(Task(description="I have a dentist appointment on 2026-09-11 at 3pm"))
+        ahead = (Calendar.configured(runtime.settings.timezone).today() + timedelta(days=2)).isoformat()
+        manager.handle_task(Task(description=f"I have a dentist appointment on {ahead} at 3pm"))
         result = manager.handle_task(Task(description="what's on my calendar"))
         assert result.succeeded
         assert "dentist appointment" in result.output

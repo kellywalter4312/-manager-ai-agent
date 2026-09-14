@@ -253,6 +253,7 @@ class ExperienceView:
     intensity: str
     duration_ms: int
     delivered: bool
+    message: str = ""
 
 
 @dataclass(frozen=True)

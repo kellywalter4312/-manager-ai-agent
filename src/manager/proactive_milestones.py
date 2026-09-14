@@ -32,7 +32,7 @@ string.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from typing import TYPE_CHECKING
 
 from src.manager.memory_policy import MemoryCategory
@@ -110,7 +110,7 @@ class ProactiveEvent:
     event_type: str
     label: str
     dedup_key: str
-    source: str  # "personal" | "temporal" | "calendar" | "calendar_item"
+    source: str  # "personal" | "temporal" | "calendar" | "calendar_item" | "reminder"
     record: "MemoryRecord | None" = None
 
 
@@ -119,6 +119,7 @@ def due_proactive_events(
     *,
     today: date | None = None,
     calendar_events: "CalendarEventProvider | None" = None,
+    now: "datetime | None" = None,
 ) -> tuple[ProactiveEvent, ...]:
     """Every event genuinely due today, from all four sources, as one
     uniform list - the aggregation this Stage 12 closure (and the
@@ -183,6 +184,30 @@ def due_proactive_events(
                     label=item.title,
                     dedup_key=f"calendar_item:{item.item_key}:{resolved_today.isoformat()}",
                     source="calendar_item",
+                )
+            )
+
+    # Pre-Stage-9 Campaign 6: a pending reminder whose moment has arrived.
+    # Only when a caller knows the time (``now``) - a day-only check never
+    # guesses which reminders of today are already due.
+    if now is not None and manager.memory is not None:
+        for record in manager.memory.recall(kind="user_task", tags={"reminder"}, limit=500):
+            context = record.context or {}
+            if context.get("status") != "pending" or not context.get("due_at"):
+                continue
+            try:
+                due_at = datetime.fromisoformat(str(context["due_at"]))
+            except ValueError:
+                continue
+            if due_at > now:
+                continue
+            events.append(
+                ProactiveEvent(
+                    event_type="reminder",
+                    label=record.content,
+                    dedup_key=f"reminder:{record.id}:{due_at.isoformat()}",
+                    source="reminder",
+                    record=record,
                 )
             )
 

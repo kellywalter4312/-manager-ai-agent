@@ -689,9 +689,10 @@ class ControlCenter:
         """
         if self._manager.memory is None or self._manager.own_skills is None:
             return ()
-        today = Calendar.configured(self._runtime.settings.timezone).today()
+        calendar = Calendar.configured(self._runtime.settings.timezone)
         evaluate_and_persist_experiences(
-            self._manager, today=today, calendar_events=self._runtime.calendar_events,
+            self._manager, today=calendar.today(), calendar_events=self._runtime.calendar_events,
+            now=calendar.now(),
         )
         resolved = all_experiences(recall=self._manager.memory.recall, limit=200)
         return tuple(
@@ -706,6 +707,7 @@ class ControlCenter:
                 intensity=item.intensity,
                 duration_ms=item.duration_ms,
                 delivered=item.delivered,
+                message=item.message,
             )
             for item in resolved
         )

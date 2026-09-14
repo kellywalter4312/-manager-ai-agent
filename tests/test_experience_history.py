@@ -176,5 +176,5 @@ class TestToDict:
         assert set(payload) == {
             "record_id", "event_type", "dedup_key", "agent_key", "reaction_id",
             "avatar_action", "environment_action", "overlay", "intensity",
-            "duration_ms", "delivered",
+            "duration_ms", "delivered", "message",
         }

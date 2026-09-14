@@ -5383,12 +5383,16 @@
     const el = document.createElement("div");
     el.className = "experience-toast overlay-" + (exp.overlay || "card")
       + " intensity-" + (exp.intensity || "subtle");
-    el.innerHTML = `<div class="exp-title">${esc(exp.agent_key)}</div>`
-      + `<div class="exp-detail">${esc(exp.avatar_action || "")}`
-      + (exp.environment_action ? ` &middot; ${esc(exp.environment_action)}` : "")
-      + `</div>`;
+    // A reminder says something the person asked to hear; a celebration is
+    // visual. The message, when there is one, is what the toast shows.
+    el.innerHTML = `<div class="exp-title">${esc(exp.agent_key)}${exp.message ? " &middot; reminder" : ""}</div>`
+      + (exp.message
+          ? `<div class="exp-detail">${esc(exp.message)}</div>`
+          : `<div class="exp-detail">${esc(exp.avatar_action || "")}`
+            + (exp.environment_action ? ` &middot; ${esc(exp.environment_action)}` : "")
+            + `</div>`);
     document.body.appendChild(el);
-    const duration = Math.max(600, Math.min(exp.duration_ms || 1500, 6000));
+    const duration = Math.max(600, Math.min(exp.duration_ms || 1500, exp.message ? 12000 : 6000));
     requestAnimationFrame(()=> el.classList.add("show"));
     setTimeout(()=>{
       el.classList.remove("show");

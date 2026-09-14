@@ -43,7 +43,7 @@ both, in either order, any number of times.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import TYPE_CHECKING
 
 from src.manager.proactive_milestones import ProactiveEvent, due_proactive_events
@@ -137,6 +137,7 @@ def evaluate_and_persist_experiences(
     *,
     today: date | None = None,
     calendar_events: "CalendarEventProvider | None" = None,
+    now: "datetime | None" = None,
 ) -> "tuple[ExperienceRecord, ...]":
     """Which events are genuinely due today, and - for each - the real
     experience already selected for it, selecting and persisting one
@@ -153,11 +154,9 @@ def evaluate_and_persist_experiences(
     if manager.memory is None or manager.own_skills is None:
         return ()
     provider = getattr(manager.own_skills, "_celebration_provider", None)
-    if provider is None:
-        return ()
 
     resolved_today = today if today is not None else utc_today()
-    due = due_proactive_events(manager, today=resolved_today, calendar_events=calendar_events)
+    due = due_proactive_events(manager, today=resolved_today, calendar_events=calendar_events, now=now)
     if not due:
         return ()
 
@@ -172,10 +171,22 @@ def evaluate_and_persist_experiences(
             results.append(existing)
             continue
 
-        candidate = select_experience(
+        if event.source == "reminder":
+            # Pre-Stage-9 Campaign 6: a reminder is a message the person asked
+            # for, never a celebration - it is delivered whether or not any
+            # celebration reaction is enabled.
+            candidate = ExperienceCandidate(
+                event_type="reminder", dedup_key=event.dedup_key, agent_key=agent_key,
+                reaction_id="reminder", overlay="banner", intensity="full",
+                duration_ms=8000, message=event.label,
+            )
+        elif provider is None:
+            continue
+        else:
+            candidate = select_experience(
             event, agent_key=agent_key, personality=personality, intensity=intensity,
             provider=provider, recall=manager.memory.recall,
-        )
+            )
         if candidate is None:
             continue
 

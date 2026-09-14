@@ -70,6 +70,9 @@ class ExperienceCandidate:
     intensity: str = "subtle"
     duration_ms: int = 0
     delivered: bool = False
+    # What the experience says, when it says something ("call Mum") - a
+    # reminder's own words. Empty for a purely visual celebration.
+    message: str = ""
 
     def __post_init__(self) -> None:
         if not str(self.event_type).strip():
@@ -102,6 +105,7 @@ class ExperienceRecord:
     delivered: bool
     noted_by: str
     created_at: "object"
+    message: str = ""
 
     def to_dict(self) -> dict[str, object]:
         """A plain, JSON-shaped payload - the boundary format
@@ -119,6 +123,7 @@ class ExperienceRecord:
             "intensity": self.intensity,
             "duration_ms": self.duration_ms,
             "delivered": self.delivered,
+            "message": self.message,
         }
 
 
@@ -146,6 +151,7 @@ def build_experience_record(candidate: ExperienceCandidate, *, noted_by: str) ->
             "intensity": candidate.intensity,
             "duration_ms": candidate.duration_ms,
             "delivered": candidate.delivered,
+            "message": candidate.message,
             "source": "proactive",
             "noted_by": noted_by,
         },
@@ -168,6 +174,7 @@ def delivered_candidate(record: ExperienceRecord) -> ExperienceCandidate:
         intensity=record.intensity,
         duration_ms=record.duration_ms,
         delivered=True,
+        message=record.message,
     )
 
 
@@ -190,6 +197,7 @@ def _to_record(raw: MemoryRecord) -> "ExperienceRecord | None":
         delivered=bool(ctx.get("delivered", False)),
         noted_by=str(ctx.get("noted_by") or ""),
         created_at=raw.created_at,
+        message=str(ctx.get("message") or ""),
     )
 
 

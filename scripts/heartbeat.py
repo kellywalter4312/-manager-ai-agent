@@ -218,7 +218,7 @@ def check_proactive_events(
 
     manager = build_manager_factory(settings, dry_run)(None)
     calendar_events = build_calendar_event_provider(settings)
-    due = due_proactive_events(manager, today=today, calendar_events=calendar_events)
+    due = due_proactive_events(manager, today=today, calendar_events=calendar_events, now=now)
     if not due:
         return "proactive events: none due today"
 
@@ -242,7 +242,7 @@ def check_proactive_events(
     experiences = {
         record.dedup_key: {**record.to_dict(), "enabled": True}
         for record in evaluate_and_persist_experiences(
-            manager, today=today, calendar_events=calendar_events,
+            manager, today=today, calendar_events=calendar_events, now=now,
         )
     }
 

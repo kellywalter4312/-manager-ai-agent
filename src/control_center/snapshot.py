@@ -457,6 +457,7 @@ def _experiences(items: Any) -> dict[str, Any]:
             "overlay": item.overlay,
             "intensity": item.intensity,
             "duration_ms": item.duration_ms,
+            "message": getattr(item, "message", ""),
         }
         for item in items if not item.delivered
     ]

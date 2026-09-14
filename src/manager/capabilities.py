@@ -206,6 +206,8 @@ from src.services.memory.tasks import (
     build_task_record,
     complete_task_intent,
     create_task_intent,
+    extract_reminder,
+    reminder_intent,
     describe_task,
     extract_completion_topic,
     extract_reopen_topic,
@@ -3931,6 +3933,14 @@ LIST_RECORDINGS = ManagerCapability(
 # ---------------------------------------------------------------------------
 
 
+def create_task_intent_plain(text: str) -> bool:
+    """A plain "add a task" / "remind me to X" with no time is still an
+    ordinary task - only a request that is *only* about a reminder or alarm
+    needs a time."""
+    lowered = " ".join(str(text or "").lower().split())
+    return any(marker in lowered for marker in ("add a task", "add task", "create a task", "new task", "add this task", "remind me to"))
+
+
 def create_task(request: CapabilityRequest) -> TaskResult:
     """Add a new pending task through the governed write path - the
     identical gate every other durable Manager write already crosses.
@@ -3941,7 +3951,14 @@ def create_task(request: CapabilityRequest) -> TaskResult:
             "I don't have a way to track tasks right now.",
         )
 
-    record = build_task_record(request.task.description, agent_name=request.own_name)
+    calendar = request.calendar if request.calendar is not None else Calendar.utc()
+    reminder = extract_reminder(request.task.description, now=calendar.now())
+    if reminder is None and reminder_intent(request.task.description) and not create_task_intent_plain(request.task.description):
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "When should I remind you? Say a time - \"at 5pm\", \"tomorrow at 9\", \"in 20 minutes\".",
+        )
+    record = build_task_record(request.task.description, agent_name=request.own_name, reminder=reminder)
     if record is None:
         return TaskResult.failure(
             request.task, request.own_name, "Add a task to do what, exactly?"
@@ -3954,6 +3971,14 @@ def create_task(request: CapabilityRequest) -> TaskResult:
             f"I couldn't add that task: {verdict.reason}",
         )
 
+    if reminder is not None:
+        due_at = reminder[1]
+        when = due_at.strftime("%H:%M on %A %d %B %Y")
+        return TaskResult.success(
+            request.task, request.own_name,
+            f"I'll remind you: {record.content} - at {when}.",
+            payload={"handled_by": "create_task", "task_id": record.id, "due_at": due_at.isoformat()},
+        )
     return TaskResult.success(
         request.task, request.own_name,
         f"Added: {record.content}",
