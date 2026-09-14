@@ -166,6 +166,14 @@ from src.services.memory.personal_context import (
 )
 from src.services.memory.query import STOPWORDS as _QUERY_STOPWORDS
 from src.services.memory.session import retention_requests
+from src.services.memory.correction import (
+    ACTION_INVALIDATE,
+    ACTION_REPLACE,
+    CorrectionStatement,
+    correction_statement_intent,
+    extract_correction,
+)
+from src.manager.activity_session import CorrectionOption, PendingCorrection
 from src.services.memory.personal_context import (
     personal_context_intent as _personal_context_shape_matches,
 )
@@ -1633,6 +1641,10 @@ def correction_intent(task: Task, participants: Sequence[str] = ()) -> bool:
         CORRECTION_TOPIC_PATTERN.search(text)
         or _marker_present(text, CORRECTION_REPLACE_MARKERS)
         or _marker_present(text, CORRECTION_INVALIDATE_MARKERS)
+        # Pre-Stage-9 Campaign 2: a correction in ordinary words ("You
+        # remembered that incorrectly. It's green.", "Actually it's green,
+        # not blue.", "I don't like blue anymore") - see correction.py.
+        or correction_statement_intent(text)
     )
 
 
@@ -1688,6 +1700,281 @@ def _replace_canonical(
     return TaskResult.success(request.task, request.own_name, reply, payload=payload)
 
 
+# ---------------------------------------------------------------------------
+# Pre-Stage-9 Campaign 2: a correction in ordinary words, resolved against
+# what is actually stored - and asked back, never guessed, when more than one
+# stored fact could be meant.
+# ---------------------------------------------------------------------------
+
+# Words that make a stored topic a preference - grammar about preferring,
+# never a subject.
+_PREFERENCE_TOPIC_WORDS = frozenset({"favourite", "favorite", "preference", "preferences", "preferred", "prefer", "prefers"})
+# How many candidates one clarifying question offers at most.
+_CORRECTION_OPTION_LIMIT = 6
+
+
+def _mentions(text: str, fragment: str) -> bool:
+    fragment = " ".join(str(fragment or "").lower().split())
+    haystack = " ".join(str(text or "").lower().split())
+    return len(fragment) >= 2 and re.search(rf"\b{re.escape(fragment)}\b", haystack) is not None
+
+
+def _correction_options(request: CapabilityRequest, items: "Sequence[Any]") -> "list[tuple[CorrectionOption, Any]]":
+    """Every current stored fact a correction could be about, newest first:
+    each canonical topic's current statement, and every free "remember that"
+    note that is not already part of the canonical store."""
+    options: list[tuple[CorrectionOption, Any]] = []
+    for item in items:
+        if item.status != STATUS_CURRENT:
+            continue
+        said = describe_for_user(item).rstrip(".")
+        label = f"your {item.topic} ({item.value})" if item.value else said[:1].lower() + said[1:]
+        options.append((CorrectionOption(label=label, record_id=item.record_id, topic=item.topic, value=item.value), item))
+    canonical_ids = {item.record_id for item in items}
+    try:
+        notes = tuple(request.recall(kind=MemoryCategory.USER_CONTEXT.value, limit=50))
+    except Exception as exc:  # noqa: BLE001 - an unreadable store offers nothing
+        logger.warning("could not read notes for a correction: %s", exc)
+        notes = ()
+    for note in notes:
+        if note.id in canonical_ids or (note.context or {}).get("fact_type") or "resolved_ambiguity" in note.tags:
+            continue
+        options.append((CorrectionOption(label=f'"{note.content}"', record_id=note.id), note))
+    options.sort(key=lambda pair: pair[1].created_at, reverse=True)
+    return options
+
+
+def _option_text(option: CorrectionOption, source: "Any") -> str:
+    return f"{option.topic} {option.value} {getattr(source, 'content', '')}"
+
+
+def _last_answer_line(request: CapabilityRequest) -> str:
+    """What this agent said last, when it was an answer rather than an
+    acknowledgement of something just learned - the one reply "that's wrong"
+    can only mean."""
+    if request.history is None:
+        return ""
+    try:
+        lines = [str(line) for line in request.history()]
+    except Exception:  # noqa: BLE001 - an unreadable history narrows nothing
+        return ""
+    prefix = f"{request.own_name}:"
+    for line in reversed(lines):
+        if line.startswith(prefix):
+            said = line[len(prefix):].strip()
+            return "" if said.lower().startswith("got it") else said
+    return ""
+
+
+def _learn_instead(request: CapabilityRequest, candidate: PersonalContextCandidate) -> TaskResult:
+    record = build_personal_context_record(candidate, agent_name=request.own_name)
+    verdict = request.retain(record)
+    if not verdict.allowed:
+        return TaskResult.failure(request.task, request.own_name, f"I couldn't record that: {verdict.reason}")
+    said = describe_for_user(candidate)
+    return TaskResult.success(
+        request.task, request.own_name, f"Got it - I'll remember that {said[:1].lower()}{said[1:]}",
+        payload={"handled_by": "correct_memory", "action": "learned", "topic": candidate.topic},
+    )
+
+
+def _ask_which(
+    request: CapabilityRequest, statement: CorrectionStatement, candidates: "Sequence[tuple[CorrectionOption, Any]]",
+) -> TaskResult:
+    offered = tuple(option for option, _source in candidates[:_CORRECTION_OPTION_LIMIT])
+    verb = f"change to {statement.replacement}" if statement.action == ACTION_REPLACE else "remove"
+    labels = [option.label for option in offered]
+    listing = ", ".join(labels[:-1]) + f" or {labels[-1]}"
+    question = f"More than one thing I remember could be meant: {listing}. Which should I {verb}?"
+    sessions = request.activity_sessions
+    if sessions is None:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            f"{question} I can't hold that question open right now, so tell me the topic "
+            "directly - for example 'update what you remembered about <topic> to <value>'.",
+        )
+    sessions.raise_correction(
+        request.own_name,
+        PendingCorrection(question=question, action=statement.action, replacement=statement.replacement, options=offered),
+    )
+    return TaskResult.success(
+        request.task, request.own_name, question,
+        payload={"handled_by": "correct_memory", "action": "clarify", "options": labels},
+    )
+
+
+def _apply_to_option(
+    request: CapabilityRequest, statement: CorrectionStatement, option: CorrectionOption, source: "Any",
+) -> TaskResult:
+    """Apply one resolved correction - retain the corrected statement first,
+    then forget only the statement that was wrong."""
+    payload = {"handled_by": "correct_memory", "topic": option.topic or option.label}
+    if statement.action == ACTION_INVALIDATE:
+        request.forget(option.record_id)
+        return TaskResult.success(
+            request.task, request.own_name, f"Understood - I've removed {option.label}.",
+            payload={**payload, "action": "invalidated"},
+        )
+
+    replacement = statement.replacement
+    if isinstance(source, MemoryRecord):
+        content = source.content
+        if statement.old_value and _mentions(content, statement.old_value):
+            content = re.sub(rf"\b{re.escape(statement.old_value)}\b", replacement, content, flags=re.IGNORECASE)
+        else:
+            content = replacement
+        verdict = request.retain(MemoryRecord(
+            content=content, kind=MemoryCategory.USER_CONTEXT.value, tags=source.tags,
+            context={"source": "conversation", "corrects": source.id},
+        ))
+        if not verdict.allowed:
+            return TaskResult.failure(request.task, request.own_name, f"I couldn't update that: {verdict.reason}")
+        request.forget(source.id)
+        return TaskResult.success(
+            request.task, request.own_name, f"Got it - I've corrected that: {content}",
+            payload={**payload, "action": "corrected"},
+        )
+
+    if source.value:
+        corrected = PersonalContextCandidate(
+            topic=source.topic, content=f"The user's {source.topic} is {replacement}.",
+            category=source.category, value=replacement,
+        )
+        said = describe_for_user(corrected)
+        return _replace_canonical(
+            request, source, corrected, reply=f"Got it - I've corrected that. {said}",
+            payload={**payload, "action": "corrected"},
+        )
+
+    # A statement with no separate value ("you're learning X") is corrected
+    # to a new topic: the corrected subject takes the old one's place.
+    content = re.sub(rf"\b{re.escape(source.topic)}\b", replacement, source.content, flags=re.IGNORECASE)
+    if content == source.content:
+        content = f"The user's {source.topic} is {replacement}."
+    corrected = PersonalContextCandidate(
+        topic=replacement if content != f"The user's {source.topic} is {replacement}." else source.topic,
+        content=content, category=source.category, activity=source.activity,
+    )
+    record = build_personal_context_record(corrected, agent_name=request.own_name)
+    record = MemoryRecord(
+        content=record.content, kind=record.kind, tags=record.tags,
+        context={**dict(record.context or {}), "corrects": source.record_id},
+    )
+    verdict = request.retain(record)
+    if not verdict.allowed:
+        return TaskResult.failure(request.task, request.own_name, f"I couldn't update that: {verdict.reason}")
+    request.forget(source.record_id)
+    said = describe_for_user(corrected)
+    return TaskResult.success(
+        request.task, request.own_name, f"Got it - I've corrected that. {said}",
+        payload={**payload, "action": "corrected"},
+    )
+
+
+def _apply_correction(request: CapabilityRequest, statement: CorrectionStatement, items: "Sequence[Any]") -> TaskResult:
+    """Resolve what a correction is about, in order of how certain the
+    evidence is, and ask whenever more than one stored fact remains:
+
+      1. the replacement names its own topic ("my favourite colour is green");
+      2. the wrong value was named ("not blue", "I don't like blue anymore");
+      3. a change of preference targets a preference-shaped fact;
+      4. the one fact this agent has just given as an answer;
+      5. the only stored fact there is.
+    """
+    if statement.action == ACTION_REPLACE:
+        taught = extract_personal_context_candidate(statement.replacement)
+        if taught is not None:
+            existing = _canonical_for_topic(items, taught.topic)
+            if existing is not None:
+                return _replace_canonical(
+                    request, existing, taught, reply="Got it - I've corrected that.",
+                    payload={"handled_by": "correct_memory", "action": "corrected", "topic": existing.topic},
+                )
+            return _learn_instead(request, taught)
+
+    options = _correction_options(request, items)
+
+    if statement.old_value:
+        named = [pair for pair in options if _mentions(_option_text(*pair), statement.old_value)]
+        if len(named) == 1:
+            return _apply_to_option(request, statement, *named[0])
+        if len(named) > 1:
+            return _ask_which(request, statement, named)
+
+    if statement.preference:
+        preferred = [pair for pair in options if tokenize(pair[0].topic) & _PREFERENCE_TOPIC_WORDS]
+        if len(preferred) == 1:
+            return _apply_to_option(request, statement, *preferred[0])
+        if len(preferred) > 1:
+            return _ask_which(request, statement, preferred)
+        if statement.action == ACTION_REPLACE and statement.replacement:
+            return _learn_instead(request, PersonalContextCandidate(
+                topic="preference", content=f"The user prefers {statement.replacement}.",
+                category="context", value=statement.replacement,
+            ))
+        if statement.old_value:
+            return _learn_instead(request, PersonalContextCandidate(
+                topic=statement.old_value, content=f"The user no longer likes {statement.old_value}.",
+                category="context", status=STATUS_DISCONTINUED,
+            ))
+
+    answered = _last_answer_line(request)
+    if answered:
+        mentioned = [pair for pair in options if _mentions(answered, pair[0].topic) or _mentions(answered, pair[0].value)]
+        if len(mentioned) == 1:
+            return _apply_to_option(request, statement, *mentioned[0])
+
+    if len(options) == 1:
+        return _apply_to_option(request, statement, *options[0])
+    if not options:
+        return TaskResult.success(
+            request.task, request.own_name, "I don't have anything remembered that this could correct.",
+            payload={"handled_by": "correct_memory", "action": "nothing_to_correct"},
+        )
+    return _ask_which(request, statement, options)
+
+
+def _resolve_pending_correction(
+    request: CapabilityRequest, pending: PendingCorrection, items: "Sequence[Any]",
+) -> TaskResult:
+    sessions = request.activity_sessions
+    reply = request.task.description
+    sessions.clear_correction(request.own_name)
+    if pending.is_cancel(reply):
+        return TaskResult.success(
+            request.task, request.own_name, "Okay - I've left everything as it was.",
+            payload={"handled_by": "correct_memory", "action": "cancelled"},
+        )
+    option = pending.select_option(reply)
+    if option is None:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "I couldn't tell which one you meant, so I've left everything as it was.",
+        )
+    for candidate, source in _correction_options(request, items):
+        if candidate.record_id == option.record_id:
+            return _apply_to_option(
+                request, CorrectionStatement(pending.action, pending.replacement), candidate, source,
+            )
+    return TaskResult.failure(
+        request.task, request.own_name,
+        "That has changed since I asked, so I've left everything as it was.",
+    )
+
+
+def is_new_memory_statement(text: str) -> bool:
+    """A remark that itself says something new - a correction, a personal
+    fact, or a request to remember - and so is never merely an answer to an
+    open "which one did you mean?" question, even when it happens to name one
+    of the offered topics."""
+    return bool(
+        extract_correction(text) is not None
+        or extract_personal_context_candidate(text) is not None
+        or retention_requests([text])
+        or CORRECTION_TOPIC_PATTERN.search(str(text or ""))
+    )
+
+
 def correct_memory(request: CapabilityRequest) -> TaskResult:
     """Replace or invalidate an existing memory, atomically, through the
     identical retain-then-forget sequence the relational-birthday handling
@@ -1716,6 +2003,15 @@ def correct_memory(request: CapabilityRequest) -> TaskResult:
 
     text = request.task.description
     items = _canonical_items_for_correction(request)
+
+    sessions = request.activity_sessions
+    pending = sessions.pending_correction(request.own_name) if sessions is not None else None
+    if pending is not None:
+        if is_new_memory_statement(text):
+            # A new statement replaces the open question rather than answering it.
+            sessions.clear_correction(request.own_name)
+        else:
+            return _resolve_pending_correction(request, pending, items)
 
     topic_match = CORRECTION_TOPIC_PATTERN.search(text)
     if topic_match is not None:
@@ -1755,6 +2051,10 @@ def correct_memory(request: CapabilityRequest) -> TaskResult:
             payload={"handled_by": "correct_memory", "action": "updated", "topic": topic},
         )
 
+    statement = extract_correction(text)
+    if statement is not None:
+        return _apply_correction(request, statement, items)
+
     replacement = _after_marker(text, CORRECTION_REPLACE_MARKERS)
     if replacement:
         taught = extract_personal_context_candidate(replacement)
@@ -1782,19 +2082,12 @@ def correct_memory(request: CapabilityRequest) -> TaskResult:
         )
 
     if _marker_present(text, CORRECTION_INVALIDATE_MARKERS):
-        notes = request.recall(kind=MemoryCategory.USER_CONTEXT.value, limit=1)
-        candidates = [(item.created_at, item.record_id) for item in items[:1]]
-        candidates += [(note.created_at, note.id) for note in notes]
-        if not candidates:
-            return TaskResult.success(
-                request.task, request.own_name,
-                "I don't have anything remembered to remove.",
-            )
-        _newest_at, newest_id = max(candidates, key=lambda pair: pair[0])
-        request.forget(newest_id)
-        return TaskResult.success(
-            request.task, request.own_name, "Understood - I've removed that.",
-            payload={"handled_by": "correct_memory", "action": "invalidated"},
+        # Never "the most recent memory" by default any more: removing the
+        # wrong one silently is worse than asking which one.
+        return _apply_correction(
+            request,
+            CorrectionStatement(ACTION_INVALIDATE, preference=bool(re.search(r"\bprefer", text, re.IGNORECASE))),
+            items,
         )
 
     # select_capability only reaches this handler when claims already

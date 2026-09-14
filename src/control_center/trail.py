@@ -326,7 +326,7 @@ def _own_capability(
     if skills is None:
         return None, None, None
 
-    from src.manager.capabilities import GENERAL_CAPABILITIES, OPEN_CONVERSATION, select_capability
+    from src.manager.capabilities import CORRECT_MEMORY, GENERAL_CAPABILITIES, OPEN_CONVERSATION, select_capability
 
     try:
         # Mirrors the identical priority check ManagerSkills.execute()
@@ -336,11 +336,22 @@ def _own_capability(
         # match - the trail must show the decision that was actually
         # made, never a re-derived guess that ignores session state.
         sessions = getattr(skills, "_activity_sessions", None)
-        if sessions is not None and (
+        chosen = getattr(skills, "selected_capability_for", lambda _task_id: None)(task.id)
+        if chosen is not None and chosen in skills.capabilities:
+            # Pre-Stage-9 Campaign 2: the capability ManagerSkills actually
+            # selected for this very task - never a re-derivation after the
+            # session state that decided it has already changed.
+            capability = skills.capabilities[chosen]
+        elif sessions is not None and (
             sessions.pending_clarification(skills.name) is not None
             or sessions.activity(skills.name) is not None
         ):
             capability = OPEN_CONVERSATION
+        elif sessions is not None and sessions.pending_correction(skills.name) is not None and (
+            sessions.pending_correction(skills.name).select_option(task.description) is not None
+            or sessions.pending_correction(skills.name).is_cancel(task.description)
+        ):
+            capability = CORRECT_MEMORY
         else:
             capability = select_capability(
                 task,

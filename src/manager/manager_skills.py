@@ -38,7 +38,9 @@ from src.core.contracts import AgentSpec, Task, TaskResult
 from src.manager.activity_session import ActivityBrainOps, ActivitySessions
 from src.manager.brain import BrainDecision, GovernanceBrainVerdict
 from src.manager.capabilities import (
+    CORRECT_MEMORY,
     MANAGER_CAPABILITIES,
+    is_new_memory_statement,
     OPEN_CONVERSATION,
     CapabilityRequest,
     ManagerCapability,
@@ -284,6 +286,11 @@ class ManagerSkills(BaseAgent):
         # collaborator already has: governance.assess() itself already
         # degrades honestly (CLARIFY, never a guess) when this is None.
         self._assess_governance = assess_governance
+        # Pre-Stage-9 Campaign 2: which capability execute() actually chose
+        # for the most recent task - what the Control Center trail reports,
+        # rather than re-deriving a choice after the session state that
+        # decided it has already changed.
+        self._last_selected: "tuple[str, str] | None" = None
 
     @property
     def interface(self) -> "InterfaceDescriptor | None":
@@ -413,6 +420,17 @@ class ManagerSkills(BaseAgent):
             or self._activity_sessions.pending_confirmation(self.name) is not None
         ):
             return True
+        # Pre-Stage-9 Campaign 2: a reply to an open "which one did you
+        # mean?" correction question is this Manager's, whatever a specialist
+        # also happens to declare.
+        pending_correction = self._activity_sessions.pending_correction(self.name)
+        if pending_correction is not None and CORRECT_MEMORY.name in self._capabilities and not is_new_memory_statement(
+            task.description
+        ) and (
+            pending_correction.select_option(task.description) is not None
+            or pending_correction.is_cancel(task.description)
+        ):
+            return True
         return any(
             capability.claims is not None
             and capability.claims(task, tuple(a.name for a in self._roster()))
@@ -532,6 +550,23 @@ class ManagerSkills(BaseAgent):
         """The canonical view of the person this Manager serves, or None."""
         return self._user_knowledge
 
+    def selected_capability_for(self, task_id: str) -> "str | None":
+        """The capability this Manager actually chose for ``task_id``, or None."""
+        if self._last_selected is not None and self._last_selected[0] == task_id:
+            return self._last_selected[1]
+        return None
+
+    def _answers_pending_correction(self, text: str) -> bool:
+        """Whether ``text`` answers this agent's open "which one did you
+        mean?" correction question. A new statement drops the question and is
+        handled on its own; any other non-answer drops it too."""
+        if self._activity_sessions.pending_correction(self.name) is None:
+            return False
+        if CORRECT_MEMORY.name not in self._capabilities or is_new_memory_statement(text):
+            self._activity_sessions.clear_correction(self.name)
+            return False
+        return self._activity_sessions.correction_reply_is_for_pending(self.name, text)
+
     def execute(self, task: Task) -> TaskResult:
         """Pick the handler this task is asking for, and run it.
 
@@ -565,6 +600,11 @@ class ManagerSkills(BaseAgent):
             or self._activity_sessions.pending_confirmation(self.name) is not None
         ):
             capability = OPEN_CONVERSATION
+        elif self._answers_pending_correction(task.description):
+            # Pre-Stage-9 Campaign 2: the person is answering "which one did
+            # you mean?" - resolved deterministically, with or without a
+            # Brain. Any other reply has already dropped the question.
+            capability = self._capabilities[CORRECT_MEMORY.name]
         else:
             # Who is registered right now, so a name used as the object of
             # an invitation is read as an identity rather than as a kind of
@@ -581,6 +621,7 @@ class ManagerSkills(BaseAgent):
             capability.name,
         )
 
+        self._last_selected = (task.id, capability.name)
         return capability.handle(
             CapabilityRequest(
                 task=task,

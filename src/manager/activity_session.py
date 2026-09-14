@@ -35,6 +35,7 @@ keeping, never instead of keeping it.
 
 from __future__ import annotations
 
+import re
 import threading
 from dataclasses import dataclass, field
 from typing import Callable, Sequence, TYPE_CHECKING
@@ -86,6 +87,74 @@ class PendingClarification:
                 if matched is None or len(candidate) > len(matched):
                     matched = candidate
         return matched
+
+
+@dataclass(frozen=True)
+class CorrectionOption:
+    """One stored fact a correction could be about - named back to the person
+    exactly as it is stored (``label``), never re-worded into something else."""
+
+    label: str
+    record_id: str
+    topic: str = ""
+    value: str = ""
+
+
+# Replies that decline to choose - grammar, never a topic.
+_CORRECTION_CANCEL = ("never mind", "nevermind", "neither", "cancel", "forget it", "leave it", "none of them")
+_ORDINALS = {"first": 0, "1st": 0, "second": 1, "2nd": 1, "third": 2, "3rd": 2, "fourth": 3, "4th": 3}
+
+
+@dataclass(frozen=True)
+class PendingCorrection:
+    """A correction that could mean more than one stored fact, asked back to
+    the person rather than guessed (Pre-Stage-9 Campaign 2). Nothing is
+    changed until they choose; choosing is matched deterministically against
+    the options actually offered - by topic, by stored value, or by position
+    ("the second one")."""
+
+    question: str
+    action: str
+    replacement: str
+    options: tuple[CorrectionOption, ...]
+
+    def __post_init__(self) -> None:
+        if not str(self.question).strip():
+            raise ValueError("a PendingCorrection must have a question")
+        if len(self.options) < 2:
+            raise ValueError("a PendingCorrection needs at least two options")
+
+    def select_option(self, reply: str) -> "CorrectionOption | None":
+        words = " ".join(str(reply or "").lower().split())
+        if not words:
+            return None
+        for word, index in _ORDINALS.items():
+            if re.search(rf"\b{word}\b", words) and index < len(self.options):
+                return self.options[index]
+        if re.search(r"\blast\b", words):
+            return self.options[-1]
+        best = None
+        for option in self.options:
+            for name in (option.topic, option.value):
+                name = " ".join(str(name or "").lower().split())
+                if len(name) >= 2 and re.search(rf"\b{re.escape(name)}\b", words):
+                    if best is None or len(name) > best[0]:
+                        best = (len(name), option)
+        if best is not None:
+            return best[1]
+        # A word that names exactly one option ("the colour" when the options
+        # are a favourite colour and a favourite food).
+        said = set(re.findall(r"[a-z0-9]+", words))
+        names = [set(re.findall(r"[a-z0-9]+", f"{o.topic} {o.value}".lower())) for o in self.options]
+        hits = [
+            index for index, own in enumerate(names)
+            if (own - set().union(*(names[:index] + names[index + 1:]))) & said
+        ]
+        return self.options[hits[0]] if len(hits) == 1 else None
+
+    def is_cancel(self, reply: str) -> bool:
+        words = " ".join(str(reply or "").lower().split())
+        return any(marker in words for marker in _CORRECTION_CANCEL)
 
 
 @dataclass(frozen=True)
@@ -189,6 +258,7 @@ class ActivitySessions:
         self._clarifications: dict[str, PendingClarification] = {}
         self._activities: dict[str, GuidedActivityState] = {}
         self._confirmations: dict[str, PendingConfirmation] = {}
+        self._corrections: dict[str, PendingCorrection] = {}
 
     # -- pending clarification ------------------------------------------
 
@@ -232,6 +302,32 @@ class ActivitySessions:
     def clear_confirmation(self, agent_key: str) -> None:
         with self._lock:
             self._confirmations.pop(str(agent_key), None)
+
+    # -- pending ambiguous memory correction (Pre-Stage-9 Campaign 2) -----
+
+    def pending_correction(self, agent_key: str) -> PendingCorrection | None:
+        with self._lock:
+            return self._corrections.get(str(agent_key))
+
+    def raise_correction(self, agent_key: str, correction: PendingCorrection) -> None:
+        with self._lock:
+            self._corrections[str(agent_key)] = correction
+
+    def clear_correction(self, agent_key: str) -> None:
+        with self._lock:
+            self._corrections.pop(str(agent_key), None)
+
+    def correction_reply_is_for_pending(self, agent_key: str, reply: str) -> bool:
+        """Whether ``reply`` answers the pending correction question (chooses
+        an option or declines). A reply that does neither abandons the
+        question, so ordinary conversation is never trapped by it."""
+        pending = self.pending_correction(agent_key)
+        if pending is None:
+            return False
+        if pending.select_option(reply) is not None or pending.is_cancel(reply):
+            return True
+        self.clear_correction(agent_key)
+        return False
 
 
 @dataclass(frozen=True)

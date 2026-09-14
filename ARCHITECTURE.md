@@ -8697,3 +8697,79 @@ Arthur's profile still had no Rust (LRN-01, LRN-04, LRN-05, LRN-06).
 | LRN-06 Arthur / future specialists read the same canonical context | VERIFIED WORKING |
 | Update, history, restart | VERIFIED WORKING |
 | Brain-confirmed learning of the broad "my X is Y" shape | VERIFIED PARTIAL - scripted Brain only; real vendor BLOCKED (unfunded) |
+
+### 52.32 Pre-Stage-9 Campaign 2 - correcting what Alfred remembers, in ordinary words
+
+**What the Master Pre-Stage-9 Audit found (runtime, Half Brain).** Only
+"Update what you remembered about X to Y" corrected reliably. "You remembered
+that incorrectly. It's green." and "Actually it's green, not blue." were not
+recognised at all (the markers required a "," or ":"); "That's wrong, it's
+green." replaced the most recent note with an orphan "it's green"; with a
+favourite colour and a favourite food both stored, "That's wrong, it's green."
+asked nothing and deleted the food (MEM-01, MEM-02). A pure "remember that X"
+in Half Brain was acknowledged behind a "no reasoning capability" refusal
+(MEM-06).
+
+**The repair.**
+
+- `src/services/memory/correction.py` - the grammar of a correction, never a
+  subject: explicit wrongness plus a replacement ("that's wrong / incorrect /
+  not right", "you remembered / got that wrong"), "correction: ...", a
+  lead-in "no, / actually, it's X(, not Y)", "no, not Y - X", and a stated
+  change of preference ("I prefer X now", "I don't like Y anymore"). Tried
+  as said first, then without a leading address, because the address
+  stripper alone would swallow "That's wrong, ". A bare "it's X, not Y" with
+  no lead is not a correction ("it's either Tuesday or Wednesday, not sure").
+- `correct_memory` resolves what a correction is about in order of how
+  certain the evidence is: the topic the replacement states; a uniquely
+  named old value; a preference-shaped fact; the one fact this agent has just
+  given as an *answer*; the only stored fact there is. Whenever more than one
+  stored fact remains it asks - "More than one thing I remember could be
+  meant: your favourite food (rice) or your favourite colour (blue). Which
+  should I change to green?" - and changes nothing. Retain-then-forget
+  throughout, so a refused replacement never destroys what it replaced; only
+  the wrong current statement is forgotten, earlier history is kept.
+- `PendingCorrection` beside the existing pending states in
+  `ActivitySessions` (not a second tracker). A reply is matched
+  deterministically against the options actually offered - by topic, by
+  stored value, by a word unique to one option ("the colour"), by position
+  ("the second one") - or declines ("never mind"). `ManagerSkills` routes an
+  answering reply to `correct_memory` with or without a Brain (in Half Brain
+  `open_conversation` refuses before reaching guided interaction, so the
+  existing clarification path could never have resolved it). A reply that is
+  itself a new statement (a correction, a personal fact, a "remember that")
+  drops the question and is handled on its own - found at runtime, where "That's
+  wrong, I'm still learning SQL" named an offered topic and was consumed as
+  the answer.
+- `ManagerSkills.selected_capability_for(task_id)`: the Control Center trail
+  reports the capability that actually answered, rather than re-deriving one
+  after the session state that decided it had changed.
+- `scripts/exchange.py`: when the whole utterance was a request to remember,
+  nothing else failed, so it is acknowledged plainly ("Got it - I've
+  remembered that: ..."); an utterance that also asked for something still
+  gets both halves, the honesty rule of Foundation Repair #3.
+
+**Verification.**
+
+- `tests/test_campaign_02_memory_correction.py` plus the neighbouring suites
+  (phase 2 memory, retention honesty, personal context, clarification and
+  guided interaction, routing pins, Control Center trail): 671 passed.
+- Real served system (`scripts/serve_ui.py::build_live_system`, persistent
+  scratch memory, no Brain provider, production `data/` hash unchanged): the
+  six audited phrasings each replaced (or, for "I don't like blue anymore",
+  removed) the one stored fact; with colour and food stored, the ambiguous
+  correction asked, changed nothing, then "the colour" corrected only the
+  colour; "That's no longer my preference." asked which to remove and "never
+  mind" left both; a correction survived a rebuild ("what's my favourite
+  colour?" -> green); "That's wrong, I'm still learning SQL" moved SQL from
+  WORKING to LEARNING in Arthur's live profile, persisted across a rebuild,
+  and was not swallowed by an open question; a pure note was acknowledged
+  without a refusal.
+
+| Requirement | Status |
+|---|---|
+| MEM-01 correction in ordinary words (direct, natural, changed preference, changed fact) | VERIFIED WORKING (Half Brain, served system) |
+| MEM-02 ambiguous correction asks, never silently changes or deletes | VERIFIED WORKING |
+| MEM-06 plain acknowledgement of a pure "remember that" | VERIFIED WORKING |
+| Restart persistence of a correction | VERIFIED WORKING |
+| Specialist (Arthur) sees the corrected knowledge | VERIFIED WORKING |

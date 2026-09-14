@@ -342,9 +342,12 @@ class TestHonestRetentionWhenTheRoutedTaskFails:
 
     def test_the_original_failure_reason_is_not_hidden(self):
         """Honest means both things are said - what could not be done, and
-        what was done anyway - never one replacing the other."""
+        what was done anyway - never one replacing the other. Pre-Stage-9
+        Campaign 2: that holds whenever the utterance asked for something
+        more than remembering; a pure note is acknowledged plainly (see
+        test_campaign_02_memory_correction.py)."""
         runtime, manager, channel, conversation = real_system()
-        turn = exchange(channel, conversation, NOTE)
+        turn = exchange(channel, conversation, NOTE + ", and tell me what you think of it")
         assert "reason about" in turn.outcome or "no reasoning capability" in turn.outcome
         assert "remembered" in turn.outcome.lower()
 

@@ -13,6 +13,7 @@ change what is remembered about this session and nothing about the answer.
 
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 
 from pathlib import Path
@@ -239,7 +240,7 @@ def exchange(
         handled_by_capability=turn.capability, handled_successfully=turn.succeeded,
     )
     if retained and not turn.succeeded:
-        turn = _acknowledge_successful_retention(turn, retained)
+        turn = _acknowledge_successful_retention(turn, retained, only_asked_to_remember=_only_asked_to_remember(request))
         response = replace(response, turn=turn, text=turn.outcome, speech=speakable(turn))
 
     # Stage 17.3: the real production speech/presence synchronisation
@@ -301,8 +302,27 @@ def exchange(
     return turn
 
 
+# A request that continues past the note ("... and tell me what you think")
+# asked for something more than remembering. Grammar only.
+_FURTHER_REQUEST = re.compile(
+    r"\b(?:and|then|also|but)\s+(?:tell|show|explain|find|check|send|call|what|how|why|can|could|would|please)\b",
+    re.IGNORECASE,
+)
+
+
+def _only_asked_to_remember(request: str) -> bool:
+    """Whether the whole utterance was a request to remember something, and
+    nothing else - the case where "I couldn't reason about that" was never a
+    real failure of anything the person asked for (Pre-Stage-9 Campaign 2)."""
+    requested = retention_requests([request])
+    if not requested:
+        return False
+    note = requested[0].content
+    return "?" not in request and not _FURTHER_REQUEST.search(note)
+
+
 def _acknowledge_successful_retention(
-    turn: ConversationTurn, retained: "tuple[MemoryRecord, ...]"
+    turn: ConversationTurn, retained: "tuple[MemoryRecord, ...]", *, only_asked_to_remember: bool = False,
 ) -> ConversationTurn:
     """Correct a turn that failed at its own routed task, but that
     nonetheless genuinely retained what was asked to be remembered -
@@ -336,11 +356,14 @@ def _acknowledge_successful_retention(
             actor=turn.manager or turn.handled_by,
         ),
     )
-    note = "I've remembered what you asked me to, though: " + "; ".join(
-        record.content for record in retained
-    )
-    original = turn.outcome.strip()
-    outcome = f"{original} {note}".strip() if original else note
+    remembered = "; ".join(record.content for record in retained)
+    if only_asked_to_remember:
+        # Nothing else was asked, so nothing else failed: just say it back.
+        outcome = f"Got it - I've remembered that: {remembered}"
+    else:
+        note = "I've remembered what you asked me to, though: " + remembered
+        original = turn.outcome.strip()
+        outcome = f"{original} {note}".strip() if original else note
     return replace(
         turn,
         succeeded=True,
