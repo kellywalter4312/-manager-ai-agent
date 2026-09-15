@@ -37,11 +37,14 @@ _EDITOR_NAMES = (
 _GENERATOR_NAMES = (
     "dall-e", "dall·e", "openai", "midjourney", "stable diffusion", "stability", "firefly", "imagen",
     "novelai", "leonardo", "ideogram", "flux", "comfyui", "automatic1111", "invokeai", "pollinations",
+    "sana", "sdxl", "gpt-image", "kandinsky", "recraft", "hidream", "seedream",
 )
 _ELA_QUALITY = 90
 _ELA_CELL = 32
 # A cell recompressing this many times more than the image's median is uneven.
 _ELA_HOT_FACTOR = 3.0
+# Below this share of cells, a few hot edges are not a region worth naming.
+_ELA_MIN_HOT_FRACTION = 0.005
 
 
 class ImageForensicsError(ValueError):
@@ -69,7 +72,10 @@ class ImageEvidence:
 
     @property
     def uneven_recompression(self) -> bool:
-        return self.ela_available and self.ela_hot_fraction > 0 and self.ela_peak >= _ELA_HOT_FACTOR * max(self.ela_median, 0.5)
+        return (
+            self.ela_available and self.ela_hot_fraction >= _ELA_MIN_HOT_FRACTION
+            and self.ela_peak >= _ELA_HOT_FACTOR * max(self.ela_median, 0.5)
+        )
 
     def describe(self) -> str:
         lines = [f"Here is what I can check in '{self.filename}' - evidence, not a verdict:"]
@@ -91,7 +97,7 @@ class ImageEvidence:
         if self.ela_available:
             if self.uneven_recompression:
                 lines.append(
-                    f"- Error-level analysis: {self.ela_hot_fraction:.0%} of the image recompresses much more than the rest "
+                    f"- Error-level analysis: {self.ela_hot_fraction:.1%} of the image recompresses much more than the rest "
                     f"(peak {self.ela_peak:.1f} vs median {self.ela_median:.1f}) - a pattern often left where part of an image "
                     "was changed after it was last saved, though text, sharp edges and re-saving can cause it too."
                 )
@@ -141,12 +147,19 @@ def examine_image(path: "str | Path") -> ImageEvidence:
 
     text_chunks = " ".join(f"{k} {v}" for k, v in (getattr(image, "text", None) or {}).items())
     info_text = " ".join(f"{k} {v}" for k, v in image.info.items() if isinstance(v, (str, bytes)) and len(str(v)) < 5000)
-    metadata_text = " ".join((software, text_chunks, info_text, str(exif.get("ImageDescription") or ""), str(exif.get("Artist") or "")))
+    metadata_text = " ".join((
+        software, make, model, text_chunks, info_text, str(exif.get("ImageDescription") or ""), str(exif.get("Artist") or ""),
+    ))
 
     content_credentials = b"c2pa" in raw or b"jumb" in raw
     generation_parameters = "parameters" in (getattr(image, "text", None) or {}) or "prompt" in (getattr(image, "text", None) or {})
 
     notes: list[str] = []
+    # A generator that writes its own name into the camera fields is a
+    # generator trace, never a camera.
+    if camera and _names_in(camera, _GENERATOR_NAMES):
+        notes.append(f"The camera fields name an image generator ('{camera}'), not a camera.")
+        camera = ""
     ela_available = False
     median = peak = hot_fraction = 0.0
     if (image.format or "").upper() in ("JPEG", "MPO"):

@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 ATTRIBUTION = "answered by the small local model on this machine - not verified reasoning"
+VISION_ATTRIBUTION = "described by the small local vision model on this machine - not verified reasoning"
 _SYSTEM = (
     "You are a careful assistant running as a small local model. Answer briefly and "
     "plainly. If you do not know, say you do not know. Never invent personal facts "

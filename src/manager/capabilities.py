@@ -80,6 +80,7 @@ from src.manager.knowledge import (
     describe_artifact,
 )
 from src.services.artifacts.content import (
+    ARTIFACT_ID_PATTERN,
     ContentUnit,
     content_reference_intent,
     locator_in,
@@ -2524,7 +2525,10 @@ def image_authenticity_intent(task: Task, participants: Sequence[str] = ()) -> b
     text = str(task.description or "")
     if _NOT_AN_IMAGE_WORDS.search(text) and not re.search(r"\b(?:image|photo|picture|pic|screenshot|selfie)\b", text, re.IGNORECASE):
         return False
-    return bool(_AUTHENTICITY_WORDS.search(text) and _AUTHENTICITY_SUBJECT.search(text) and _AUTHENTICITY_ASK.search(text))
+    # "is artifact 9078bdc2ac89 edited": the subject is named exactly rather
+    # than with a pointing word, which the subject pattern alone never matched.
+    subject = _AUTHENTICITY_SUBJECT.search(text) or ARTIFACT_ID_PATTERN.search(text) or _IMAGE_PATH_PATTERN.search(text)
+    return bool(_AUTHENTICITY_WORDS.search(text) and subject and _AUTHENTICITY_ASK.search(text))
 
 
 def image_authenticity(request: CapabilityRequest) -> TaskResult:
@@ -2601,7 +2605,8 @@ def image_analysis(request: CapabilityRequest) -> TaskResult:
     would then have to also hold the provider to reason about what it
     read.
     """
-    if request.analyze_image is None:
+    local_vision = getattr(request.assist, "describe_image", None) if request.assist is not None else None
+    if request.analyze_image is None and local_vision is None:
         return TaskResult.failure(
             request.task, request.own_name,
             "I don't have a way to reason about images yet - no vision-capable "
@@ -2638,17 +2643,40 @@ def image_analysis(request: CapabilityRequest) -> TaskResult:
             request.task, request.own_name, f"I couldn't read that image: {exc}",
         )
 
-    decision = request.analyze_image(image_bytes, request.task.description)
-    if not decision.is_decided or not decision.reason.strip():
-        return TaskResult.failure(
-            request.task, request.own_name,
-            f"I couldn't analyze that image: {decision.reason}",
+    decision = request.analyze_image(image_bytes, request.task.description) if request.analyze_image is not None else None
+    if decision is not None and decision.is_decided and decision.reason.strip():
+        return TaskResult.success(
+            request.task, request.own_name, decision.reason,
+            payload={"handled_by": "image_analysis", "brain": decision.source},
         )
 
-    return TaskResult.success(
-        request.task, request.own_name, decision.reason,
-        payload={"handled_by": "image_analysis", "brain": decision.source},
+    # Post-Pre-Stage-9: the Brain has no view (Half Brain, or a vendor with no
+    # vision), so the attributed local vision model looks - its words are never
+    # presented as the Manager's verified reasoning.
+    if local_vision is not None:
+        from src.providers.local_assistant import VISION_ATTRIBUTION
+
+        seen = local_vision(image_bytes, _vision_prompt(request.task.description))
+        if seen:
+            return TaskResult.success(
+                request.task, request.own_name, f"{seen}\n\n({VISION_ATTRIBUTION})",
+                payload={"handled_by": "image_analysis", "brain": "local_vision", "assisted": True},
+            )
+    reason = decision.reason if decision is not None else "the local vision model produced no description"
+    return TaskResult.failure(
+        request.task, request.own_name,
+        f"I couldn't analyze that image: {reason}",
     )
+
+
+def _vision_prompt(request_text: str) -> str:
+    """What the small vision model is asked - the person's own question when it
+    is one, otherwise a plain request to describe the image."""
+    text = " ".join(str(request_text or "").split())
+    for marker in IMAGE_ANALYSIS_MARKERS:
+        if text.lower().rstrip("?.! ") == marker:
+            return "Describe this image in detail: the main subject, the setting, colours and any visible text."
+    return text or "Describe this image."
 
 
 IMAGE_ANALYSIS = ManagerCapability(
@@ -3456,7 +3484,12 @@ _MEDIA_ILLUSTRATE_PATTERN = re.compile(
     r"^(?:please\s+)?(?:can\s+you\s+|could\s+you\s+|would\s+you\s+)?"
     r"(?:help\s+me\s+)?"
     r"(illustrate|draw\s+an?\s+(?:image|picture|illustration|scene|character)|"
-    r"generate\s+an?\s+image|create\s+an?\s+image|generate\s+a\s+picture|create\s+a\s+picture)\b",
+    r"generate\s+an?\s+image|create\s+an?\s+image|generate\s+a\s+picture|create\s+a\s+picture|"
+    # "make me an image of a quiet lounge" - the way people actually ask,
+    # found at runtime against the real vendor (2026-09-15) reaching nothing.
+    # Anchored the same way: the noun must be an image, so "make me a
+    # handout" still belongs to create_artifact.
+    r"make\s+(?:me\s+)?an?\s+(?:image|picture|illustration|drawing))\b",
     re.IGNORECASE,
 )
 # Note: bare "draw <anything>" is deliberately not anchored here - "draw a
@@ -3933,6 +3966,19 @@ def stop_recording(request: CapabilityRequest) -> TaskResult:
             "I don't have a way to record audio right now.",
         )
     if not request.recording_sessions.request_stop(request.own_name):
+        # "Nothing is currently recording" is true but unhelpful for the one
+        # case that actually happens: the person said "start recording", the
+        # session is waiting for the page's Recording control to open the
+        # microphone, and no recording ever began. Say which of the two it is,
+        # and clear the waiting request so the next "start recording" is clean.
+        waiting = request.recording_sessions.get(request.own_name)
+        if waiting is not None and getattr(waiting.state, "value", str(waiting.state)) == "requested":
+            request.recording_sessions.cancel(request.own_name)
+            return TaskResult.failure(
+                request.task, request.own_name,
+                "Nothing was recording - I was still waiting for the Recording control on the page to "
+                "open the microphone, so there was nothing to stop. I've cleared that request.",
+            )
         return TaskResult.failure(
             request.task, request.own_name,
             "Nothing is currently recording.",
@@ -6548,6 +6594,27 @@ _IMAGE_TEXT_READ = re.compile(
     re.IGNORECASE,
 )
 _LOCATOR_VERBS = re.compile(r"\b(read|say|says|said|show|on)\b", re.IGNORECASE)
+# A file on this machine, named in full. The media pattern covers audio and
+# video; documents and images are named the same way people name any file.
+_NAMED_FILE_PATTERN = re.compile(
+    r"\S+\.(?:pdf|txt|md|rtf|docx|doc|odt|html|htm|epub|csv|json|pptx|xlsx"
+    r"|png|jpg|jpeg|gif|webp|bmp|tiff?"
+    r"|wav|mp3|m4a|ogg|oga|opus|flac|aac|mp4|mov|mkv|webm|avi)\b",
+    re.IGNORECASE,
+)
+
+
+def names_specific_content(text: str) -> bool:
+    """Whether this request points at one exact thing - ``artifact <id>`` or a
+    file named in full - rather than at "this"/"it".
+
+    Shared by the capabilities that were unreachable precisely when a person
+    did the most specific thing available to them: every refusal in this file
+    invites "name it with 'artifact <id>'", and until now naming it dropped
+    the request into open_conversation instead.
+    """
+    body = str(text or "")
+    return bool(ARTIFACT_ID_PATTERN.search(body) or _NAMED_FILE_PATTERN.search(body))
 
 
 def read_content_intent(task: Task, participants: Sequence[str] = ()) -> bool:
@@ -6566,7 +6633,12 @@ def read_content_intent(task: Task, participants: Sequence[str] = ()) -> bool:
     ):
         return True
     if re.search(r"\bread\b", lowered) and (content_reference_intent(text) or _POINTING_READ.search(lowered)):
-        return _marker_present(text, _READ_ALOUD_MARKERS)
+        # Naming the thing exactly - "read artifact 4bc880fe28f8", "read the
+        # text in artifact 4bc880fe28f8" - is already unambiguous, so it needs
+        # no "to me" to prove a reading was meant. Without this, a person who
+        # took the refusal's own advice ("name it with 'artifact <id>'") was
+        # dropped into open_conversation and told no model was configured.
+        return _marker_present(text, _READ_ALOUD_MARKERS) or names_specific_content(text)
     return bool(_IMAGE_TEXT_READ.search(lowered))
 
 
@@ -8198,7 +8270,14 @@ _TRANSCRIBE_MARKERS: tuple[str, ...] = (
 _NAMES_A_RECORDING = re.compile(r"\b(?:recording|recordings|voice\s+note|voice\s+memo)\b", re.IGNORECASE)
 
 def transcribe_media_intent(task: Task, participants: Sequence[str] = ()) -> bool:
-    return _marker_present(task.description, _TRANSCRIBE_MARKERS)
+    text = str(task.description or "")
+    if _marker_present(text, _TRANSCRIBE_MARKERS):
+        return True
+    # "transcribe <a file>" / "transcribe artifact <id>": the verb plus the
+    # exact thing to transcribe. The marker list only covered pointing words
+    # ("transcribe this/that/the/my"), so naming the file - the one way a
+    # terminal session can point at anything - was not claimed at all.
+    return bool(re.search(r"\btranscri(?:be|ption|pt)\b", text, re.IGNORECASE) and names_specific_content(text))
 
 
 def transcribe_media(request: CapabilityRequest) -> TaskResult:
