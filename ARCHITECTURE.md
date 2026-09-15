@@ -9569,3 +9569,74 @@ reinstall.
 | Half Brain answers open questions offline, attributed | VERIFIED WORKING |
 | Connect to more than one website at once, by name | VERIFIED WORKING |
 | Read, fill by label and a confirmed submit on a real website | VERIFIED WORKING |
+
+### 52.45 Post-Pre-Stage-9 campaign, part 2 - every agent's workspaces, chosen in the Control Center
+
+**Owner requirement (2026-09-15).** Workspaces must not be hardcoded. Every AI
+agent, present and future, can have workspaces - a 3D diagram and a coding
+workspace are examples, not a list - chosen through the Control Center. Adding a
+coding specialist must never make Alfred lose coding.
+
+**Workspace types are data.** ``src/control_center/workspace_catalog.py`` -
+``WorkspaceType`` (id, label, description, panels) with defaults ``board``,
+``diagram``, ``coding`` and ``documents``. Panels are a small vocabulary the page
+renders generically: ``tasks``, ``diagram3d`` and ``artifacts:<type>``. The owner
+can add a type from existing panels (``workspace_type.<id>`` = ``Label|panel,...``
+in the governed config); an unrenderable one is skipped rather than shown half-working.
+
+**Every agent has a Workspace and every type by default.** ``default_descriptor``
+and ``with_workspace`` give the workspace surface to every agent, including a
+declared one. The owner can still withdraw it per agent through the governed
+surface lifecycle, and a withdrawn Workspace is refused by ``POST /workspace/enter``.
+The snapshot carries each agent's ``workspace_types`` and ``active_workspace``.
+
+**Chosen in the Control Center.** ``workspace <agent> add|remove|use <type>`` is a
+confirmed administrative write saved in the governed config, applying only to that
+agent. The page shows a type switcher and renders the open type's panels:
+
+- the governed board;
+- the agent's own artifacts of that type;
+- a real three.js diagram of the agent's work - the agent at the centre, its tasks
+  and artifacts as linked nodes - framing its own group like the other subject stages.
+
+**Found and fixed in a real browser: a specialist's board was never real.** "add a
+task to sort the inbox by client", addressed to Arthur (exactly what the board input
+sends), listed his inbox. The task verbs existed only as Manager capabilities, and
+the specialist memory policy had no category a task could be kept under. Now:
+
+- ``src/services/memory/task_board.py`` handles add, list, complete, reopen and rename
+  over any agent's own memory, through that agent's own policy, with the identical
+  ``tasks.py`` grammar;
+- ``SpecialistMemoryCategory.TASK`` ("user_task") is an explicit owner request -
+  the same concept in both vocabularies, like RECORDING;
+- ``CognitiveAgent.workspace_task_reply`` is offered by ``ManagerAgent.take_action``
+  to every non-Manager agent before its domain work, so a specialist built later has a
+  working board with no code of its own;
+- a timed reminder is declined honestly on a specialist's board, because the
+  proactive check reads the Manager's store.
+
+The diagram canvas also no longer inherits ``.private-env .agent3d``'s
+full-environment positioning, which drew it behind the whole scene.
+
+**Verified live (headless Chromium over CDP, isolated scratch data, production
+data byte-identical):**
+
+- Alfred and Arthur each had a Workspace with all four types.
+- Arthur's board input added "sort the inbox by client" to Arthur's board and the
+  page listed it; Alfred's board was unchanged.
+- The 3D diagram drew a real WebGL scene inside its own panel (4006 non-transparent
+  sampled pixels; canvas 538x218 inside the 540x220 panel, next panel below).
+- ``workspace Arthur remove diagram`` through the served ``/command`` route asked
+  for confirmation, then saved; after a refresh Arthur had three types and Alfred
+  still had four, with his diagram drawing (3429 pixels).
+- No page errors.
+- A registered future specialist got a Workspace, every type and a working board,
+  and the Manager's capabilities were unchanged.
+
+| Requirement | Status |
+|---|---|
+| Workspace types are data, not hardcoded; every agent has them | VERIFIED WORKING |
+| Chosen per agent in the Control Center, confirmed and saved | VERIFIED WORKING |
+| Real 3D diagram workspace | VERIFIED WORKING |
+| A specialist's own task board | VERIFIED WORKING (was VERIFIED BROKEN) |
+| Adding a specialist never removes the Manager's capabilities or types | VERIFIED WORKING |

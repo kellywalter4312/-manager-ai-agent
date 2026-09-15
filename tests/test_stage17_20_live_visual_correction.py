@@ -170,10 +170,12 @@ class TestTheCameraFitsWhatWasActuallyBuilt:
         mount = _mount_stage()
         assert "camera.position.set(0, 0.35, 5.4);" in mount
 
-    def test_exactly_the_three_subject_stages_opt_in(self):
+    def test_exactly_the_subject_stages_opt_in(self):
+        # Post-Pre-Stage-9: the Workspace 3D diagram is a subject stage too -
+        # the diagram is what a person came to see, never a widget.
         shell = _shell()
-        assert shell.count("scene.userData.frame = group;") == 3
-        for fn in ("mountBrain3D", "mountMemory3D", "mountAvatarBody3D"):
+        assert shell.count("scene.userData.frame = group;") == 4
+        for fn in ("mountBrain3D", "mountMemory3D", "mountAvatarBody3D", "buildWorkspaceDiagram"):
             assert "scene.userData.frame = group;" in _fn(fn, "\n  }\n"), fn
         # The identity emblem and the Room genuinely are widgets, and were
         # never the complaint - untouched.

@@ -55,6 +55,7 @@ from src.services.memory.ephemeral import EphemeralMemory
 from src.services.memory.memory import Memory, MemoryRecord
 from src.services.memory.policy import MemoryPolicy, PolicyVerdict
 from src.services.memory.query import distinctive_terms
+from src.services.memory.task_board import task_board_reply
 from src.utils.logging import get_logger, task_logger
 
 logger = get_logger(__name__)
@@ -129,6 +130,32 @@ class CognitiveAgent(BaseAgent):
             return TaskResult.success(task, self.name, "Got it.")
 
         return None
+
+    # ---- this agent's own Workspace task board ----------------------------
+    #
+    # Post-Pre-Stage-9. Every agent has a Workspace, and every Workspace has a
+    # task board. Found in a real browser: "add a task to sort the inbox by
+    # client", addressed to a specialist (exactly what the page's board input
+    # sends), was treated as domain work and listed the inbox. The board is
+    # shared by every specialist and lives here once; nothing about any domain
+    # is known to it.
+    def workspace_task_reply(self, task: Task) -> "TaskResult | None":
+        """This agent's own board's answer - add, list, complete, reopen,
+        rename - over its own memory and policy, or None when the request is
+        not about the board (the caller then does its own work)."""
+        reply = task_board_reply(
+            task.description,
+            agent_name=self.name,
+            recall=self.memory.recall,
+            retain=self.retain,
+            forget=self.memory.forget,
+            now=self.calendar.now(),
+        )
+        if reply is None:
+            return None
+        if reply.ok:
+            return TaskResult.success(task, self.name, reply.text, payload=dict(reply.payload))
+        return TaskResult.failure(task, self.name, reply.text)
 
     # ---- genuinely open-ended conversation --------------------------------
     #

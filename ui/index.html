@@ -576,6 +576,13 @@
      comment) so it reads as standing in the room, not as a form
      dropped on top of one. */
   .ws-board{gap:12px}
+  /* Workspace types: a switcher and panels inside the board. The diagram
+     canvas has its own class - .private-env .agent3d fills the whole
+     environment absolutely, which drew the diagram behind everything. */
+  .ws-types{display:flex;flex-wrap:wrap;gap:6px}
+  .ws-diagram3d{position:relative;width:100%;border-radius:10px;overflow:hidden;
+    border:1px solid rgba(125,216,232,.18);background:rgba(6,10,16,.55)}
+  .ws-diagram3d canvas{display:block;width:100%;height:100%}
   .ws-meta{display:flex;gap:14px;flex-wrap:wrap;font-family:var(--mono);
     font-size:var(--t-meta);letter-spacing:.1em;text-transform:uppercase;color:var(--ink-4)}
   .ws-tasks{overflow:auto;display:flex;flex-direction:column;gap:8px;min-height:0;
@@ -2073,6 +2080,13 @@
       data-goto="space" data-agent="${esc(x.name)}"
       style="--pc:${identityOf(x).hue}">${esc(x.name)}</button>`).join("");
 
+    // Open-ended workspace types: whatever this agent has (the owner chooses
+    // them in the Control Center), rendered from each type's own panels.
+    const types = Array.isArray(a.workspace_types) ? a.workspace_types : [];
+    const openType = types.find(t => t.id === workspaceTypeChoice(a)) || types[0] || null;
+    const typeSwitcher = types.map(t => `<button class="pick ws-type${openType && t.id === openType.id ? " on" : ""}"
+      data-ws-type="${esc(t.id)}" data-ws-agent="${esc(a.name)}" title="${esc(t.description)}">${esc(t.label)}</button>`).join("");
+
     // The lifecycle is genuinely reversible: incomplete -> complete ->
     // reopen -> complete, never a dead end. Both directions are the
     // SAME button/element, distinguished only by data-ws-action - a
@@ -2110,15 +2124,8 @@
             <span>${ws.visits} visit${ws.visits === 1 ? "" : "s"}</span>
             <span>${ws.last_entered ? "last entered " + when(ws.last_entered) : "first time here"}</span>
           </div>
-          <div class="ws-tasks">
-            ${tasks.length ? "" : `<div class="ws-empty">Nothing on ${esc(a.name)}'s board yet - add the first thing to work on below.</div>`}
-            ${pending.map(taskRow).join("")}
-            ${done.length ? `<div class="ws-done-heading">${done.length} completed</div>${done.map(taskRow).join("")}` : ""}
-          </div>
-          <div class="glass say private-say ws-add">${cut}
-            <span class="addressed">Add to ${esc(a.name)}'s board</span>
-            <input class="ws-add-input" data-ws-agent="${esc(a.name)}" placeholder="What should ${esc(a.name)} work on?"${LIVE ? "" : " disabled"}>
-          </div>
+          <div class="ws-types">${typeSwitcher || `<span class="ws-empty">No workspace types - add one in the Control Center: workspace ${esc(a.name)} add board</span>`}</div>
+          ${openType ? openType.panels.map(panel => workspacePanel(panel, a, {tasks, pending, done, taskRow})).join("") : ""}
         </div>
         <div class="env-foot">
           <span>${a.avatar ? esc(a.avatar.avatar.label) : "presence"}</span>
@@ -2127,6 +2134,94 @@
       </div>
     </div>`;
   };
+
+  // The open workspace type per agent is a view choice kept in this browser;
+  // which types an agent HAS is the owner's Control Center choice.
+  function workspaceTypeChoice(agent){
+    try{ return localStorage.getItem("alfred.wsType." + agent.name) || agent.active_workspace; }
+    catch(e){ return agent.active_workspace; }
+  }
+
+  // One renderer per panel kind - a new workspace type is a new combination
+  // of these, never a new page.
+  function workspacePanel(panel, a, board){
+    const [kind, arg] = String(panel).split(":");
+    if(kind === "tasks"){
+      return `<div class="ws-panel ws-panel-tasks"><div class="ws-tasks">
+          ${board.tasks.length ? "" : `<div class="ws-empty">Nothing on ${esc(a.name)}'s board yet - add the first thing to work on below.</div>`}
+          ${board.pending.map(board.taskRow).join("")}
+          ${board.done.length ? `<div class="ws-done-heading">${board.done.length} completed</div>${board.done.map(board.taskRow).join("")}` : ""}
+        </div>
+        <div class="glass say private-say ws-add">${cut}
+          <span class="addressed">Add to ${esc(a.name)}'s board</span>
+          <input class="ws-add-input" data-ws-agent="${esc(a.name)}" placeholder="What should ${esc(a.name)} work on?"${LIVE ? "" : " disabled"}>
+        </div></div>`;
+    }
+    if(kind === "artifacts"){
+      const mine = (S.artifacts || []).filter(x => x.owner_agent === a.name && (arg === "any" || x.type === arg));
+      const heading = arg === "any" ? "Everything produced" : arg.replace(/_/g, " ");
+      return `<div class="ws-panel ws-panel-artifacts" data-ws-artifacts="${esc(arg)}">
+          <div class="ws-done-heading">${esc(heading)} (${mine.length})</div>
+          ${mine.length ? mine.map(x => `<div class="ws-artifact">${esc(x.title)} <span class="chip off">v${esc(x.version)}</span></div>`).join("")
+                        : `<div class="ws-empty">No ${esc(heading)} yet.</div>`}
+        </div>`;
+    }
+    if(kind === "diagram3d"){
+      return `<div class="ws-panel ws-panel-diagram"><div class="ws-diagram3d" data-workspace3d="${esc(a.name)}" style="height:220px">
+          <div class="agent3d-fallback">3D DIAGRAM — INITIALIZING</div></div></div>`;
+    }
+    return "";
+  }
+
+  // A real 3D diagram of one agent's work: the agent at the centre, each task
+  // and artifact a node on an orbit, linked to it - built from the snapshot's
+  // real tasks and artifacts, never invented.
+  function buildWorkspaceDiagram(agentName){
+    return (THREE, scene, accent) => {
+      const agent = S.agents.find(x => x.name === agentName) || {};
+      const tasks = agent.tasks || [];
+      const artifacts = (S.artifacts || []).filter(x => x.owner_agent === agentName);
+      const group = new THREE.Group();
+      const core = new THREE.Mesh(new THREE.IcosahedronGeometry(0.42, 1), new THREE.MeshStandardMaterial({color: accent, emissive: accent, emissiveIntensity: 0.25}));
+      group.add(core);
+      const nodes = [
+        ...tasks.map(t => ({kind: t.status === "complete" ? "done" : "task"})),
+        ...artifacts.map(x => ({kind: "artifact"})),
+      ];
+      const lineMaterial = new THREE.LineBasicMaterial({color: accent, transparent: true, opacity: 0.45});
+      nodes.forEach((node, index) => {
+        const ring = index % 2;
+        const angle = (index / Math.max(nodes.length, 1)) * Math.PI * 2;
+        const radius = 1.3 + ring * 0.55;
+        const position = new THREE.Vector3(Math.cos(angle) * radius, (ring ? 0.35 : -0.25), Math.sin(angle) * radius);
+        const geometry = node.kind === "artifact" ? new THREE.BoxGeometry(0.26, 0.26, 0.26) : new THREE.SphereGeometry(0.16, 16, 12);
+        const color = node.kind === "done" ? 0x4fd1a5 : node.kind === "artifact" ? 0xe8c77d : 0x7dd8e8;
+        const mesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({color}));
+        mesh.position.copy(position);
+        group.add(mesh);
+        group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), position]), lineMaterial));
+      });
+      scene.add(group);
+      scene.userData.frame = group;
+      group.userData.nodeCount = nodes.length;
+      return t => { group.rotation.y = t * 0.25; core.rotation.x = t * 0.4; };
+    };
+  }
+
+  const workspace3DStages = new Map();
+  function wireWorkspace3D(){
+    wireStages("workspace3d", workspace3DStages, (el, name) => {
+      const agent = S.agents.find(x => x.name === name);
+      if(agent) mountStage(el, workspace3DStages, name, identityOf(agent).hue, buildWorkspaceDiagram(name));
+    });
+  }
+
+  function wireWorkspaceTypes(){
+    stage.querySelectorAll(".ws-type").forEach(btn => btn.addEventListener("click", () => {
+      try{ localStorage.setItem("alfred.wsType." + btn.dataset.wsAgent, btn.dataset.wsType); }catch(e){}
+      go("space", btn.dataset.wsAgent);
+    }));
+  }
 
   // Workspace/artifact checkpoint: the real, persisted
   // artifacts this agent has produced - read straight off S.artifacts
@@ -4552,6 +4647,8 @@
     wireMemory3D();
     wireRoom3D();
     wireWorkspaceBoard();
+    wireWorkspaceTypes();
+    wireWorkspace3D();
     wireRecordingControls();
     if(enteringWorkspace) enterWorkspace(openWorkspaceAgent);
   }

@@ -212,9 +212,23 @@ def default_descriptor(agent_name: str, summary: str = "") -> InterfaceDescripto
     return InterfaceDescriptor(
         agent=agent_name,
         display_name=agent_name,
-        features=frozenset({InterfaceFeature.CHAT, InterfaceFeature.ACTIVITY}),
-        implemented=frozenset({InterfaceFeature.CHAT, InterfaceFeature.ACTIVITY}),
+        features=frozenset({InterfaceFeature.CHAT, InterfaceFeature.ACTIVITY, InterfaceFeature.WORKSPACE}),
+        implemented=frozenset({InterfaceFeature.CHAT, InterfaceFeature.ACTIVITY, InterfaceFeature.WORKSPACE}),
         summary=summary,
+    )
+
+
+def with_workspace(descriptor: "InterfaceDescriptor") -> "InterfaceDescriptor":
+    """Every agent has a Workspace - the Manager and every present or future
+    specialist - so a declared descriptor gains it unless it already has it.
+    The owner can still withdraw it per agent through governance."""
+    if descriptor.can_render(InterfaceFeature.WORKSPACE):
+        return descriptor
+    kind = SurfaceKind(InterfaceFeature.WORKSPACE)
+    return InterfaceDescriptor(
+        agent=descriptor.agent, display_name=descriptor.display_name,
+        features=frozenset(descriptor.features | {kind}), summary=descriptor.summary,
+        implemented=frozenset(descriptor.implemented | {kind}),
     )
 
 
@@ -230,7 +244,7 @@ def describe_interface(agent: Any, governed: "Mapping[str, str] | None" = None) 
     """
     declared = getattr(agent, "interface", None)
     if isinstance(declared, InterfaceDescriptor):
-        return declared.governed(governed)
+        return with_workspace(declared).governed(governed)
 
     summary = ""
     spec = getattr(agent, "spec", None)

@@ -148,7 +148,10 @@ class TestAgentFrameworkDeclaration:
         bare = ManagerSkills(AgentIdentity(name="TestManager", capabilities=frozenset({"test"})))
         assert bare.interface is None
 
-    def test_the_email_specialist_never_inherits_a_workspace(self):
+    def test_every_specialist_has_a_workspace_by_default(self):
+        # Post-Pre-Stage-9 (owner requirement): every agent - the Manager and
+        # every present or future specialist - gets a Workspace; the owner can
+        # withdraw one per agent through governance.
         runtime, manager, channel, conversation = real_system()
         names = [a.name for a in manager.registry.all_agents()]
         specialist_name = next(n for n in names if n != manager.own_skills.name)
@@ -156,7 +159,7 @@ class TestAgentFrameworkDeclaration:
         from src.control_center.interfaces import describe_interface
 
         interface = describe_interface(specialist)
-        assert not interface.can_render(InterfaceFeature.WORKSPACE)
+        assert interface.can_render(InterfaceFeature.WORKSPACE)
 
 
 # ---------------------------------------------------------------------------
@@ -165,15 +168,13 @@ class TestAgentFrameworkDeclaration:
 
 
 class TestControlCenterExposure:
-    def test_workspaces_finds_alfred_and_only_alfred(self):
+    def test_workspaces_finds_every_registered_agent(self):
         runtime, manager, channel, conversation = real_system()
         centre = ControlCenter(runtime, manager)
-        views = centre.workspaces()
-        names = [v.agent for v in views]
+        names = [v.agent for v in centre.workspaces()]
         assert manager.own_skills.name in names
-        specialist_names = [a.name for a in manager.registry.all_agents() if a.name != manager.own_skills.name]
-        for name in specialist_names:
-            assert name not in names
+        for agent in manager.registry.all_agents():
+            assert agent.name in names
 
     def test_a_fresh_system_reports_zero_visits_honestly(self):
         runtime, manager, channel, conversation = real_system()
@@ -231,12 +232,16 @@ class TestWorkspaceHttpRoute:
         status, body, _ = route_workspace_enter("Nobody", system)
         assert status == 404
 
-    def test_an_agent_with_no_workspace_declared_is_refused(self):
+    def test_an_agent_whose_workspace_the_owner_withdrew_is_refused(self):
+        from src.control_center.interfaces import surface_component_id
+
         runtime, manager, channel, conversation = real_system()
         system = self._system(runtime, manager, channel, conversation)
         specialist_name = next(
             a.name for a in manager.registry.all_agents() if a.name != manager.own_skills.name
         )
+        assert route_workspace_enter(specialist_name, system)[0] == 200
+        system.centre.bind_governed_config(lambda: {surface_component_id(specialist_name, "workspace"): "withdrawn"})
         status, body, _ = route_workspace_enter(specialist_name, system)
         assert status == 400
 

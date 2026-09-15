@@ -454,6 +454,17 @@ class ManagerAgent:
         log = task_logger(logger, task.id)
         log.debug("T: delegating to '%s'", agent.name)
         try:
+            # Post-Pre-Stage-9: every agent's Workspace has its own task board.
+            # An agent other than the Manager that offers one answers board
+            # requests from it before its domain work - so a specialist added
+            # later has a working board with no change here. The Manager's own
+            # board is its task capabilities, reached through execute().
+            if agent is not self.own_skills:
+                board = getattr(agent, "workspace_task_reply", None)
+                if callable(board):
+                    answered = board(task)
+                    if isinstance(answered, TaskResult):
+                        return answered
             return agent.execute(task)
         except Exception as exc:  # noqa: BLE001 - deliberate boundary catch
             # .exception() records the full traceback. Swallowing an error

@@ -588,6 +588,45 @@ def _new_family_member(components, component_id: str):
     )
 
 
+def run_workspace_types_command(centre: "ControlCenter", agent_name: str, action: str, type_id: str) -> str:
+    """Give an agent a workspace type, take one away, or choose which is open -
+    any agent, any type in the catalog, saved in the governed config."""
+    from src.control_center.workspace_catalog import (
+        AGENT_ACTIVE_WORKSPACE_PREFIX, AGENT_WORKSPACES_PREFIX, agent_key, workspace_catalog, workspaces_for,
+    )
+
+    names = {a.name.lower(): a.name for a in centre.overview().agents}
+    agent = names.get(agent_name.lower())
+    if agent is None:
+        return f"no agent called '{agent_name}'. Registered: {', '.join(sorted(names.values()))}"
+    config = load_governed_config(DEFAULT_CONFIG_PATH)
+    values = config.values
+    catalog = {t.workspace_id: t for t in workspace_catalog(values)}
+    wanted = "_".join(type_id.strip().lower().split())
+    if wanted not in catalog:
+        return f"no workspace type '{type_id}'. Available: {', '.join(catalog)}"
+    current = [t.workspace_id for t in workspaces_for(agent, values)]
+    key = agent_key(agent)
+    if action == "add":
+        if wanted in current:
+            return f"{agent} already has the '{wanted}' workspace."
+        config = config.with_value(AGENT_WORKSPACES_PREFIX + key, ",".join(current + [wanted]))
+        message = f"{agent} now has the '{catalog[wanted].label}' workspace."
+    elif action == "remove":
+        if wanted not in current:
+            return f"{agent} does not have the '{wanted}' workspace."
+        remaining = [w for w in current if w != wanted]
+        config = config.with_value(AGENT_WORKSPACES_PREFIX + key, ",".join(remaining))
+        message = f"Removed the '{catalog[wanted].label}' workspace from {agent}" + ("." if remaining else " - no workspace types remain.")
+    else:
+        if wanted not in current:
+            return f"{agent} does not have the '{wanted}' workspace - add it first: workspace {agent} add {wanted}"
+        config = config.with_value(AGENT_ACTIVE_WORKSPACE_PREFIX + key, wanted)
+        message = f"{agent}'s Workspace now opens on '{catalog[wanted].label}'."
+    save_governed_config(config, DEFAULT_CONFIG_PATH)
+    return message + " Saved - the page shows it on its next refresh."
+
+
 def _governed_control_center(runtime, manager) -> "ControlCenter":
     """A Control Center view reading governed surface states from this
     module's own config path, looked up at call time (Pre-Stage-9 Campaign 5)."""
@@ -2379,6 +2418,9 @@ def classify_administrative_write(command: str) -> "tuple[bool, str]":
             return False, ""
         return True, f"execute the operation '{operation_name}' on the connected site '{parts[1]}'"
 
+    if verb == "workspace" and len(parts) >= 4 and parts[2].lower() in ("add", "remove", "use"):
+        return True, f"{parts[2].lower()} the '{parts[3]}' workspace for '{parts[1]}'"
+
     if (
         verb == "ecosystem" and len(parts) >= 5
         and parts[2].lower() in ("run", "rollback")
@@ -2567,12 +2609,14 @@ def run_command(
     if verb == "workspace":
         # Alfred's Real 3D Workspace checkpoint: real, current Workspace
         # state - discovered from each agent's own declared
-        # InterfaceDescriptor, never a fixed list naming Alfred. Read-only,
-        # like every other view here: entering happens through the real
-        # served-page route (POST /workspace/enter), never from this
-        # screen - Control Center manages/observes, it does not substitute
-        # for actually entering.
-        return render_workspaces(centre.workspaces(), columns)
+        # InterfaceDescriptor, never a fixed list naming Alfred. Entering
+        # happens through the real served-page route (POST /workspace/enter).
+        # Post-Pre-Stage-9: which workspace *types* each agent has, and which
+        # is open, is the owner's choice here - saved in the governed config.
+        parts_rest = rest.split()
+        if len(parts_rest) >= 3 and parts_rest[1].lower() in ("add", "remove", "use"):
+            return run_workspace_types_command(centre, parts_rest[0], parts_rest[1].lower(), parts_rest[2])
+        return render_workspaces(centre.workspaces(), columns, governed=centre.governed_values())
 
     if verb == "tasks":
         # Phase 5.1: read-only state visibility, the same "genuine

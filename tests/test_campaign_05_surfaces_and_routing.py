@@ -113,13 +113,17 @@ class TestSurfacesEvolveThroughGovernance:
         assert not _arthur_surface(system, "mailbox").can_render("mailbox")
 
     def test_a_brand_new_kind_can_be_granted_and_opens_its_route(self, isolated):
+        # Every agent now has a Workspace by default (post-Pre-Stage-9), so the
+        # governed lifecycle is shown withdrawing it and granting it back.
         system = _system(isolated)
+        component = surface_component_id("Arthur", "workspace")
+        withdraw = _proposal_id(_cmd(system, f"ecosystem {component} propose withdrawn low withdraw|owner choice"))
+        assert _cmd(system, f"ecosystem {component} run {withdraw} yes").startswith("OK")
         status, _body, _ = su.route_workspace_enter("Arthur", system)
         assert status == 400
 
-        component = surface_component_id("Arthur", "workspace")
-        proposal = _proposal_id(_cmd(system, f"ecosystem {component} propose implemented low a workspace|iterate on findings"))
-        assert _cmd(system, f"ecosystem {component} run {proposal} yes").startswith("OK")
+        grant = _proposal_id(_cmd(system, f"ecosystem {component} propose implemented low a workspace|iterate on findings"))
+        assert _cmd(system, f"ecosystem {component} run {grant} yes").startswith("OK")
         status, body, _ = su.route_workspace_enter("Arthur", system)
         assert status == 200, body
 

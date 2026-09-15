@@ -606,7 +606,7 @@ def render_experiences(items: tuple[ExperienceView, ...], columns: int | None = 
     return "\n".join(out)
 
 
-def render_workspaces(items: tuple[WorkspaceAgentView, ...], columns: int | None = None) -> str:
+def render_workspaces(items: tuple[WorkspaceAgentView, ...], columns: int | None = None, governed=None) -> str:
     """Alfred's Real 3D Workspace checkpoint: every agent's own real
     Workspace state - discovered from that agent's own declared
     InterfaceDescriptor, never a fixed list naming one agent. Read-only:
@@ -622,9 +622,16 @@ def render_workspaces(items: tuple[WorkspaceAgentView, ...], columns: int | None
         out.append("  no agent has declared a Workspace yet")
         return "\n".join(out)
 
+    from src.control_center.workspace_catalog import active_workspace_for, workspaces_for
+
     for item in items:
         out.append("")
         out.append(f"  {item.agent} - {item.visits} visit(s)")
+        types = workspaces_for(item.agent, governed or {})
+        active = active_workspace_for(item.agent, governed or {})
+        out.append("    types: " + (", ".join(
+            f"{t.workspace_id}{' (open)' if t.workspace_id == active else ''}" for t in types
+        ) or "none"))
         if item.last_entered:
             out.append(f"    last entered: {item.last_entered}")
         else:

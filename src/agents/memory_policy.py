@@ -60,6 +60,11 @@ class SpecialistMemoryCategory(str, Enum):
     # a distinct request from a domain lesson/pattern/preference the
     # specialist forms on its own.
     RECORDING = "recording"
+    # Post-Pre-Stage-9: every agent owns a Workspace task board, so a piece of
+    # work the owner explicitly put on this specialist's board is kept here -
+    # the identical concept (and kind) the Manager's own tasks use, like
+    # RECORDING above.
+    TASK = "user_task"
 
     @property
     def label(self) -> str:
@@ -68,6 +73,7 @@ class SpecialistMemoryCategory(str, Enum):
             "domain_pattern": "DOMAIN PATTERN",
             "domain_preference": "DOMAIN PREFERENCE",
             "recording": "RECORDED FOR LATER",
+            "user_task": "ON THIS AGENT'S TASK BOARD",
         }[self.value]
 
     @property
@@ -88,6 +94,10 @@ class SpecialistMemoryCategory(str, Enum):
             "recording": (
                 "Something explicitly captured for later retrieval, with an "
                 "intended purpose - never this specialist's routine work."
+            ),
+            "user_task": (
+                "A piece of work the owner explicitly put on this agent's own "
+                "Workspace task board - a request, never routine history."
             ),
         }[self.value]
 

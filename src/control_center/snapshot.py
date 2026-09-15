@@ -212,6 +212,16 @@ def _workspace(workspace: Any) -> dict[str, Any]:
     }
 
 
+def _workspace_types(agent_name: str, governed_values: Any) -> dict[str, Any]:
+    from src.control_center.workspace_catalog import active_workspace_for, workspaces_for
+
+    values = governed_values or {}
+    return {
+        "workspace_types": [t.to_dict() for t in workspaces_for(agent_name, values)],
+        "active_workspace": active_workspace_for(agent_name, values),
+    }
+
+
 def _recordings(recordings: Any) -> dict[str, Any]:
     """This agent's own real recordings and current live recording
     session, exactly as ``ControlCenter.recordings()`` already resolved
@@ -240,7 +250,7 @@ def _recordings(recordings: Any) -> dict[str, Any]:
 
 def _agent(
     view: Any, agent: Any, *, recall: Any = None, discover_voices: Any = None,
-    workspace: Any = None, recordings: Any = None,
+    workspace: Any = None, recordings: Any = None, governed_values: Any = None,
 ) -> dict[str, Any]:
     """Everything an Agent Workspace needs about one agent.
 
@@ -297,6 +307,9 @@ def _agent(
         # None/empty for an agent that never declared
         # InterfaceFeature.WORKSPACE - a real answer, never invented.
         **_workspace(workspace),
+        # Open-ended workspace types this agent has, and which one is open -
+        # from the governed config, never a fixed list naming an agent.
+        **_workspace_types(view.name, governed_values),
         # This agent's own real recordings and current live recording
         # session, read from the identical ControlCenter.recordings()
         # discovery a served page's own "recordings" command uses.
@@ -529,6 +542,7 @@ def snapshot(
             discover_voices=discover_voices,
             workspace=workspace_by_agent.get(view.name),
             recordings=recordings_by_agent.get(view.name),
+            governed_values=centre.governed_values(),
         )
         for view in (overview.manager,) + overview.specialists
     ]

@@ -112,14 +112,16 @@ class TestTheSpecialistPolicyIsSeparate:
             "domain_pattern",
             "domain_preference",
             "recording",
+            "user_task",
         )
 
-    def test_there_are_exactly_four(self):
+    def test_there_are_exactly_five(self):
         """Stage 12 added RECORDING - the same explicit "record this
         [for X]" capture Alfred has, available to an equipped specialist
         too (capture.py's own docstring: "shared by every agent that
-        captures, never duplicated per agent")."""
-        assert len(SpecialistMemoryCategory) == 4
+        captures, never duplicated per agent"). Post-Pre-Stage-9 added TASK:
+        every agent owns a Workspace task board."""
+        assert len(SpecialistMemoryCategory) == 5
 
     def test_no_category_overlaps_the_managers_except_the_shared_recording_concept(self):
         """Every category still means something exclusive to its own
@@ -131,7 +133,9 @@ class TestTheSpecialistPolicyIsSeparate:
         this one name is by design, not a naming collision."""
         specialist = set(POLICY.category_names)
         manager = set(ManagerMemoryPolicy().category_names)
-        assert specialist & manager == {"recording"}
+        # user_task joined recording post-Pre-Stage-9: a task on an agent's own
+        # board is the identical concept in both, kept in each agent's own store.
+        assert specialist & manager == {"recording", "user_task"}
 
     @pytest.mark.parametrize("manager_kind", list(MANAGER_CATEGORIES))
     def test_a_manager_category_is_refused(self, manager_kind):
