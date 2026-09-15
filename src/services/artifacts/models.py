@@ -288,3 +288,54 @@ class VideoContent:
         if not isinstance(payload, dict):
             raise ValueError("video content JSON must be an object")
         return cls(description=str(payload.get("description", "")))
+
+
+# Post-Pre-Stage-9: the file extension a code artifact's plain-text rendition
+# uses, by language - data, never a branch per language; anything unlisted is
+# still kept, as .txt.
+CODE_EXTENSIONS = {
+    "python": "py", "javascript": "js", "typescript": "ts", "html": "html", "css": "css", "sql": "sql",
+    "bash": "sh", "shell": "sh", "powershell": "ps1", "java": "java", "c#": "cs", "go": "go", "rust": "rs",
+    "json": "json", "c": "c", "c++": "cpp", "ruby": "rb", "php": "php", "kotlin": "kt", "swift": "swift",
+}
+
+
+@dataclass(frozen=True)
+class CodeContent:
+    """A code artifact's canonical content: a title, the language, the source,
+    and the request it answered - the rendition is the source as a plain file."""
+
+    title: str
+    language: str
+    source: str
+    request: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.title.strip():
+            raise ValueError("a code artifact needs a real title")
+        if not self.source.strip():
+            raise ValueError("a code artifact needs real source code")
+        object.__setattr__(self, "language", " ".join(str(self.language or "text").lower().split()) or "text")
+
+    @property
+    def extension(self) -> str:
+        return CODE_EXTENSIONS.get(self.language, "txt")
+
+    def to_json(self) -> str:
+        return json.dumps({"title": self.title, "language": self.language, "source": self.source, "request": self.request})
+
+    @classmethod
+    def from_json(cls, data: str) -> "CodeContent":
+        try:
+            payload = json.loads(data)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"not valid code content JSON: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("code content JSON must be an object")
+        return cls(
+            title=str(payload.get("title", "")), language=str(payload.get("language", "")),
+            source=str(payload.get("source", "")), request=str(payload.get("request", "")),
+        )
+
+    def as_plain_text(self) -> str:
+        return f"{self.title} ({self.language})\n\n{self.source}"

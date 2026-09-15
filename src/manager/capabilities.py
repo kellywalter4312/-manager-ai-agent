@@ -1071,6 +1071,12 @@ def general_assistance(request: CapabilityRequest) -> TaskResult:
             ),
         )
 
+    if capability.kind == "coding":
+        # Post-Pre-Stage-9: code is written by reasoning (the Brain, else the
+        # attributed local assistant) and saved through the tool as a real
+        # code artifact - never by the tool itself.
+        return _write_code(request, capability)
+
     outcome = request.tools.invoke(capability.tool, {"query": request.task.description})
     if not outcome.ok:
         return TaskResult.failure(
@@ -1092,6 +1098,84 @@ def general_assistance(request: CapabilityRequest) -> TaskResult:
         )
 
     return _research_synthesis(request, capability, outcome)
+
+
+_CODE_LANGUAGES = (
+    "python", "javascript", "typescript", "html", "css", "sql", "bash", "powershell", "java", "c#", "csharp",
+    "go", "rust", "json", "c++", "ruby", "php", "kotlin", "swift",
+)
+_FENCED_CODE = re.compile(r"```[ \t]*[\w#+.-]*[ \t]*\n(.*?)```", re.DOTALL)
+_CODE_REQUEST_VERB = re.compile(
+    r"^(?:please\s+)?(?:can\s+you\s+|could\s+you\s+|would\s+you\s+)?(?:help\s+me\s+)?"
+    r"(?:write|create|build|generate|implement|fix|debug)\s+(?:me\s+)?",
+    re.IGNORECASE,
+)
+
+
+def _code_language(text: str) -> str:
+    """The language a coding request names - Python when it names none."""
+    lowered = f" {str(text or '').lower()} "
+    for language in _CODE_LANGUAGES:
+        if re.search(rf"(?<![\w#+]){re.escape(language)}(?![\w#+])", lowered):
+            return "c#" if language == "csharp" else language
+    return "python"
+
+
+def _code_title(text: str) -> str:
+    words = _CODE_REQUEST_VERB.sub("", " ".join(str(text or "").split())).strip(" .?!")
+    return (words[:1].upper() + words[1:])[:80] or "Code"
+
+
+def _write_code(request: CapabilityRequest, capability: GeneralCapability) -> TaskResult:
+    language = _code_language(request.task.description)
+    written, brain = None, None
+    if request.converse is not None:
+        decision = request.converse(
+            Task(description=(
+                f"Write {language} code for this request. Reply with only the code in one fenced code block.\n\n"
+                f"{request.task.description}"
+            )),
+            tuple(_recent_conversation_notes(request)),
+        )
+        if decision.is_decided and decision.reason.strip():
+            written, brain = decision.reason, decision.source
+    if written is None and request.assist is not None:
+        text = request.assist.write_code(request.task.description, language=language)
+        if text:
+            written, brain = text, "local_assist"
+    if written is None:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "I can take on writing code, but nothing here can write it right now - no language model is "
+            "available and the local assistant is off (in the Control Center: provider local_assist_provider "
+            "use local). I won't guess at code.",
+        )
+    fenced = _FENCED_CODE.search(written)
+    source = (fenced.group(1) if fenced else written).strip("\n")
+    title = _code_title(request.task.description)
+    attribution = ""
+    if brain == "local_assist":
+        from src.providers.local_assistant import ATTRIBUTION
+
+        attribution = f"\n\n({ATTRIBUTION})"
+    block = f"```{language}\n{source}\n```"
+    payload = {"handled_by": "general_assistance", "kind": "coding", "tool": capability.tool, "brain": brain, "language": language}
+    outcome = request.tools.invoke(capability.tool, {"operation": "save", "content": json.dumps({
+        "title": title, "language": language, "source": source, "request": request.task.description,
+    })})
+    if not outcome.ok:
+        return TaskResult.success(
+            request.task, request.own_name,
+            f"{block}\n\nI couldn't save it to your coding workspace: {outcome.error}{attribution}",
+            payload={**payload, "saved": False},
+        )
+    saved = json.loads(outcome.output)
+    return TaskResult.success(
+        request.task, request.own_name,
+        f"{block}\n\nSaved as '{saved['title']}' (artifact {saved['artifact_id']}, v{saved['version']}) "
+        f"in your coding workspace.{attribution}",
+        payload={**payload, "saved": True, "artifact_id": saved["artifact_id"]},
+    )
 
 
 def _research_synthesis(

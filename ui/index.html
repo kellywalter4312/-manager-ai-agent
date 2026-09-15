@@ -127,6 +127,26 @@
     border-radius:20px;padding:5px 11px;cursor:pointer;font-family:var(--mono);font-size:9.5px;
     letter-spacing:.12em;color:var(--ink-3)}
   .voice-toggle:hover{border-color:var(--edge-2)}
+  /* ---- the interpreter: live translation between two languages ---- */
+  .interp{position:fixed;right:clamp(12px,2vw,28px);top:64px;width:min(420px,calc(100vw - 24px));
+    max-height:calc(100vh - 90px);display:flex;flex-direction:column;gap:10px;padding:14px 16px;z-index:60;
+    border:1px solid var(--edge);border-radius:14px;background:#0a0f16;color:#c9d4de;font-size:13px;overflow:auto;
+    box-shadow:0 18px 48px rgba(0,0,0,.55)}
+  .interp[hidden]{display:none}
+  .interp h3{margin:0;font:600 11px var(--mono);letter-spacing:.16em;color:var(--ink-3)}
+  .interp-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .interp select,.interp input{background:rgba(255,255,255,.04);border:1px solid var(--edge);color:#e8eef4;
+    border-radius:8px;padding:6px 8px;font-size:13px}
+  .interp input{flex:1;min-width:0}
+  .interp button{background:none;border:1px solid var(--edge);color:#c9d4de;border-radius:18px;padding:5px 12px;
+    cursor:pointer;font:10px var(--mono);letter-spacing:.1em}
+  .interp button.on{border-color:var(--ok);color:var(--ok)}
+  .interp button:disabled{opacity:.45;cursor:default}
+  .interp-status{font:10px var(--mono);letter-spacing:.08em;color:var(--ink-3)}
+  .interp-turns{display:flex;flex-direction:column;gap:8px}
+  .interp-turn{border-left:2px solid var(--edge-2);padding-left:8px;display:flex;flex-direction:column;gap:2px}
+  .interp-turn .heard{color:var(--ink-3)}
+  .interp-turn .said{color:#e8eef4}
   .voice-dot{width:6px;height:6px;border-radius:50%;background:var(--ink-4);flex:none}
   .voice-toggle.idle .voice-dot{background:var(--ink-4)}
   .voice-toggle.activated .voice-dot,.voice-toggle.listening .voice-dot{background:var(--alfred);
@@ -933,8 +953,30 @@
         title="Ambient voice activation - click once to grant microphone access">
         <span class="voice-dot"></span><span class="voice-label">VOICE</span>
       </button>
+      <button class="voice-toggle idle" id="interpret-toggle" type="button"
+        title="Translate - speak or type in one language and hear it in another">
+        <span class="voice-dot"></span><span class="voice-label">TRANSLATE</span>
+      </button>
       <div class="s" id="stamp">—</div>
     </div>
+  </div>
+  <div class="interp" id="interpreter" hidden aria-label="Translate">
+    <h3>TRANSLATE</h3>
+    <div class="interp-status" id="interp-status">—</div>
+    <div class="interp-row">
+      <select id="interp-a" aria-label="first language"></select>
+      <button type="button" id="interp-swap" title="swap languages">⇄</button>
+      <select id="interp-b" aria-label="second language"></select>
+    </div>
+    <div class="interp-row">
+      <button type="button" id="interp-live">START CONVERSATION</button>
+      <select id="interp-voice" aria-label="voice"><option value="local">Local voice</option><option value="device">Device voice (faster)</option></select>
+      <button type="button" id="interp-close">CLOSE</button>
+    </div>
+    <div class="interp-row">
+      <input id="interp-text" placeholder="Type in the first language and press Enter" autocomplete="off">
+    </div>
+    <div class="interp-turns" id="interp-turns"></div>
   </div>
 
   <div class="stage" id="stage"></div>
@@ -2162,7 +2204,9 @@
       const heading = arg === "any" ? "Everything produced" : arg.replace(/_/g, " ");
       return `<div class="ws-panel ws-panel-artifacts" data-ws-artifacts="${esc(arg)}">
           <div class="ws-done-heading">${esc(heading)} (${mine.length})</div>
-          ${mine.length ? mine.map(x => `<div class="ws-artifact">${esc(x.title)} <span class="chip off">v${esc(x.version)}</span></div>`).join("")
+          ${mine.length ? mine.map(x => `<div class="ws-artifact">${x.primary_rendition
+              ? `<a href="artifact/${esc(x.artifact_id)}.${esc(x.primary_rendition)}" target="_blank" rel="noopener">${esc(x.title)}</a>`
+              : esc(x.title)} <span class="chip off">v${esc(x.version)}</span></div>`).join("")
                         : `<div class="ws-empty">No ${esc(heading)} yet.</div>`}
         </div>`;
     }
@@ -5562,6 +5606,161 @@
     if(rosterChanged) build();
   }
 
+  // ---- the interpreter (post-Pre-Stage-9) --------------------------------
+  // Natural translation between two languages, part of Alfred's own voice and
+  // conversation rather than a separate app: what is heard goes to the server
+  // (local speech recognition that names the language, offline translation, a
+  // local voice in that language) and comes back as words and audio played on
+  // this device - headphones or speaker. Languages come from the snapshot.
+  function initInterpreter(){
+    if(!LIVE) return;
+    if(window.__alfredInterpreter) return;
+    const state = window.__alfredInterpreter = {running:false, turns:[], playback:[], errors:[]};
+    const toggle = document.getElementById("interpret-toggle");
+    const panel = document.getElementById("interpreter");
+    if(!toggle || !panel) return;
+    const $ = id => document.getElementById(id);
+    const status = $("interp-status"), selA = $("interp-a"), selB = $("interp-b");
+    const live = $("interp-live"), turnsEl = $("interp-turns"), input = $("interp-text"), selVoice = $("interp-voice");
+    let stream = null, ctx = null, analyser = null, recorder = null;
+
+    const info = () => (S && S.translation) || {available:false, languages:[]};
+    const languages = () => (info().languages || []).filter(l => l.translatable);
+    const languageOf = code => (info().languages || []).find(l => l.code === code);
+    function fill(){
+      const langs = languages();
+      const keepA = selA.value, keepB = selB.value;
+      const options = langs.map(l => `<option value="${esc(l.code)}">${esc(l.name)}${l.speakable ? "" : " (device voice)"}</option>`).join("");
+      selA.innerHTML = options; selB.innerHTML = options;
+      if(langs.length){
+        selA.value = langs.some(l => l.code === keepA) ? keepA : (langs.find(l => l.code === "en") || langs[0]).code;
+        selB.value = langs.some(l => l.code === keepB) ? keepB : (langs.find(l => l.code !== selA.value) || langs[0]).code;
+      }
+      const t = info();
+      status.textContent = !t.available ? (t.reason || "Translation is not enabled.")
+        : state.running ? "LISTENING - speak in either language"
+        : `${langs.length} languages - ${t.listens ? "listening available" : (t.listening_reason || "cannot hear speech yet")}`;
+      live.disabled = !t.available || !t.listens;
+    }
+    function addTurn(turn){
+      state.turns.push({heard: turn.heard, source: turn.source, translation: turn.translation, target: turn.target,
+        spoken_by: turn.spoken_by, voice: turn.voice, route: turn.route, seconds: turn.seconds});
+      const from = languageOf(turn.source), to = languageOf(turn.target);
+      const div = document.createElement("div");
+      div.className = "interp-turn";
+      div.innerHTML = `<div class="heard">${esc(from ? from.name : turn.source)}: ${esc(turn.heard)}</div>`
+        + `<div class="said">${esc(to ? to.name : turn.target)}: ${esc(turn.translation)}</div>`;
+      turnsEl.prepend(div);
+    }
+    async function play(turn){
+      if(turn.audio_base64){
+        const audio = new Audio("data:audio/wav;base64," + turn.audio_base64);
+        try{
+          await audio.play();
+          await new Promise(resolve => { audio.onended = resolve; audio.onerror = resolve; });
+          state.playback.push({ok:true, via:"local_voice", seconds: audio.duration});
+        }catch(e){ state.playback.push({ok:false, via:"local_voice", error:String(e)}); }
+        return;
+      }
+      if(turn.spoken_by === "device" && "speechSynthesis" in window){
+        const target = languageOf(turn.target);
+        await new Promise(resolve => {
+          const u = new SpeechSynthesisUtterance(turn.translation);
+          u.lang = target ? target.locale : turn.target;
+          u.onend = resolve; u.onerror = resolve;
+          window.speechSynthesis.speak(u);
+        });
+        state.playback.push({ok:true, via:"device"});
+      }
+    }
+    async function post(path, body){
+      const res = await fetch(path, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)});
+      const data = await res.json().catch(() => ({error:"unreadable reply"}));
+      if(!res.ok) throw new Error(data.error || ("HTTP " + res.status));
+      return data;
+    }
+    const toBase64 = blob => new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result).split(",")[1] || "");
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+    function level(){
+      const data = new Float32Array(analyser.fftSize);
+      analyser.getFloatTimeDomainData(data);
+      let sum = 0; for(const v of data) sum += v * v;
+      return Math.sqrt(sum / data.length);
+    }
+    function listenOnce(){
+      if(!state.running) return;
+      const chunks = [];
+      recorder = new MediaRecorder(stream);
+      recorder.ondataavailable = e => { if(e.data && e.data.size) chunks.push(e.data); };
+      let speaking = false, silentSince = null;
+      const started = performance.now();
+      const current = recorder;
+      current.onstop = async () => {
+        if(!state.running) return;
+        if(!speaking || !chunks.length){ listenOnce(); return; }
+        status.textContent = "TRANSLATING…";
+        try{
+          const blob = new Blob(chunks, {type: current.mimeType || "audio/webm"});
+          const turn = await post("translate/speech", {audio_base64: await toBase64(blob), pair:[selA.value, selB.value], speak: selVoice.value});
+          addTurn(turn);
+          status.textContent = "SPEAKING…";
+          await play(turn);
+        }catch(e){ state.errors.push(String(e.message || e)); status.textContent = String(e.message || e); }
+        if(state.running){ status.textContent = "LISTENING - speak in either language"; listenOnce(); }
+      };
+      current.start(250);
+      const tick = () => {
+        if(!state.running || current.state !== "recording") return;
+        const now = performance.now();
+        if(level() > 0.02){ speaking = true; silentSince = null; }
+        else if(speaking && silentSince === null){ silentSince = now; }
+        if((speaking && silentSince !== null && now - silentSince > 800) || now - started > 15000){ current.stop(); return; }
+        setTimeout(tick, 50);
+      };
+      tick();
+    }
+    async function start(){
+      try{
+        stream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true, noiseSuppression:true}});
+      }catch(e){ status.textContent = "Microphone not available: " + (e.message || e); state.errors.push(String(e)); return; }
+      ctx = new (window.AudioContext || window.webkitAudioContext)();
+      analyser = ctx.createAnalyser(); analyser.fftSize = 1024;
+      ctx.createMediaStreamSource(stream).connect(analyser);
+      state.running = true; live.textContent = "STOP"; live.classList.add("on"); fill(); listenOnce();
+    }
+    function stop(){
+      state.running = false; live.textContent = "START CONVERSATION"; live.classList.remove("on");
+      try{ if(recorder && recorder.state === "recording") recorder.stop(); }catch(e){}
+      if(stream) stream.getTracks().forEach(track => track.stop());
+      if(ctx) ctx.close().catch(() => {});
+      stream = ctx = analyser = recorder = null; fill();
+    }
+    toggle.addEventListener("click", () => {
+      panel.hidden = !panel.hidden;
+      toggle.classList.toggle("activated", !panel.hidden);
+      if(!panel.hidden) fill();
+    });
+    $("interp-close").addEventListener("click", () => { stop(); panel.hidden = true; toggle.classList.remove("activated"); });
+    $("interp-swap").addEventListener("click", () => { const a = selA.value; selA.value = selB.value; selB.value = a; });
+    live.addEventListener("click", () => state.running ? stop() : start());
+    input.addEventListener("keydown", async e => {
+      if(e.key !== "Enter" || !input.value.trim()) return;
+      const text = input.value.trim(); input.value = "";
+      try{
+        const result = await post("translate/text", {text, source: selA.value, target: selB.value, speak: selVoice.value});
+        const turn = {heard: text, source: result.source, translation: result.text, target: result.target,
+          audio_base64: result.audio_base64, spoken_by: result.spoken_by, voice: result.voice, route: result.route};
+        addTurn(turn); await play(turn);
+      }catch(err){ state.errors.push(String(err.message || err)); status.textContent = String(err.message || err); }
+    });
+    state.refresh = fill;
+    fill();
+  }
+
   // ---- ambient voice activation (Stage 8A) ------------------------------
   // A page-lifetime singleton, deliberately defined and started OUTSIDE
   // go()/wireComposer(): both of those re-run on every navigation click and
@@ -5749,6 +5948,7 @@
 
     if(LIVE) setInterval(refreshFromLive, 5000);
     initVoiceActivation();
+    initInterpreter();
   }
 
   // =====================================================================

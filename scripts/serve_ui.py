@@ -340,6 +340,12 @@ _RENDITION_CONTENT_TYPES = {
     # Safari-style AAC-in-MP4 recording specifically so it is never
     # served under the same extension "mp4" already means for video.
     "webm": "audio/webm", "ogg": "audio/ogg", "m4a": "audio/mp4", "mp3": "audio/mpeg",
+    # Post-Pre-Stage-9: code artifacts - always served as plain text, so a
+    # browser shows the source and never executes it.
+    **{ext: "text/plain; charset=utf-8" for ext in (
+        "py", "js", "ts", "html", "css", "sql", "sh", "ps1", "java", "cs", "go", "rs", "json", "c", "cpp",
+        "rb", "php", "kt", "swift",
+    )},
 }
 
 
@@ -940,6 +946,65 @@ def route_recording_save(
     )
 
 
+def route_translate_text(
+    text: object, target: object, source: object, speak: object, system: LiveSystem,
+) -> tuple[int, bytes, str]:
+    """Decide what to answer for `POST /translate/text` - typed words translated
+    offline, and spoken in that language when a local voice can. The
+    interpreter's refusals are LookupErrors carrying a person-facing reason, so
+    this route imports no domain module."""
+    interpreter = getattr(system.runtime, "translation", None)
+    if interpreter is None or not interpreter.translates:
+        reason = interpreter.status()["reason"] if interpreter is not None else "translation is not assembled"
+        return _json_error(409, reason)
+    if not isinstance(text, str) or not text.strip():
+        return _json_error(400, "'text' must be a non-empty string")
+    if not isinstance(target, str) or not target.strip():
+        return _json_error(400, "'target' must name a language")
+    try:
+        result = interpreter.translate_text(text, target, source if isinstance(source, str) and source.strip() else None)
+        if speak in (True, "local"):
+            wav, voice, spoken_by = interpreter.speak(result.text, result.target)
+        else:
+            wav, voice, spoken_by = None, "", ("device" if speak == "device" else "none")
+    except LookupError as exc:
+        return _json_error(400, str(exc))
+    body = {
+        "text": result.text, "source": result.source, "target": result.target, "route": list(result.route),
+        "audio_base64": base64.b64encode(wav).decode("ascii") if wav else None,
+        "audio_format": "wav" if wav else None, "voice": voice, "spoken_by": spoken_by,
+    }
+    return 200, json.dumps(body).encode("utf-8"), "application/json; charset=utf-8"
+
+
+def route_translate_speech(
+    audio_base64: object, target: object, pair: object, speak: object, system: LiveSystem,
+) -> tuple[int, bytes, str]:
+    """Decide what to answer for `POST /translate/speech` - one utterance heard,
+    translated towards the other person of a language pair (or into ``target``),
+    and returned as words plus audio this device plays."""
+    interpreter = getattr(system.runtime, "translation", None)
+    if interpreter is None:
+        return _json_error(409, "translation is not assembled in this session")
+    if not isinstance(audio_base64, str) or not audio_base64.strip():
+        return _json_error(400, "audio_base64 must not be empty")
+    try:
+        audio = base64.b64decode(audio_base64, validate=True)
+    except (ValueError, TypeError):
+        return _json_error(400, "audio_base64 is not valid base64")
+    languages = [str(item) for item in pair][:2] if isinstance(pair, list) and len(pair) >= 2 else None
+    if languages is None and not (isinstance(target, str) and target.strip()):
+        return _json_error(400, "give 'pair' (two languages) or 'target'")
+    try:
+        turn = interpreter.interpret_speech(
+            audio, target=None if languages else target, pair=languages,
+            speak=speak if isinstance(speak, str) else speak is not False,
+        )
+    except LookupError as exc:
+        return _json_error(422 if interpreter.listens and interpreter.translates else 409, str(exc))
+    return 200, json.dumps(turn.to_dict()).encode("utf-8"), "application/json; charset=utf-8"
+
+
 # REPAIR-01/02: where a supplied file may come from over HTTP. Two doors,
 # one mechanism - the conversation composer and Control Center's Manage.
 _UPLOAD_SOURCES = frozenset({"conversation", "control_center"})
@@ -1115,7 +1180,7 @@ MANAGEMENT_VERBS = frozenset(
         "status", "history", "actions", "unresolved", "avatar", "environment",
         "profile", "voice", "review", "capabilities", "provider", "connections",
         "services", "sites", "ecosystem", "tasks", "artifacts", "personal", "governance",
-        "calendar", "experience", "workspace", "recordings",
+        "calendar", "experience", "workspace", "recordings", "translation",
     }
 )
 
@@ -1321,6 +1386,8 @@ class SnapshotHandler(BaseHTTPRequestHandler):
             "/recording/failed",
             "/recording/clear",
             "/upload",
+            "/translate/text",
+            "/translate/speech",
         ):
             self._respond(404, b"not found", "text/plain; charset=utf-8")
             return
@@ -1388,6 +1455,16 @@ class SnapshotHandler(BaseHTTPRequestHandler):
         elif self.path == "/recording/clear":
             agent = payload.get("agent") if isinstance(payload, dict) else None
             status, body, content_type = route_recording_clear(agent, self.server.system)
+        elif self.path == "/translate/text":
+            get = payload.get if isinstance(payload, dict) else (lambda _key: None)
+            status, body, content_type = route_translate_text(
+                get("text"), get("target"), get("source"), get("speak"), self.server.system,
+            )
+        elif self.path == "/translate/speech":
+            get = payload.get if isinstance(payload, dict) else (lambda _key: None)
+            status, body, content_type = route_translate_speech(
+                get("audio_base64"), get("target"), get("pair"), get("speak"), self.server.system,
+            )
         elif self.path == "/upload":
             get = payload.get if isinstance(payload, dict) else (lambda _key: None)
             status, body, content_type = route_upload(

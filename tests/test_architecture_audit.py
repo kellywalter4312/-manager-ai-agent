@@ -706,7 +706,10 @@ class TestNoFuturePhaseHasStarted:
         requirements = read(REPO_ROOT / "requirements.txt").lower()
         for absent in (
             "flask", "fastapi", "uvicorn", "django", "streamlit",
-            "speechrecognition", "pyttsx", "whisper", "gradio",
+            # "whisper" left this list post-Pre-Stage-9: local multilingual
+            # speech recognition (faster-whisper) is a deliberately built part
+            # of live translation, not a leaked future phase.
+            "speechrecognition", "pyttsx", "gradio",
         ):
             assert absent not in requirements, absent
 
@@ -745,10 +748,13 @@ class TestNoFuturePhaseHasStarted:
         for path in source_files():
             assert "control" not in path.stem.lower(), path.name
 
-    def test_no_coding_tool_is_falsely_shipped(self):
-        """The honest position: "code_assistant" is a named extension
-        point and nothing fills it. When it is built this test is what
-        says so out loud.
+    def test_the_code_assistant_extension_point_is_filled_by_one_real_tool(self):
+        """Post-Pre-Stage-9: "code_assistant" is filled - CodeAssistantTool
+        saves written code as a versioned artifact (it never writes or runs
+        code; reasoning stays out of tools). Exactly one Tool claims the name.
+
+        Earlier history, kept: "code_assistant" was a named extension point
+        nothing filled, and this test said so out loud.
 
         "web_search" left this list in Phase 3 (Knowledge, Research &
         Live Information): ``WebSearchTool`` (``src/agents/tools/
@@ -778,4 +784,4 @@ class TestNoFuturePhaseHasStarted:
                         for literal in ('"code_assistant"', "'code_assistant'"):
                             if literal in class_source:
                                 claimed_names.add(literal.strip("'\""))
-        assert claimed_names == set(), claimed_names
+        assert claimed_names == {"code_assistant"}, claimed_names
