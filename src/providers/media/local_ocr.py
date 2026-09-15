@@ -101,14 +101,31 @@ try {
 """
 
 
+# Every script this module runs prints recognised text, so every one of them
+# needs PowerShell's own output encoding to be UTF-8 rather than the console
+# code page (see _run_powershell).
+_UTF8_PREFIX = "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n"
+
+
 class OCRError(RuntimeError):
     """Text recognition could not run on this image."""
 
 
 def _run_powershell(script: str, *, timeout: float) -> subprocess.CompletedProcess:
-    """The one seam tests replace - never the real subprocess call."""
+    """The one seam tests replace - never the real subprocess call.
+
+    ``powershell.exe`` encodes its own standard output in the console's code
+    page, not UTF-8. On this machine that is code page 437, which cannot
+    represent ``_PAGE_MARKER`` (U+241E) or an accented character a recogniser
+    genuinely read - both arrive as literal '?', before Python ever decodes
+    them. A scanned PDF then produced no page boundaries at all and
+    ``pdf_pages`` returned no pages *without raising*, which is exactly the
+    "a misconfiguration disguised as normal operation" shape this project
+    refuses. Setting the output encoding inside the one seam fixes every
+    caller at once, and costs nothing when the code page already is UTF-8.
+    """
     return subprocess.run(
-        ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", _UTF8_PREFIX + script],
         capture_output=True, text=True, timeout=timeout, check=False, encoding="utf-8", errors="replace",
     )
 

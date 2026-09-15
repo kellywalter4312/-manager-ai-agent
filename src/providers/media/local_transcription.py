@@ -70,11 +70,23 @@ try {
 """
 
 
+# PowerShell prints in the console code page unless told otherwise; every
+# script here prints recognised speech (see _run_powershell).
+_UTF8_PREFIX = "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n"
+
+
 def _run_powershell(script: str, *, timeout: float) -> subprocess.CompletedProcess:
-    """The one seam tests replace - never the real subprocess call."""
+    """The one seam tests replace - never the real subprocess call.
+
+    Transcribed speech is text a person dictated, so it can contain anything
+    the recogniser's language covers. PowerShell writes its output in the
+    console code page (437 here), and Python was decoding it in the system
+    locale - two lossy steps that turned anything outside that page into '?'.
+    Both ends are pinned to UTF-8 instead.
+    """
     return subprocess.run(
-        ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-        capture_output=True, text=True, timeout=timeout, check=False,
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", _UTF8_PREFIX + script],
+        capture_output=True, text=True, timeout=timeout, check=False, encoding="utf-8", errors="replace",
     )
 
 

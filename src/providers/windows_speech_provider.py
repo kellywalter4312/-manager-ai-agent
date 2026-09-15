@@ -209,6 +209,9 @@ def _select_voice_name(voice: VoiceProfile | None, available: tuple[str, ...]) -
     return available[index]
 
 
+_UTF8_PREFIX = "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n"
+
+
 def _run_powershell(script: str, *, timeout: float) -> subprocess.CompletedProcess:
     """The one place a real process is ever started. Tests replace this
     function directly - never the real engine - so an automated run never
@@ -216,10 +219,17 @@ def _run_powershell(script: str, *, timeout: float) -> subprocess.CompletedProce
     actually being on the machine running the suite.
     """
     return subprocess.run(
-        ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+        # PowerShell writes its output in the console code page unless it is
+        # told otherwise, and these scripts print voice names and recognised
+        # speech - both of which can carry characters that code page 437
+        # cannot represent, arriving as literal '?'. Pinned to UTF-8 at both
+        # ends, the same fix local_ocr.py and local_transcription.py carry.
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", _UTF8_PREFIX + script],
         capture_output=True,
         text=True,
         timeout=timeout,
+        encoding="utf-8",
+        errors="replace",
     )
 
 
