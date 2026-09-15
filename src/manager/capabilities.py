@@ -1379,6 +1379,17 @@ def open_conversation(request: CapabilityRequest) -> TaskResult:
         assisted = _assisted_answer(request, context=notes)
         if assisted is not None:
             return assisted
+        # Before refusing: an unclaimed question whose answer is written in
+        # the person's own material is answered by quoting it. Every question
+        # no other capability claimed arrives here, so this is where "I have
+        # your timetable in front of me and still said I could not help" was
+        # actually happening.
+        quoted = quoted_from_own_material(
+            request, evidence, f"no language model could answer ({decision.reason})",
+            handled_by="open_conversation",
+        )
+        if quoted is not None:
+            return quoted
         return TaskResult.failure(
             request.task,
             request.own_name,
@@ -1850,6 +1861,44 @@ def _ask_which(
     )
 
 
+# Kinds of value a correction can swap for another of the same kind, without
+# knowing anything about the subject: a weekday for a weekday, a clock time
+# for a clock time. Grammar only - there is no list of topics here, and none
+# may be added.
+_VALUE_KINDS: "tuple[tuple[str, re.Pattern[str]], ...]" = (
+    ("weekday", re.compile(
+        r"\b(?:" + "|".join(sorted(CALENDAR_WEEKDAY_NAMES, key=len, reverse=True)) + r")s?\b",
+        re.IGNORECASE)),
+    ("time", re.compile(r"\b\d{1,2}(?::\d{2})?\s*(?:am|pm)?\b", re.IGNORECASE)),
+)
+
+
+def _like_for_like_correction(content: str, replacement: str) -> "str | None":
+    """``content`` with its value of the same kind as ``replacement`` swapped
+    for it - or None when the two are not the same kind of value, in which
+    case the caller's ordinary whole-topic replacement is right.
+    """
+    said = str(replacement or "").strip()
+    body = str(content or "")
+    if not said or not body:
+        return None
+    for _kind, pattern in _VALUE_KINDS:
+        in_replacement = pattern.fullmatch(said.strip(" .!?"))
+        if in_replacement is None:
+            continue
+        if pattern.search(body) is None:
+            return None
+        swapped = pattern.sub(said.strip(" .!?"), body, count=1)
+        return swapped if swapped != body else None
+    return None
+
+
+def _narrowed_topic(topic: str, replacement: str) -> "str | None":
+    """The stored topic with the same like-for-like swap applied, so the topic
+    key follows the statement rather than drifting from it."""
+    return _like_for_like_correction(topic, replacement)
+
+
 def _apply_to_option(
     request: CapabilityRequest, statement: CorrectionStatement, option: CorrectionOption, source: "Any",
 ) -> TaskResult:
@@ -1894,7 +1943,32 @@ def _apply_to_option(
         )
 
     # A statement with no separate value ("you're learning X") is corrected
-    # to a new topic: the corrected subject takes the old one's place.
+    # to a new topic: the corrected subject takes the old one's place - unless
+    # the correction is plainly about one *part* of it. "I'm learning Spanish
+    # on Tuesdays" corrected with "it is Thursdays" is about the day, and
+    # replacing the whole topic dropped the subject entirely, leaving "the
+    # user is learning Thursdays". Only a like-for-like swap is made (a
+    # weekday for a weekday, a time for a time), which is grammar, not a
+    # guess about the subject.
+    narrowed = _like_for_like_correction(source.content, replacement)
+    if narrowed is not None:
+        corrected = PersonalContextCandidate(
+            topic=_narrowed_topic(source.topic, replacement) or source.topic,
+            content=narrowed, category=source.category, activity=source.activity,
+        )
+        record = build_personal_context_record(corrected, agent_name=request.own_name)
+        record = MemoryRecord(
+            content=record.content, kind=record.kind, tags=record.tags,
+            context={**dict(record.context or {}), "corrects": source.record_id},
+        )
+        verdict = request.retain(record)
+        if not verdict.allowed:
+            return TaskResult.failure(request.task, request.own_name, f"I couldn't update that: {verdict.reason}")
+        request.forget(source.record_id)
+        return TaskResult.success(
+            request.task, request.own_name, f"Got it - I've corrected that. {describe_for_user(corrected)}",
+            payload={**payload, "action": "corrected"},
+        )
     content = re.sub(rf"\b{re.escape(source.topic)}\b", replacement, source.content, flags=re.IGNORECASE)
     if content == source.content:
         content = f"The user's {source.topic} is {replacement}."
@@ -6416,6 +6490,114 @@ def knowledge_intent(task: Task, participants: Sequence[str] = ()) -> bool:
     return True
 
 
+# How many of the person's own passages a quoted answer shows before it says
+# how many more there are. A screenful, not a dump - the same reasoning
+# MEMORY_SAMPLE carries in the Control Center's own views.
+_QUOTED_PASSAGE_LIMIT = 6
+
+# Asking for something *written in* the material ("what time does the train
+# leave", "find the deadline", "how much is the deposit"), as opposed to asking
+# to be told about a subject ("tell me about Napoleon", "explain this",
+# "summarise it"). The first is a lookup and is answerable by quoting; the
+# second needs a model and is refused without one.
+_LOOKUP_SHAPE = re.compile(
+    r"^\s*(?:so\s*,?\s+|and\s+|ok(?:ay)?\s*,?\s+)?"
+    r"(?:what|when|where|who|which|whose|how\s+(?:much|many|long|often))\b"
+    r"|\b(?:find|look\s+up|search\s+for|show\s+me|tell\s+me\s+the)\b",
+    re.IGNORECASE,
+)
+_NOT_A_LOOKUP = re.compile(
+    r"\b(?:explain|summari[sz]e|summary|compare|analy[sz]e|why|opinion|think|mean[s]?\b|"
+    r"tell\s+me\s+about|what\s+do\s+you\s+(?:think|make))\b",
+    re.IGNORECASE,
+)
+
+
+# "What does this PDF say?" names no thing to find - it asks for the document
+# itself, which is read_content's job and what the refusal below points at
+# (REPAIR-01 decided deliberately that this shape is reasoning, not reading).
+# Quoting every matched passage at it would quietly replace that decision.
+_JUST_ASKS_WHAT_IT_SAYS = re.compile(
+    r"^what(?:'s|\s+is|\s+does|\s+do)?\s+(?:this|the|that|my|it)\b[\w\s]{0,20}?"
+    r"(?:say|says|about|in\s+it)\s*[?.!]*$",
+    re.IGNORECASE,
+)
+
+
+def _asks_to_look_something_up(text: str) -> bool:
+    """Whether this question asks for a particular thing that would be written
+    down in the person's own material - answerable by quoting it back."""
+    body = " ".join(str(text or "").split())
+    if _NOT_A_LOOKUP.search(body) or _JUST_ASKS_WHAT_IT_SAYS.match(body):
+        return False
+    return bool(_LOOKUP_SHAPE.search(body))
+
+
+def quoted_from_own_material(
+    request: CapabilityRequest, evidence: KnowledgeEvidence, why: str, *, handled_by: str,
+) -> "TaskResult | None":
+    """The person's own material, quoted, when their question asks for
+    something written in it and nothing can reason over it - otherwise None.
+
+    This is retrieval, never reasoning: the passages are reproduced exactly as
+    they stand, with their own citations, and the answer says plainly that
+    they were matched on words and not interpreted. That keeps the structural
+    honesty of the Half Brain paths (nothing here can produce a sentence
+    *about* the subject) while ending the case that made those paths useless -
+    a person whose own documents contain the answer being told only that no
+    model is configured.
+    """
+    if evidence.is_empty or not _asks_to_look_something_up(request.task.description):
+        return None
+    shown = "\n".join(f"  - {note}" for note in evidence.notes[:_QUOTED_PASSAGE_LIMIT])
+    more = (
+        f"\n  ...and {len(evidence.notes) - _QUOTED_PASSAGE_LIMIT} more passage(s)."
+        if len(evidence.notes) > _QUOTED_PASSAGE_LIMIT else ""
+    )
+    return TaskResult.success(
+        request.task,
+        request.own_name,
+        (
+            "Here is what your own material says, word for word - I matched the words in your "
+            f"question, I did not interpret or summarise ({why}):\n{shown}{more}"
+        ),
+        payload={
+            "handled_by": handled_by,
+            "knowledge_sources": tuple(evidence.sources),
+            "reasoning": "none - quoted verbatim",
+            "currency": "settled",
+            "unavailable_sources": evidence.unavailable,
+        },
+    )
+
+
+def _knowledge_with_local_assist(request: CapabilityRequest, evidence: KnowledgeEvidence) -> "TaskResult | None":
+    """Post-Pre-Stage-9: when no Brain can answer, the attributed local assistant
+    works over the same gathered evidence - a supplied document explained,
+    summarised or discussed from its own passages, or a settled-knowledge
+    question answered - always marked as a small local model's words, never
+    the Manager's verified reasoning. None when no assistant is equipped or it
+    produced nothing."""
+    if request.assist is None:
+        return None
+    from src.providers.local_assistant import ATTRIBUTION
+
+    question = request.task.description
+    if evidence.notes:
+        text = request.assist.explain("\n".join(evidence.notes)[:6000], question=question)
+    else:
+        text = request.assist.answer(question, context=tuple(_recent_conversation_notes(request)))
+    if not text:
+        return None
+    return TaskResult.success(
+        request.task, request.own_name, f"{text}\n\n({ATTRIBUTION})",
+        payload={
+            "handled_by": "knowledge_inquiry", "brain": "local_assist", "assisted": True,
+            "sources": list(evidence.sources),
+        },
+    )
+
+
 def _knowledge_without_reasoning(
     request: CapabilityRequest, evidence: KnowledgeEvidence, why: str
 ) -> TaskResult:
@@ -6439,6 +6621,9 @@ def _knowledge_without_reasoning(
                 f"{missing}. I would rather say so than guess."
             ),
         )
+    quoted = quoted_from_own_material(request, evidence, why, handled_by="knowledge_inquiry")
+    if quoted is not None:
+        return quoted
     # REPAIR-01: when the evidence includes a document the person pointed
     # at, the one thing Half Brain *can* do with it is read it word for
     # word - say so, rather than leaving only a refusal.
@@ -6455,6 +6640,9 @@ def _knowledge_without_reasoning(
             f"I found {len(evidence.notes)} relevant passage(s) in your own "
             f"material, but I can't reason about them yet - {why} - so I "
             f"would rather say so than guess.{reading_hint}"
+            " If you are after something written in it, ask for that directly - "
+            "\"what time does the train leave?\", \"find the deadline in this document\" - "
+            "and I will quote it back to you."
         ),
     )
 
@@ -6495,6 +6683,9 @@ def knowledge_inquiry(request: CapabilityRequest) -> TaskResult:
     )
 
     if request.converse is None:
+        assisted = _knowledge_with_local_assist(request, evidence)
+        if assisted is not None:
+            return assisted
         return _knowledge_without_reasoning(
             request, evidence, "no language model is configured for me"
         )
@@ -6515,6 +6706,9 @@ def knowledge_inquiry(request: CapabilityRequest) -> TaskResult:
         # this branch and not the None check above that a real unconfigured
         # installation actually takes - which is why both must produce the
         # same honest answer rather than one of them being the tidy case.
+        assisted = _knowledge_with_local_assist(request, evidence)
+        if assisted is not None:
+            return assisted
         return _knowledge_without_reasoning(
             request, evidence, f"no language model could answer ({decision.reason})"
         )

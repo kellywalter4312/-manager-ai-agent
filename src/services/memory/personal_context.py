@@ -500,6 +500,112 @@ def extract_discontinued(text: str) -> "PersonalContextCandidate | None":
     return None
 
 
+# A plain, present-tense statement about the person's own life: "I go to the
+# gym on Mondays", "I work at Barclays", "I live in Leeds", "I play five-a-side
+# on Saturdays". Nothing above recognised these at all - they are neither a
+# possessive ("my X is Y") nor a study statement - so an ordinary sentence
+# about the person's own routine was answered with "no reasoning capability is
+# configured" and learned nothing.
+#
+# The verb is *not* a fixed vocabulary of life: it is any verb that is not one
+# of the auxiliaries and speech-act verbs below, which are grammar rather than
+# living ("I need...", "I want you to...", "I think...", "I asked..."). The
+# topic is the object of the sentence, so the question that asks for it back
+# ("when do I go to the gym") shares its words.
+_NOT_A_LIFE_VERB = frozenset({
+    "am", "was", "were", "be", "been", "being", "have", "has", "had", "do", "did", "does",
+    "will", "would", "can", "could", "shall", "should", "may", "might", "must",
+    "need", "want", "wish", "hope", "think", "thought", "believe", "guess", "suppose",
+    "wonder", "mean", "meant", "ask", "asked", "tell", "told", "say", "said", "know", "knew",
+    "like", "love", "hate", "prefer", "remember", "forget", "forgot", "see", "saw", "feel", "felt",
+    "get", "got", "let", "make", "made", "try", "tried", "use", "used", "keep", "kept",
+    "learn", "learning", "learned", "learnt", "study", "studying", "start", "starting", "started",
+    "stop", "stopped", "read", "reading", "write", "writing", "send", "sending",
+})
+# An adverb between "I" and the verb ("I still need...", "I usually go...")
+# is consumed rather than mistaken for the verb - otherwise "I still need to
+# finish my Java work" would be learned as "the user stills need ...".
+_HABIT_ADVERBS = r"(?:still|always|usually|often|sometimes|normally|generally|also|now|just|only|really)"
+# The verb carries no negation and no contraction. "I don't like that",
+# "I can't believe my boss yelled at me" say what is *not* so, or express a
+# feeling about something else - neither is a fact about the person's life,
+# and both were being read as one ("the user can'ts believe ...").
+_HABITUAL_STATEMENT = re.compile(
+    _LEAD_IN + rf"i\s+(?:{_HABIT_ADVERBS}\s+)*(?P<verb>[a-z][a-z\-]{{1,20}})\s+(?P<rest>[^.!?]{{2,120}})",
+    re.IGNORECASE,
+)
+_NEGATED = re.compile(r"\bi\s+(?:\w+\s+)?(?:do\s+not|does\s+not|did\s+not|never|no\s+longer)\b|\b\w+n't\b", re.IGNORECASE)
+# "I go to the gym" is a habit; "I need to call the bank", "I have to leave",
+# "I am going to start" are intentions and obligations, which are not facts
+# about the person's life to be kept.
+_INTENTION_SHAPE = re.compile(
+    r"\bi\s+(?:\w+\s+)?(?:need|want|have|have\s+got|ought|plan|intend|hope|try|going)\s+to\b",
+    re.IGNORECASE,
+)
+# A sentence that talks to Alfred rather than about the person's own life.
+_ADDRESSES_THE_AGENT = re.compile(r"\byou\b|\byour\b|\bplease\b", re.IGNORECASE)
+# The leading article/preposition of the object, dropped so "to the gym on
+# Mondays" keys on "gym" the way "my dentist" keys on "dentist".
+_LEADING_OBJECT_WORDS = re.compile(
+    r"^(?:to|at|in|on|for|with|from|into|about)\s+(?:the\s+|a\s+|an\s+|my\s+)?"
+    r"|^(?:the|a|an|my)\s+",
+    re.IGNORECASE,
+)
+# The time clause a habit usually ends with - kept in the content, dropped
+# from the topic so "the gym on Mondays" and "the gym" are the same topic.
+_TRAILING_TIME_CLAUSE = re.compile(
+    r"\s+(?:on|every|each|at|after|before|during)\s+[\w\s:]+$", re.IGNORECASE
+)
+
+
+def extract_habitual_statement(text: str) -> "PersonalContextCandidate | None":
+    """"I go to the gym on Mondays" - an ordinary fact about the person's own
+    life, learned as one topic like any other."""
+    stripped = strip_vocative_address(str(text or "")).strip()
+    if (
+        _is_question_or_request(stripped)
+        or _ADDRESSES_THE_AGENT.search(stripped)
+        or _INTENTION_SHAPE.search(stripped)
+        or _NEGATED.search(stripped)
+    ):
+        return None
+    match = _HABITUAL_STATEMENT.match(stripped)
+    if match is None:
+        return None
+    verb = match.group("verb").lower()
+    if verb in _NOT_A_LIFE_VERB:
+        return None
+    rest = _clean_topic(match.group("rest"))
+    if not rest:
+        return None
+    topic = _reject_if_stopword(_TRAILING_TIME_CLAUSE.sub("", _LEADING_OBJECT_WORDS.sub("", rest)).strip())
+    if topic is None:
+        return None
+    return PersonalContextCandidate(
+        topic=_bounded(topic),
+        content=f"The user {_third_person_verb(verb)} {rest}.",
+        category="routine",
+        status=STATUS_CURRENT,
+        activity=verb,
+    )
+
+
+def _third_person_verb(verb: str) -> str:
+    """"go" -> "goes", "study" -> "studies", "work" -> "works" - ordinary
+    English agreement, so the stored sentence reads like a sentence."""
+    word = verb.lower()
+    if word in _IRREGULAR_THIRD_PERSON:
+        return _IRREGULAR_THIRD_PERSON[word]
+    if word.endswith(("s", "x", "z", "ch", "sh", "o")):
+        return word + "es"
+    if word.endswith("y") and len(word) > 1 and word[-2] not in "aeiou":
+        return word[:-1] + "ies"
+    return word + "s"
+
+
+_IRREGULAR_THIRD_PERSON = {"have": "has", "be": "is", "go": "goes", "do": "does"}
+
+
 def extract_personal_context_candidate(text: str) -> "PersonalContextCandidate | None":
     """Every deterministic shape this module recognises, tried in order:
     discontinuation first (a "no longer/changed" statement should never be
@@ -510,6 +616,9 @@ def extract_personal_context_candidate(text: str) -> "PersonalContextCandidate |
     for extractor in (
         extract_discontinued, extract_skill_learned, extract_learning_activity,
         extract_update_declaration, extract_possessive_declaration,
+        # Last: every shape above is more specific, and a habitual statement
+        # is the general case they are special cases of.
+        extract_habitual_statement,
     ):
         candidate = extractor(text)
         if candidate is not None:
@@ -702,6 +811,19 @@ _QUERY_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"^(?:so\s*,?\s+|and\s+|ok(?:ay)?\s*,?\s+)?what(?:'s|\s+is|\s+are|\s+was|\s+were)\s+my\s+(?P<focus>[^?.!]+?)\s*[?.!]*$",
         r"^(?:so\s*,?\s+|and\s+)?(?:do\s+you\s+know|can\s+you\s+tell\s+me|tell\s+me|remind\s+me\s+(?:of|what))\s+"
         r"(?:what\s+)?my\s+(?P<focus>[^?.!]+?)(?:\s+(?:is|are))?\s*[?.!]*$",
+        # The same question asked with any other question word. "What is my
+        # dentist" is not how anyone asks; "who is my dentist" is - and it
+        # was not recognised at all, so a fact Alfred had genuinely stored
+        # ("my dentist is Dr Ade", accepted and retained) could not be asked
+        # back. The focus is still whatever the question names; which word
+        # introduced it says nothing about what it is.
+        r"^(?:so\s*,?\s+|and\s+|ok(?:ay)?\s*,?\s+)?"
+        r"(?:who|where|when|which|whose|how\s+much|how\s+many|how\s+often)"
+        r"(?:'s|\s+is|\s+are|\s+was|\s+were)\s+my\s+(?P<focus>[^?.!]+?)\s*[?.!]*$",
+        # "When do I go to the gym", "where do I work" - a question about a
+        # habit, whose focus is the habit itself.
+        r"^(?:so\s*,?\s+|and\s+|ok(?:ay)?\s*,?\s+)?"
+        r"(?:when|where|how\s+often|what\s+time)\s+do\s+i\s+(?P<focus>[^?.!]+?)\s*[?.!]*$",
     )
 )
 
@@ -764,6 +886,25 @@ def match_personal_context(
     return tuple(item for _score, _position, item in scored)
 
 
+_SECOND_PERSON_EXCEPTIONS = {"has": "have", "is": "are", "goes": "go", "does": "do", "was": "were"}
+
+
+def _second_person_verb(verb: str) -> str:
+    """"goes" -> "go", "works" -> "work" - the inverse of the third-person
+    agreement a stored statement is written with."""
+    word = str(verb or "")
+    lowered = word.lower()
+    if lowered in _SECOND_PERSON_EXCEPTIONS:
+        return _SECOND_PERSON_EXCEPTIONS[lowered]
+    if lowered.endswith("ies") and len(lowered) > 4:
+        return lowered[:-3] + "y"
+    if lowered.endswith(("shes", "ches", "sses", "xes", "zes", "oes")):
+        return lowered[:-2]
+    if lowered.endswith("s") and not lowered.endswith("ss"):
+        return lowered[:-1]
+    return lowered
+
+
 def describe_for_user(record: PersonalContextRecord) -> str:
     """One stored statement as it reads when said back to the person - the
     same fact, in the second person ("The user is learning X" -> "You're
@@ -778,6 +919,10 @@ def describe_for_user(record: PersonalContextRecord) -> str:
         (r"^The user has\b", "You've"),
         (r"^The user was\b", "You were"),
         (r"^The user attends\b", "You attend"),
+        # A habitual statement is stored in the third person ("The user goes
+        # to the gym"), and the person is addressed in the second ("you go").
+        # Without the agreement, the answer read "you goes to the gym".
+        (r"^The user\s+(?P<verb>[a-z][a-z\-]*)\b", lambda m: "You " + _second_person_verb(m.group("verb"))),
         (r"^The user\b", "You"),
         (r"^my\b", "Your"),
         (r"\btheir\b", "your"),
