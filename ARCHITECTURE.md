@@ -294,16 +294,23 @@ depends on it holding.
 
 ## 2. Architecturally prepared 🟡
 
-Real code, real tests, **no production caller**. Each is one composition change
-away from being real — and until that change, none of it runs.
+> **Emptied, 2026-09-15 — see §52.48.** This table named modules that were real,
+> tested and had no production caller. Every one of them was traced against the
+> canonical architecture and resolved: four removed as duplicate or stale
+> (`src/agents/loop.py`, `src/manager/cognitive_loop.py`, `src/manager/actions.py`,
+> `src/channels/modality.py`, `src/extensions.py`), one migrated into the
+> canonical runtime and then removed (`src/services/credentials/validation.py`
+> → `credentials/authorization.py`, reachable as `provider <category> check`).
+> The surviving rows below shipped in the intervening checkpoints. The invariant
+> that replaces this table is enforced, not described:
+> `test_repository_recovery.py::test_no_module_is_left_prepared_but_unwired`
+> requires **0 test-only and 0 unreachable modules** in `src/`.
 
-| Feature | Module | Why it is not ✅ |
+| Feature | Module | State |
 |---|---|---|
-| Tool-using agent loop | `src/agents/loop.py` | Tests only. |
-| Cognitive loop + action executor | `src/manager/cognitive_loop.py`, `src/manager/actions.py` | Tests only — and `test_reachable_deliberation.py:248` **asserts** it stays unreachable. Deliberate: Trust in Stages. |
-| Event system (all kinds but one) | `src/events/*` | `delegation` now emits from Manager orchestration ✅. Every other constructor — `capability_became_available`, `tool_became_unavailable`, `work_completed`, `brain_mode_changed`, `run_failed` — still has no producer. |
-| Tool contract | `src/agents/tools/*` | The contract is reachable; **no tool is installed.** `web_search` and `code_assistant` are named as missing, not faked. |
-| Workspace surfaces | `InterfaceFeature.WORKSPACE / CODE / FILES / SOURCES` | Enum values a specialist may declare. `render.py:138` prints one line — *"offers a dedicated workspace"*. There is no workspace object, state, or storage. |
+| Event system (all kinds but one) | `src/events/*` | `delegation` emits from Manager orchestration ✅. Every other constructor — `capability_became_available`, `tool_became_unavailable`, `work_completed`, `brain_mode_changed`, `run_failed` — still has no producer. |
+| Tool contract | `src/agents/tools/*` | Reachable, and the tools are installed: `code_assistant` shipped with the coding workspace (§52.47) and Alfred's own self-review no longer reports it missing. `web_search` remains a named absence, not a fake. |
+| Workspace surfaces | `InterfaceFeature.WORKSPACE / CODE / FILES / SOURCES` | Shipped (§52.45): real workspace types chosen per agent in the Control Center, with a task board, a real 3D diagram, coding and documents panels, and persisted visit/board state. |
 
 ---
 
@@ -9640,3 +9647,305 @@ data byte-identical):**
 | Real 3D diagram workspace | VERIFIED WORKING |
 | A specialist's own task board | VERIFIED WORKING (was VERIFIED BROKEN) |
 | Adding a specialist never removes the Manager's capabilities or types | VERIFIED WORKING |
+
+### 52.46 Post-Pre-Stage-9 campaign, part 3 - Alfred Universal Voice Translation
+
+**Owner requirement (2026-09-15).** Natural spoken translation through headphones
+or the device's audio, as conversational and close to real time as this machine
+allows. Alfred's voice and language stay configurable, and translation is part
+of the Voice + Communication + Connection + Intelligence architecture, not a
+standalone translator.
+
+**One interpreter, three replaceable collaborators.**
+``src/services/translation/interpreter.py`` joins them duck-typed, importing no
+provider; the Runtime holds one instance (``Runtime.translation``) that the
+translate capability, the served page and the Control Center all read.
+
+- **Offline translation** - ``src/providers/translation/offline.py``, over installed
+  Argos packs (12 directions: English with Spanish, French, German, Italian,
+  Portuguese and Chinese; other pairs pivot through English). Argos is used only to
+  find packs; the pipeline is driven here, because measured on this machine Argos
+  itself (a) downloaded a Stanza model on first use and (b) looped Spanish->English
+  ("mainstremainstre...") through its escaped BPE tokenizer. Its own axis:
+  ``Settings.translation`` / Control Center ``translation_provider``
+  (``argos`` | ``null``).
+- **Hearing** - ``src/providers/media/local_whisper.py`` (faster-whisper base, int8),
+  a new ``local_whisper`` backend on the existing transcription axis
+  (``video_understanding_provider``). It names the language it heard, so one
+  listener serves media and translation.
+- **Speaking** - ``src/providers/translation/voice.py``: Kokoro with a project
+  archive of multilingual voices (``data/voices/kokoro/voices_multilingual.npz``)
+  speaks English, Spanish, French, Italian, Portuguese and Chinese. It returns WAV,
+  so the translation plays on the person's own device (headphones or speaker). A
+  language with no local voice (German) is spoken by the device's own voice for
+  that locale, and the page says so.
+
+**Wired, not standalone.**
+
+- The existing ``translate`` capability tries offline translation first. It is
+  deterministic, so Half Brain translates as well as Full Brain; the Brain is asked
+  only when no offline pair exists. It also honours "translate X from Spanish into
+  English", and every refusal names what to enable.
+- ``POST /translate/text`` and ``POST /translate/speech`` add a conversational mode:
+  each utterance is translated towards the other language of the pair.
+- The snapshot carries ``translation`` (languages, what each can do, hearing,
+  voice). The Control Center has a ``translation`` view plus the two provider
+  categories.
+- The page has a TRANSLATE control beside VOICE. It opens a panel with two
+  languages, a swap, a voice choice (local voice, or the device's voice, which is
+  faster), START CONVERSATION with silence detection, and typed translation.
+
+**Verified live.** Installed models; isolated scratch data; production data
+byte-identical.
+
+- **Warm server, measured directly over HTTP** (two-core i5-6300U):
+  - clean Spanish speech -> English with the device voice: 4.3 s end to end
+    (hearing 3.8 s, translation 0.5 s);
+  - the same with the local voice: 12.9-16.4 s (the neural voice takes 8.5-9.6 s);
+  - typed English -> Spanish: 0.1 s with the device voice, 7.5 s with the local voice.
+- **Real headless Chromium, the page's own loop.**
+  - The panel listed the seven translatable languages (German marked "device voice").
+  - A typed English sentence came back as "Buenas noches, ¿dónde puedo comprar un
+    billete de tren?" and played in a Spanish local voice.
+  - A Spanish utterance fed as the microphone was detected by silence, heard as
+    Spanish, translated to English, played, and listening resumed.
+  - No page errors.
+  - In that harness a turn took minutes: software WebGL rendering the page's 3D
+    scenes starved the two cores. Those timings describe the harness, not the
+    translation path.
+
+**Honest limits.**
+
+- Near-real-time only with the device voice on this laptop; the local neural voice
+  is roughly 10 s behind.
+- Small offline models: ordinary sentences translate well; idiom, names, very short
+  guessed phrases and pivots are weaker.
+- Recognition of real human voices on a physical microphone and headphones was not
+  verified here (no human speaker in this session).
+- Hindi and Japanese have no installed translation packs.
+
+| Requirement | Status |
+|---|---|
+| Offline text translation, Half Brain and Full Brain | VERIFIED WORKING |
+| Spoken translation heard, translated and played on the device | VERIFIED WORKING (synthetic speech through a fake microphone) |
+| Conversational pair mode with silence detection | VERIFIED WORKING |
+| Near-real-time | VERIFIED WORKING with the device voice (4.3 s); local neural voice VERIFIED SLOW (~13 s) |
+| Configurable through the Control Center (engine, hearing, voice choice) | VERIFIED WORKING |
+| A real human voice on a physical microphone/headphones | NOT VERIFIED (no human speaker available to the session) |
+
+### 52.47 Post-Pre-Stage-9 campaign, part 4 - the owner's list, checked against the running system and repaired
+
+**Owner instruction (2026-09-15).** Check every line of the standing status
+list against the project, say what is unfinished, and fix it - and make sure
+Half Brain can do these things too, not only Full Brain.
+
+**How it was checked.** Not by reading the record: by driving the real Control
+Center - `run_command` in a terminal session and `serve_ui.route_command` over
+HTTP - through isolated stores, with every credential environment variable
+removed and production `data/` hashed before and after (`changed: []` in every
+run). Nine sweeps, then a targeted audit of the list items the sweeps had not
+touched. A claim that was true in an earlier checkpoint and could not be
+re-demonstrated was treated as not verified.
+
+**Found by doing it, not by inspection.**
+
+- **Scanned PDFs read nothing, and raised nothing.** `pdf_pages` splits pages on
+  a marker (U+241E); `powershell.exe` writes stdout in the console code page
+  (437 here), which cannot encode it, so every page boundary arrived as `?`,
+  every scan produced zero pages, and the failure was silent. The suite's one
+  red test (`test_a_shared_scan_is_read_aloud_page_by_page`) was this, and it
+  had nothing to do with OCR: the recognised text itself came back perfectly.
+  Every PowerShell seam (`local_ocr`, `local_transcription`,
+  `windows_speech_provider`) now pins `[Console]::OutputEncoding` and decodes
+  UTF-8, so accented characters in recognised text survive too.
+- **A real backend switch was recorded as a failure.**
+  `_administrative_write_succeeded` knew the older account wording only, so
+  every `provider <category> use <backend>` - the Campaign 4/8 mechanism - was
+  written to the durable audit trail as `failed`. `workspace <agent> add|remove`
+  was not recorded at all. Both now record by what actually happened.
+- **The screen did not name the other reasoning axis.** "Switched the reasoning
+  provider from 'null' to 'local' live" is true, and reasoning stayed off,
+  because `brain.manager` is a separate governed axis - deliberately, and
+  `test_campaign_04` pins it ("a vendor alone never turns reasoning on"). The
+  behaviour is unchanged; the message now says the mode is still 'null' and
+  gives the exact command that turns it on. Measured with both axes on: 89-254 s
+  per turn on this hardware, answers that echoed the question back, and a
+  personal statement treated as chit-chat instead of learned - §52.44's "not the
+  recommended brain on this machine" re-confirmed at runtime.
+- **A withdrawn surface could never be granted back.** Withdrawing removes it
+  from the descriptor, so it vanished from the governance inventory - the only
+  place the owner can see a component in order to propose against it. Withdrawn
+  surfaces stay listed, as `withdrawn`, with the command that restores them.
+- **A file added in the Control Center was invisible to every capability.**
+  `artifacts add` ingested it and said nothing in the room, so "read this file
+  to me" answered "share one (attach it in the conversation *or add it in the
+  Control Center*)" to the person who had just done that. In a terminal the
+  Control Center is the room, so the share is now recorded there. The served
+  page's own panel upload stays deliberately silent - it has no conversation in
+  front of it.
+- **Naming a thing exactly was the one way to be misunderstood.** Every refusal
+  invites "name it with 'artifact <id>'", and doing so fell through to
+  `open_conversation`: `read_content`, `transcribe_media` and
+  `image_authenticity` all required a pointing word ("this", "that"). One
+  shared predicate (`names_specific_content`) now makes `artifact <id>` and a
+  file named in full count as pointing.
+- **Reminders existed and were invisible.** "remind me to take my medicine at
+  21:00" was stored as a timed task and then appeared on no screen and answered
+  no question: `calendar` showed calendar items, and "what reminders do I have"
+  reached nothing. Reminder-shaped listings are claimed by `list_tasks`,
+  `describe_task` names the due moment, and the Control Center's `calendar`
+  view carries a REMINDERS block read from the one task store.
+- **"Start recording" then "stop recording" said "Nothing is currently
+  recording".** True, and useless: the session was waiting in `requested` for a
+  Recording control a terminal does not have, and stayed there. It now says
+  which nothing it means, and clears the request.
+
+**Half Brain, genuinely capable.** The rule that Half Brain never produces
+prose *about* a subject is intact; what changed is that it stopped being
+useless with the person's own material in front of it.
+
+- An ordinary sentence about the person's own life ("I go to the gym on
+  Mondays", "I work at Barclays") matched no grammar and taught Alfred nothing.
+  `extract_habitual_statement` is the general case the specific shapes were
+  special cases of - guarded against requests, intentions, negations, opinions
+  and sentences addressed to Alfred, each guard added because a test caught it
+  learning something it should not have.
+- A fact that *was* stored could only be asked back with "what": "who is my
+  dentist" reached no capability at all. The question word no longer decides
+  whether a question is understood.
+- A question whose answer is written in the person's own documents is answered
+  by quoting the passages, with their own citations, marked as matched-not-
+  interpreted (`quoted_from_own_material`, used by both `knowledge_inquiry` and
+  `open_conversation`). "Tell me about X", "explain", "summarise" and "why"
+  still refuse without a model - and with the local assistant equipped, it
+  answers those, attributed.
+- A correction that names one part of a fact ("it is Thursdays") swaps only
+  that part when it is the same kind of value - a weekday for a weekday, a time
+  for a time - instead of replacing the whole topic and losing the subject that
+  was right.
+- Statements are stored in the third person and said back in the second, with
+  the verb agreeing: "you go to the gym", not "you goes to the gym".
+
+**Translation no longer echoes.** "translate buenas noches into English"
+answered "buenas noches", reported as a success: the guess found nothing,
+English was assumed, and English was translated into English. The guess now
+carries the everyday words people actually type first, an unknown source is
+refused with the way to remove the doubt, and a phrase already in the target
+language says so rather than being handed back. Found and fixed with it:
+"buongiorno a tutti" was being guessed as Portuguese.
+
+**Applied from the prepared drafts, now that the list called for them.** Image
+intelligence (the attributed local vision model describes an image when the
+Brain has no view; a generator name written into the camera fields is reported
+as what it is), universal content (a supplied document summarised, explained
+and translated - by the local assistant, attributed, or offline), the coding
+workspace with a real `code_assistant` tool (the gap Alfred's own self-review
+had been reporting on every start), capability choices going live in the
+running session, and desktop notifications for a reminder that comes due with
+no page open.
+
+| Requirement | Status |
+|---|---|
+| Scanned PDFs read page by page | VERIFIED WORKING (was VERIFIED BROKEN - silently) |
+| The audit trail records what actually happened | VERIFIED WORKING (was VERIFIED BROKEN) |
+| The Control Center says which reasoning axis is where | VERIFIED WORKING |
+| A withdrawn surface can be granted back | VERIFIED WORKING (was VERIFIED BROKEN) |
+| A file added in the Control Center is usable by ordinary words | VERIFIED WORKING (was VERIFIED BROKEN) |
+| `artifact <id>` reaches read / transcribe / authenticity | VERIFIED WORKING (was VERIFIED BROKEN) |
+| Reminders are listed, and visible in the Control Center | VERIFIED WORKING (was VERIFIED BROKEN) |
+| An ordinary statement about the person's life is learned | VERIFIED WORKING (was NOT FOUND) |
+| A stored fact can be asked back however it is asked | VERIFIED WORKING (was VERIFIED BROKEN) |
+| A lookup answered from the person's own material in Half Brain | VERIFIED WORKING (was VERIFIED BROKEN) |
+| A correction keeps the part that was right | VERIFIED WORKING (was VERIFIED BROKEN) |
+| Offline translation never echoes an untranslated phrase | VERIFIED WORKING (was VERIFIED BROKEN) |
+| Image understanding without a vendor, attributed | VERIFIED WORKING |
+| A coding workspace with a real code tool | VERIFIED WORKING (was the self-review's own standing complaint) |
+| The local model as the Manager's whole brain | VERIFIED BROKEN on this hardware (re-confirmed; honest, selectable, not recommended) |
+
+### 52.48 Post-Pre-Stage-9 campaign, part 5 - the prepared-but-unwired modules, traced and resolved
+
+**Owner instruction (2026-09-15).** Do not wire a module in merely because it
+exists. Trace each against the canonical architecture: remove what is
+duplicate, dead or stale, and where something holds unique functionality the
+canonical runtime genuinely needs, migrate it there, verify it there, and then
+remove the duplicate. Do not leave parallel architectures standing to make old
+modules look used.
+
+**The trace, and what each one turned out to be.**
+
+| Module | Canonical counterpart | Verdict |
+|---|---|---|
+| `src/agents/loop.py` (`AgentLoop`, `ToolUsingBrain`) | `src/manager/objective_loop.py` | **Removed.** No brain anywhere in `src/` implements `next_step`, so its bounded observe-think-act cycle had no participant. The canonical bounded multi-step loop is `pursue_objective`. |
+| `src/manager/cognitive_loop.py`, `src/manager/actions.py` | `objective_loop` + `collaboration_entry` + `ManagerAgent.decide/take_action/assess/_remember_delegation` | **Removed.** Every step they perform is composed from canonical Manager methods, and `objective_loop`'s own docstring already recorded why they were not activated: their router-concurrence check asks `diagnose()`, which is narrower than the `decide()` the rest of the system trusts. The one behaviour they added - refusing when a Brain's named delegate disagrees with the router - guards a path production does not have, because no canonical caller asks a Brain to name a delegate. |
+| `src/channels/modality.py` | the artifact store's `content_kind` | **Removed.** It named a future ("a camera photo, a video, an existing file are all real things a person will eventually want to bring into a conversation") that has since been built for real: `ingestion.content_kind_for`, `POST /upload`, and `resolve_shared_media(kinds=...)`. A second vocabulary for the same fact is the parallel architecture this instruction forbids. |
+| `src/extensions.py` (Stage 11.A) | `src/evolution.py` + `src/services/evolution/*` | **Removed.** A second governed ledger for the same question - may a declaration be marked active - with its own DISCOVER/VALIDATE/PLAN/APPROVE/APPLY/VERIFY lifecycle, no production caller and no Control Center surface. The canonical one is proposed, approved, applied, verified, rolled back and audited from the Control Center, and admits brand-new categories through `register_handler`. |
+| `src/services/credentials/validation.py` | *nothing* | **Migrated, then removed.** The only one that held something real and missing. |
+
+**The migration, in full.** The ecosystem registry's `validate` attempts real
+*construction* and says so explicitly ("no live external call was made... never
+LIVE EXTERNAL VERIFIED"). It cannot answer the question an unfunded key
+actually raises - would the vendor accept this? - and this project has been
+blocked on exactly that for months. The mechanism existed
+(`validate_credential`: make the one real `complete()` call, report `valid` and
+`checked_live` separately) and nothing could reach it.
+
+- `src/services/credentials/authorization.py` - `check_authorization`,
+  `AuthorizationCheck(authorized, reached_vendor, reason)`. Named for the
+  question it answers, still provider-neutral, still never raising.
+- `provider llm_provider check <backend> [account-id]` in the Control Center:
+  builds the provider from the stored account the ordinary way, makes one real
+  request, and reports whether the vendor was reached separately from whether
+  it said yes.
+- It leaves the machine, so it is a confirmed administrative write like every
+  other outward action - described before it runs ("send one real request to
+  'anthropic' ... this leaves the machine and a metered vendor may charge for
+  it"), and recorded in the durable action log, where *the vendor answered* is
+  a success and *never reached* is a failure.
+- Verified in the canonical runtime against scripted providers and through the
+  real Control Center path with a stored account; no vendor was contacted (the
+  key is still unfunded). `tests/test_credential_authorization.py`.
+
+**The invariant that replaces the old list.** `ARCHITECTURE.md` used to carry
+an "architecturally prepared" table naming modules that were real, tested and
+unreachable; `test_repository_recovery.py` pinned it. Both are gone, replaced
+by a property that needs no maintenance and cannot rot:
+
+    production 251 · test_only 0 · unreachable 0
+
+`test_no_module_is_left_prepared_but_unwired` asserts exactly that, names each
+removed module, and requires the canonical replacements to be production-
+reachable. Tests that existed only to prove the staged modules were real were
+removed with them; tests that protected a genuine property through them were
+rewritten onto the canonical path rather than deleted - the specialist-memory
+boundary now runs through `collaboration_entry`, and the governed approval
+gate, two-step registration and rollback now run through the real evolution
+lifecycle with a category registered at runtime.
+
+**AI image generation, live.** The owner authorised one outward request so the
+capability could stop being "implemented and selectable but never called".
+Chosen in the Control Center (`provider image_generation_provider use
+pollinations`), honoured on the next start, and then:
+
+- a direct call returned a real 512x512 JPEG, 31,856 bytes, in 0.8-4.2 s, with
+  the service reporting `sana` as the model it actually used;
+- this project's own forensics read that file back and reported "Generator
+  traces are recorded (sana) - consistent with an AI-generated image", which is
+  the §52.47 authenticity fix confirmed against a genuine generated image
+  rather than a fixture;
+- "make me an image of a calm evening lounge with a reading lamp" through the
+  Control Center produced a real 1024x576 image (37,463 distinct colours) and
+  persisted it as an `image` artifact owned by Alfred;
+- found doing it: `_MEDIA_ILLUSTRATE_PATTERN` did not recognise "make me an
+  image", the ordinary way people ask. Widened, with the noun still anchored so
+  "make me a handout" stays with `create_artifact`;
+- one attempt returned HTTP 500 from the vendor and was reported as exactly
+  that - "media production failed: ... HTTP Error 500" - never a fabricated
+  image.
+
+| Requirement | Status |
+|---|---|
+| No module prepared-but-unwired anywhere in `src/` | VERIFIED WORKING (251 production, 0 test-only, 0 unreachable) |
+| One objective loop, not two | VERIFIED WORKING |
+| One governed lifecycle, not two | VERIFIED WORKING |
+| A live credential check reachable from the Control Center | VERIFIED WORKING (mechanism and route; no vendor contacted - the key is unfunded) |
+| AI image generation through a real vendor | VERIFIED WORKING (LIVE EXTERNAL VERIFIED, authorised by the owner) |
