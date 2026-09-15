@@ -114,8 +114,8 @@ def build_ecosystem_registry(settings: Settings) -> EcosystemRegistry:
                 replace(settings, video_understanding=key),
                 video_understanding_account=_credentialed_account(key, credential),
             ),
-            # "windows" is Windows' own offline recogniser - no key to hold.
-            requires_credential=lambda key: key not in ("null", "windows"),
+            # "windows" and "local_whisper" run on this machine - no key to hold.
+            requires_credential=lambda key: key not in ("null", "windows", "local_whisper"),
             dependents=(
                 "the media_production capability's transcribe operation "
                 "(feeding clip_video's real, audio-derived moment selection)",
@@ -145,6 +145,37 @@ def build_ecosystem_registry(settings: Settings) -> EcosystemRegistry:
             build=lambda key, credential: key,
             requires_credential=lambda key: False,
             dependents=("open conversation when no Brain answers (attributed local answers)",),
+        )
+    )
+
+    # Desktop notifications: how a due reminder reaches the person with no page open.
+    from src.providers.desktop_notifier import available_desktop_notification_backends, build_desktop_notifier
+
+    registry.register(
+        GenericCategoryAdapter(
+            "desktop_notification_provider",
+            list_backends=available_desktop_notification_backends,
+            active_key=lambda: settings.desktop_notifications,
+            build=lambda key, credential: build_desktop_notifier(replace(settings, desktop_notifications=key)),
+            requires_credential=lambda key: False,
+            dependents=("the heartbeat's due reminders when no page is open",),
+        )
+    )
+
+    # Universal voice translation: the offline translation engine on its own axis.
+    from src.providers.translation.factory import available_translation_backends, build_translator
+
+    registry.register(
+        GenericCategoryAdapter(
+            "translation_provider",
+            list_backends=available_translation_backends,
+            active_key=lambda: settings.translation,
+            build=lambda key, credential: build_translator(replace(settings, translation=key), strict=True),
+            requires_credential=lambda key: False,
+            dependents=(
+                "the translate capability (offline, in Half Brain as well as Full Brain)",
+                "live spoken and typed translation on the served page (POST /translate/speech, /translate/text)",
+            ),
         )
     )
 

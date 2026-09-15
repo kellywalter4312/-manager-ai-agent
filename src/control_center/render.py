@@ -36,6 +36,7 @@ from src.control_center.views import (
     OverviewView,
     PersonalContextTopicView,
     RecordingAgentView,
+    TaskItemView,
     UnresolvedFactView,
     VoiceView,
     WorkspaceAgentView,
@@ -551,11 +552,23 @@ def render_governance(decisions: tuple[GovernanceDecisionView, ...], columns: in
     return "\n".join(out)
 
 
-def render_calendar(items: tuple[CalendarItemView, ...], columns: int | None = None) -> str:
-    """The real, current state of every calendar item - one line per
-    item, always its latest write. Read-only: adding/cancelling/
-    rescheduling happens through ordinary conversation, never from this
-    screen."""
+def render_calendar(
+    items: tuple[CalendarItemView, ...],
+    columns: int | None = None,
+    reminders: "tuple[TaskItemView, ...]" = (),
+) -> str:
+    """The real, current state of every calendar item, and every pending
+    timed reminder - one line each, always its latest write. Read-only:
+    adding/cancelling/rescheduling happens through ordinary conversation,
+    never from this screen.
+
+    Reminders are shown here, under their own heading rather than mixed in,
+    because they are genuinely a different kind of thing (a task with a
+    moment, delivered by the proactive check) and pretending otherwise would
+    be the "second, parallel view of the same data" this project avoids -
+    but a person looking for "what is coming up" looks at this screen, and
+    before this they found nothing here at all.
+    """
     columns = columns if columns is not None else width()
     out: list[str] = []
     out += _heading("calendar", columns)
@@ -563,8 +576,6 @@ def render_calendar(items: tuple[CalendarItemView, ...], columns: int | None = N
     if not items:
         out.append("")
         out.append("  nothing on the calendar yet")
-        return "\n".join(out)
-
     for item in items:
         out.append("")
         marker = {"scheduled": "[current]", "cancelled": "[cancelled]", "completed": "[done]"}.get(
@@ -573,6 +584,12 @@ def render_calendar(items: tuple[CalendarItemView, ...], columns: int | None = N
         out.append(f"  {marker} {item.title}")
         if item.when:
             out.append(f"    {item.when}")
+
+    if reminders:
+        out.append("")
+        out.append("REMINDERS (delivered at their moment)")
+        for reminder in reminders:
+            out.append(f"  {reminder.describe}")
     return "\n".join(out)
 
 

@@ -270,6 +270,13 @@ class Settings:
     # Whether capabilities may consult the local model as an attributed
     # assistant for what Half Brain cannot do alone ("null" | "local").
     local_assist: str = "null"
+    # Universal voice translation: the offline translation engine ("null" |
+    # "argos"), chosen through the Control Center category translation_provider.
+    translation: str = "null"
+    # How a due reminder reaches the person when no page is open ("null" |
+    # "windows"), chosen through the Control Center category
+    # desktop_notification_provider; used by the heartbeat.
+    desktop_notifications: str = "null"
     mailbox: str = "memory"
     profile_path: str = "USER.md"
     # Where the user's schedule document lives. Separate from profile_path
@@ -400,6 +407,11 @@ class Settings:
         if not video_understanding:
             raise ValueError("Settings.video_understanding must not be empty")
         object.__setattr__(self, "video_understanding", video_understanding)
+
+        translation = str(self.translation or "").strip().lower()
+        if not translation:
+            raise ValueError("Settings.translation must not be empty")
+        object.__setattr__(self, "translation", translation)
 
         whisper_model = self.whisper_model.strip()
         if not whisper_model:

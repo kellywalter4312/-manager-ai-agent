@@ -76,6 +76,14 @@ _LIST_MARKERS: tuple[str, ...] = (
     "what are my tasks", "show my tasks", "list my tasks",
     "what tasks do i have", "my task list", "what do i need to do",
     "what's on my task list",
+    # A timed reminder is a task with a due moment (build_task_record below),
+    # so the person who set one asks for it back in reminder words - and got
+    # "no reasoning capability is configured", because nothing claimed them.
+    # The same listing answers both; describe_task names the due moment.
+    "what reminders do i have", "what are my reminders", "list my reminders",
+    "show my reminders", "my reminders", "what alarms do i have", "list my alarms",
+    "show my alarms", "what's due today", "what is due today", "what's due",
+    "what is due", "what have i got coming up", "what's coming up", "what is coming up",
 )
 _QUERY_MARKERS: tuple[str, ...] = (
     "do i have a task about", "what's my task about", "is there a task about",
@@ -386,7 +394,28 @@ def match_tasks_by_topic(
 def describe_task(record: MemoryRecord) -> str:
     """One task, rendered for a person to read - the identical shape a
     Control Center listing and a conversational answer both use, so the
-    two surfaces never describe the same task two different ways."""
-    status = str((record.context or {}).get("status") or PENDING)
+    two surfaces never describe the same task two different ways.
+
+    A timed reminder names its moment, in the identical wording the answer
+    that created it used ("at 21:00 on Tuesday 15 September 2026"): a list
+    of reminders with no times in it does not answer "what reminders do I
+    have", and the due moment is already stored on the record.
+    """
+    context = record.context or {}
+    status = str(context.get("status") or PENDING)
     marker = "x" if status == COMPLETE else " "
-    return f"[{marker}] {record.content} ({record.id})"
+    return f"[{marker}] {record.content}{_due_suffix(context)} ({record.id})"
+
+
+def _due_suffix(context: "dict") -> str:
+    """" - at <moment>" for a timed reminder, "" for an ordinary task."""
+    raw = str(context.get("due_at") or "").strip()
+    if not raw:
+        return ""
+    from datetime import datetime
+
+    try:
+        due_at = datetime.fromisoformat(raw)
+    except ValueError:
+        return f" - due {raw}"
+    return f" - at {due_at.strftime('%H:%M on %A %d %B %Y')}"

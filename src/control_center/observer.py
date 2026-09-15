@@ -674,6 +674,35 @@ class ControlCenter:
             for item in resolved
         )
 
+    def reminders(self) -> tuple[TaskItemView, ...]:
+        """Every pending timed reminder the Manager holds, soonest first.
+
+        A reminder is a task with a due moment (``tasks.build_task_record``),
+        and it is delivered by the proactive check when its moment arrives -
+        but until then it appeared on no Control Center screen at all: the
+        calendar showed calendar items, and a person who had just been told
+        "I'll remind you: take my medicine - at 21:00" could not see it
+        anywhere. Read from the one task store, never a second copy.
+        """
+        memory = self._manager.memory
+        if memory is None:
+            return ()
+        records = [
+            record for record in memory.recall(kind=MemoryCategory.TASK.value, tags={"reminder"}, limit=200)
+            if str((record.context or {}).get("status") or "pending") == "pending"
+            and str((record.context or {}).get("due_at") or "").strip()
+        ]
+        records.sort(key=lambda record: str((record.context or {}).get("due_at") or ""))
+        return tuple(
+            TaskItemView(
+                record_id=record.id,
+                content=record.content,
+                status=str((record.context or {}).get("status") or "pending"),
+                describe=describe_task(record),
+            )
+            for record in records
+        )
+
     def experiences(self) -> tuple[ExperienceView, ...]:
         """The real, current state of every proactive visual experience -
         pending (selected, not yet reached a live frontend) and history

@@ -229,6 +229,11 @@ def check_proactive_events(
     if not fresh:
         return f"proactive events: {len(due)} due today, already reported"
 
+    # Post-Pre-Stage-9: a due reminder also reaches the person when no page is
+    # open - a desktop notification per fresh event, honouring the owner's
+    # governed choice. Delivery is observed, never assumed.
+    notified = _notify_desktop(settings, fresh)
+
     # General Time/Event Awareness + Proactive Visual Experience
     # checkpoint: the identical governed selection+persistence step a
     # live server's own snapshot read already performs
@@ -253,7 +258,30 @@ def check_proactive_events(
         state.remember_opportunity(event.dedup_key, event.label, now)
     state_store.save(state, now)
 
-    return f"proactive events: {len(fresh)} due today -> {path}"
+    note = f", {notified} shown as desktop notifications" if notified else ""
+    return f"proactive events: {len(fresh)} due today -> {path}{note}"
+
+
+def _notify_desktop(settings: Settings, events) -> int:
+    """Show each fresh due event as a desktop notification; how many Windows
+    confirmed delivered. The governed choice ('provider
+    desktop_notification_provider use windows') wins over the environment."""
+    from dataclasses import replace
+
+    from src.providers.desktop_notifier import build_desktop_notifier
+    from src.services.evolution.governed_config import load_governed_config
+
+    choice = load_governed_config().get("provider.desktop_notification_provider") or settings.desktop_notifications
+    try:
+        notifier = build_desktop_notifier(replace(settings, desktop_notifications=choice))
+    except ValueError:
+        return 0
+    shown = 0
+    for event in events:
+        # A ProactiveEvent's label is its person-facing text (a reminder's own words).
+        if notifier.notify("Alfred", str(event.label), tag=str(event.dedup_key)):
+            shown += 1
+    return shown
 
 
 def main(argv: list[str] | None = None) -> int:

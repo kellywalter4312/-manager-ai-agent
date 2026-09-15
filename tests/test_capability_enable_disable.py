@@ -175,19 +175,21 @@ class TestDisablingGenuinelyPreventsRouting:
         result = run_command(new_centre, "what time is it", 80, new_channel, new_conversation)
         assert "current_datetime" in result
 
-    def test_disabling_does_not_take_effect_on_the_still_running_process(self, _isolated_config_file):
-        """The identical, already-established rule every other persisted
-        Control Center change lives under: persisted only, until reload
-        or a restart - proven here so this repair does not silently
-        break that invariant."""
+    def test_disabling_takes_effect_on_the_running_process_at_once(self, _isolated_config_file):
+        """Post-Pre-Stage-9: this used to pin "persisted only, until reload or
+        a restart" - but 'reload' exists only in the terminal loop, so a choice
+        made from the served Control Center never went live until a restart.
+        The governed registry is now applied to the running Manager at once;
+        every start still reads the same persisted choice."""
         runtime, manager, channel, conversation = real_system()
         centre = ControlCenter(runtime, manager)
 
         before = run_command(centre, "what time is it", 80, channel, conversation)
+        assert "current_datetime" in before
         run_capability_registry_command(centre, "disable current_datetime")
         after = run_command(centre, "what time is it", 80, channel, conversation)
-        assert before == after
-        assert "current_datetime" in after
+        assert "current_datetime" not in after
+        assert "It's" not in after
 
     def test_disabling_an_unrelated_capability_leaves_everything_else_reachable(self, _isolated_config_file):
         runtime, manager, channel, conversation = real_system()
