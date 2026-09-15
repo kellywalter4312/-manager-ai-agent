@@ -7,8 +7,9 @@ exists. Every test here exercises the actual computation (git state,
 the static import graph) and checks it against facts about *this*
 repository that are independently known to be true - several of them
 cross-validated against an earlier, differently-derived audit pass in
-this same project, and one (src.agents.manager_agent) against a
-previously-identified, genuinely dead duplicate prototype.
+this same project. The dead duplicate prototype this file once pinned
+(src/agents/manager_agent.py) was proven unreachable and deleted; its tests
+now pin that exactly one Manager implementation exists.
 """
 
 from __future__ import annotations
@@ -150,20 +151,19 @@ class TestDeadDuplicateStalePrototypeIdentification:
         assert report.status_of("src.manager.manager") == "production"
         assert report.status_of("src.manager.capabilities") == "production"
 
-    def test_a_known_dead_duplicate_prototype_is_flagged_unreachable(self):
-        """src/agents/manager_agent.py - an untracked, broken duplicate
-        of the real orchestrator, discovered independently earlier in
-        this project's own audit history. Nothing imports it outside
-        its own file."""
+    def test_the_dead_duplicate_prototype_is_gone_and_nothing_is_unreachable(self):
+        """src/agents/manager_agent.py - a broken duplicate of the real
+        orchestrator nothing imported - was proven dead and deleted rather
+        than kept as a second Manager."""
         report = compute_reachability()
-        assert report.status_of("src.agents.manager_agent") == "unreachable"
+        assert not (REPO_ROOT / "src" / "agents" / "manager_agent.py").exists()
+        assert "src.agents.manager_agent" not in report.production | report.test_only | report.unreachable
+        assert not report.unreachable
 
-    def test_the_duplicate_class_name_is_surfaced_for_a_person_to_review(self):
+    def test_there_is_exactly_one_manager_implementation(self):
         report = compute_reachability()
-        assert "ManagerAgent" in report.duplicate_class_names
-        owners = report.duplicate_class_names["ManagerAgent"]
-        assert "src.agents.manager_agent" in owners
-        assert "src.manager.manager" in owners
+        assert "ManagerAgent" not in report.duplicate_class_names
+        assert report.status_of("src.manager.manager") == "production"
 
     def test_known_prepared_but_unwired_modules_are_flagged_test_only(self):
         """Modules ARCHITECTURE.md's own "Architecturally prepared" table

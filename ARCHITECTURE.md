@@ -9490,5 +9490,16 @@ workspaces; conversation continuity across providers (§52.34).
 | Requirement | Status |
 |---|---|
 | ARCH-01 dead prototype code traced | VERIFIED WORKING - one unreachable module, reported, not deleted (awaiting the owner's decision) |
+
+**Follow-up (owner-approved cleanup, 2026-09-15).**
+
+- ``src/agents/manager_agent.py`` was proven dead before deletion:
+  - nothing imports it;
+  - the import graph marked it unreachable;
+  - its only references were ``tests/test_repository_recovery.py`` pins and this document;
+  - it duplicated routing the real Manager owns.
+
+  It was deleted, and those tests now pin that exactly one ``ManagerAgent`` exists and nothing is unreachable.
+- The three verification fixtures in production connection data were confirmed to be the only entries, all at 127.0.0.1. ``reservablething``, ``fixturesite`` and ``govsite`` were removed through the Control Center's own ``services/sites <name> forget`` commands, after a backup. Only those two files changed.
 | ARCH-01 no duplicate architecture in production | VERIFIED WORKING |
 | DOC-01 this document matches the code | VERIFIED WORKING for every row the Pre-Stage-9 campaigns changed |
