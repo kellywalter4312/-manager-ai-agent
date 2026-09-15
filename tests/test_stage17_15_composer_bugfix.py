@@ -324,8 +324,10 @@ class TestNoOtherBlockingMechanismExists:
         own input already is) - a second safe listener is not the bug
         this test exists to catch, and the count below is updated to
         say so explicitly rather than silently drifting stale."""
+        # Post-Pre-Stage-9: the translate panel's typed-translation input is a
+        # third element-scoped listener, bound to its own input like the other two.
         shell = _shell()
-        assert shell.count('addEventListener("keydown"') == 2
+        assert shell.count('addEventListener("keydown"') == 3
         assert 'input.addEventListener("keydown"' in shell
         assert "document.addEventListener(\"keydown\"" not in shell
         assert "window.addEventListener(\"keydown\"" not in shell

@@ -539,7 +539,8 @@ class TestBuildVideoUnderstanding:
     def test_available_backends(self):
         from src.providers.media.factory import available_video_understanding_backends
 
-        assert available_video_understanding_backends() == ["null", "whisper", "windows"]
+        # Post-Pre-Stage-9: local multilingual recognition for live translation.
+        assert available_video_understanding_backends() == ["local_whisper", "null", "whisper", "windows"]
 
     def test_null_is_the_honest_default(self):
         from src.config.settings import Settings
@@ -658,7 +659,7 @@ class TestVideoUnderstandingProviderCategory:
 
         registry = build_ecosystem_registry(Settings.from_env(env={}))
         adapter = registry.adapter_for("video_understanding_provider")
-        assert {d.key for d in adapter.available()} == {"null", "whisper", "windows"}
+        assert {d.key for d in adapter.available()} == {"local_whisper", "null", "whisper", "windows"}
 
     def test_validate_requires_a_credential_for_whisper_but_not_null(self):
         from src.config.settings import Settings

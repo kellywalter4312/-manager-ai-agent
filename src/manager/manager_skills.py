@@ -97,6 +97,7 @@ class ManagerSkills(BaseAgent):
         governance_log: "GovernanceLog | None" = None,
         assess_governance: "Callable[[Task, Sequence[str]], GovernanceBrainVerdict] | None" = None,
         assist: "Any | None" = None,
+        translate: "Any | None" = None,
     ) -> None:
         """``roster`` supplies the currently registered agents.
 
@@ -161,6 +162,8 @@ class ManagerSkills(BaseAgent):
         self._converse = converse
         # The attributed local assistant (never the reasoning brain).
         self._assist = assist
+        # Universal voice translation: offline translation, bound narrowly.
+        self._translate = translate
         # Files/Documents completion: the identical bound-callable
         # narrowing ``converse`` already has, for real visual reasoning
         # over an image rather than an open-ended text answer. None by
@@ -394,6 +397,12 @@ class ManagerSkills(BaseAgent):
     def capabilities(self) -> dict[str, ManagerCapability]:
         """The handler registry this instance answers from."""
         return dict(self._capabilities)
+
+    def replace_capabilities(self, capabilities: "dict[str, ManagerCapability]") -> None:
+        """Answer from ``capabilities`` from the next request on - how an
+        owner's governed enable/disable goes live in a running session without
+        rebuilding the Manager, its memory or its conversation."""
+        self._capabilities = dict(capabilities)
 
     def claims(self, task: Task) -> bool:
         """Whether one of this Manager's own capabilities recognises
@@ -687,6 +696,7 @@ class ManagerSkills(BaseAgent):
                 governance_log=self._governance_log,
                 assess_governance=self._assess_governance,
                 assist=self._assist,
+                translate=self._translate,
             )
         )
         # Pre-Stage-9 Campaign 10 (CON-04): a pending confirmation or

@@ -465,6 +465,11 @@ class CapabilityRequest:
     # A small local model capabilities may consult, attributed, for what Half
     # Brain cannot do alone - never the Manager's reasoning brain.
     assist: "Any | None" = None
+    # Universal voice translation: offline translation bound narrowly -
+    # ``translate(text, target, source=None)`` returning text, source, target
+    # and route, raising LookupError with a person-facing reason. Deterministic,
+    # so Half Brain translates as well as Full Brain. None when no engine is on.
+    translate: "Any | None" = None
 
     @property
     def knows_the_user(self) -> bool:
@@ -6954,11 +6959,76 @@ def translate_intent(task: Task, participants: Sequence[str] = ()) -> bool:
     return translation_request(task.description) is not None
 
 
+_NAMED_SOURCE = re.compile(r"^(?P<phrase>.+?)\s+from\s+(?P<source>[A-Za-z][A-Za-z\- ]{1,30})\s*$", re.IGNORECASE)
+
+
+_DOCUMENT_PHRASE = re.compile(
+    r"^(?:(?:this|that|the|my)\s+(?:document|file|pdf|page|text|note|notes|handout|letter|book|chapter|"
+    r"spreadsheet|presentation)|it|this|that)$",
+    re.IGNORECASE,
+)
+
+
+def _document_to_translate(request: CapabilityRequest, phrase: str) -> "tuple[bool, tuple[str, str] | None]":
+    """``(points_at_a_document, (title, text) | None)`` - a translation request
+    whose phrase is a document reference translates that document's own words."""
+    if not _DOCUMENT_PHRASE.match(" ".join(str(phrase or "").split())):
+        return False, None
+    found = resolve_content_sources(
+        request.task.description, tools=request.tools, history=request.history,
+        limit=1, fallback_latest=True, shared_files=request.shared_files,
+    )
+    if not found:
+        return True, None
+    described, units = found[0]
+    text = "\n".join(unit.text for unit in units if unit.text.strip())[:8000]
+    if not text.strip():
+        return True, None
+    return True, (str((described or {}).get("title") or "the document"), text)
+
+
 def translate(request: CapabilityRequest) -> TaskResult:
     found = translation_request(request.task.description)
     if found is None:
         return TaskResult.failure(request.task, request.own_name, "Translate what, into which language?")
     phrase, language = found
+    source = None
+    named = _NAMED_SOURCE.match(phrase)
+    if named is not None:
+        phrase = named.group("phrase").strip().strip("'\"\u2018\u2019\u201c\u201d ")
+        source = named.group("source").strip()
+    # Universal content: "translate this document into Spanish" translates the
+    # document's own words, never the words "this document".
+    points_at_document, document = _document_to_translate(request, phrase)
+    if points_at_document and document is None:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "Which document? Share it in this conversation (or name it with 'artifact <id>') and I'll translate it.",
+        )
+    title = None
+    if document is not None:
+        title, phrase = document
+    # Post-Pre-Stage-9: offline translation first - deterministic, so Half Brain
+    # translates as well as Full Brain. The Brain is asked only when no offline
+    # engine can translate this pair.
+    offline_problem = ""
+    if request.translate is not None:
+        try:
+            result = request.translate(phrase, language, source)
+        except LookupError as exc:
+            offline_problem = str(exc)
+        except Exception as exc:  # noqa: BLE001 - an engine failing is reported, never hidden
+            offline_problem = f"offline translation failed ({type(exc).__name__}: {exc})"
+        else:
+            output = f"Translation of '{title}' into {language}:\n\n{result.text}" if title else result.text
+            return TaskResult.success(
+                request.task, request.own_name, output,
+                payload={
+                    "handled_by": "translate", "language": language, "phrase": phrase[:200], "engine": "offline",
+                    **({"document": title} if title else {}),
+                    "source": result.source, "target": result.target, "route": "->".join(result.route),
+                },
+            )
     decision = None
     if request.converse is not None:
         decision = request.converse(
@@ -6969,11 +7039,13 @@ def translate(request: CapabilityRequest) -> TaskResult:
         )
     if decision is None or not decision.is_decided or not decision.reason.strip():
         why = decision.reason if decision is not None else "no reasoning capability is configured"
+        offline = offline_problem or (
+            "offline translation is not enabled (in the Control Center: provider translation_provider use argos)"
+        )
         return TaskResult.failure(
             request.task, request.own_name,
-            f"I can't translate that into {language} right now - translation needs a language model, and I "
-            f"don't have one available ({why}). I won't guess at a translation. Live spoken translation would "
-            "also need speech recognition and a voice for that language, and only English is installed here.",
+            f"I can't translate that into {language} right now - {offline.rstrip('.')}, and no language model "
+            f"is available to do it instead ({why}). I won't guess at a translation.",
         )
     return TaskResult.success(
         request.task, request.own_name, decision.reason.strip(),

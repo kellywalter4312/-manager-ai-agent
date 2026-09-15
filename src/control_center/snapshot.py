@@ -340,6 +340,15 @@ def _conversation(conversation: Any) -> dict[str, Any]:
     }
 
 
+def _translation(runtime: Any) -> dict[str, Any]:
+    """What the interpreter can do right now - languages, hearing, voices.
+    Read from the runtime's own interpreter, never a list here."""
+    interpreter = getattr(runtime, "translation", None)
+    if interpreter is None:
+        return {"available": False, "reason": "translation is not assembled in this session", "languages": []}
+    return interpreter.status()
+
+
 def _speech(channel: Any) -> dict[str, Any]:
     """Whether anything can actually be heard or said.
 
@@ -585,6 +594,8 @@ def snapshot(
         "experience": _experiences(centre.experiences()),
         "conversation": _conversation(conversation),
         "speech": _speech(channel),
+        # Universal voice translation: the interpreter's real state.
+        "translation": _translation(centre.runtime),
         "system": {
             # The assembled product's own version - a different concept
             # from this payload's own "version" key above (SNAPSHOT_VERSION,

@@ -304,6 +304,12 @@ class Runtime:
     # between a provider's own output and the write).
     document_renderer: DocumentRenderer
 
+    # Universal voice translation: one interpreter - offline translation, the
+    # transcription axis's own listener when it can name a spoken language, and
+    # a local multilingual voice - read by the translate capability, the served
+    # page and the Control Center alike. None only for a Runtime built by hand.
+    translation: Any = None
+
     # ------------------------------------------------------------------
     # Named accessors for the one specialist this project ships.
     #
@@ -566,8 +572,20 @@ def build_runtime(
         # docstring).
         document_renderer=build_document_rendering(settings),
     )
+    from dataclasses import replace as _replace
+
+    from src.providers.translation.factory import build_interpreter
+
+    runtime = _replace(runtime, translation=build_interpreter(settings, transcriber=runtime.media.transcriber))
     logger.info("runtime ready: %s", runtime.describe())
     return runtime
+
+
+def translate_for(runtime: Runtime) -> "Any | None":
+    """The interpreter's offline text translation, bound narrowly - None unless
+    a translation engine is really installed and chosen."""
+    interpreter = getattr(runtime, "translation", None)
+    return interpreter.translate_text if interpreter is not None and interpreter.translates else None
 
 
 def build_channel(runtime: Runtime, manager: ManagerAgent) -> Channel:
@@ -834,6 +852,8 @@ def build_manager(
         assess_governance=runtime.manager_brain.assess_governance,
         # The attributed local assistant - off unless the owner chose it.
         assist=build_local_assistant(runtime.settings),
+        # Universal voice translation: offline translation, bound narrowly.
+        translate=translate_for(runtime),
         # Stage 12: the exact same store ManagerAgent itself uses
         # below - never a second memory.
         recall=manager_memory.recall,

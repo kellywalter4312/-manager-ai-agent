@@ -991,7 +991,10 @@ class TestTheNewLayersOwnNothing:
 
     def test_no_new_dependency_was_added(self):
         requirements = (REPO_ROOT / "requirements.txt").read_text(encoding="utf-8").lower()
-        for absent in ("speechrecognition", "pyttsx", "whisper", "pyaudio", "sounddevice"):
+        # "whisper" left post-Pre-Stage-9: faster-whisper is the deliberately
+        # built local listener of live translation; audio capture still happens
+        # in the browser, never through a Python audio library.
+        for absent in ("speechrecognition", "pyttsx", "pyaudio", "sounddevice"):
             assert absent not in requirements, absent
 
     def test_the_new_packages_import_only_the_standard_library(self):

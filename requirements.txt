@@ -72,7 +72,8 @@ websockets>=12.0
 pytest>=8.0
 
 # Optional - local models on this machine (MANAGER_PROVIDER=local,
-# MANAGER_LOCAL_ASSIST=local, offline translation).
+# MANAGER_LOCAL_ASSIST=local, offline translation, local multilingual speech
+# recognition for live translation - MANAGER_VIDEO_UNDERSTANDING=local_whisper).
 # Model files live under data/models (not tracked). llama-cpp-python needs the
 # prebuilt CPU wheel index on Windows:
 #   pip install llama-cpp-python --prefer-binary --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
@@ -80,4 +81,5 @@ pytest>=8.0
 # site-packages that shadows this repository's tests - delete
 # .venv/Lib/site-packages/tests after installing it.
 llama-cpp-python>=0.3
+faster-whisper>=1.0
 argostranslate>=1.9

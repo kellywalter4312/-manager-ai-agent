@@ -108,7 +108,8 @@ class TestTranslation:
         _runtime, _manager, channel, conversation = _build(tmp_path)
         turn = _say(channel, conversation, "translate good morning into French")
         assert turn.capability == "translate" and not turn.succeeded
-        assert "won't guess" in turn.outcome and "only English is installed" in turn.outcome
+        # Post-Pre-Stage-9: offline translation exists; the refusal names where to turn it on.
+        assert "won't guess" in turn.outcome and "translation_provider" in turn.outcome
 
     def test_a_deciding_brain_answer_is_returned_as_the_translation(self, tmp_path):
         from src.manager.brain import BrainAction, BrainDecision

@@ -174,6 +174,19 @@ def _build_video_understanding(
             )
         return WindowsSpeechTranscriptionProvider()
 
+    if provider_name == "local_whisper":
+        # Post-Pre-Stage-9: local, multilingual recognition that names the
+        # language it heard - no vendor, no key, no network. What live
+        # translation listens with.
+        from src.providers.media.local_whisper import LocalWhisperTranscriptionProvider
+
+        if not LocalWhisperTranscriptionProvider.installed():
+            raise ProviderConfigurationError(
+                "The 'local_whisper' video-understanding provider needs faster-whisper and its model at "
+                "data/models/stt/faster-whisper-base. Set MANAGER_VIDEO_UNDERSTANDING=null or windows instead."
+            )
+        return LocalWhisperTranscriptionProvider()
+
     if provider_name == "whisper":
         credential = account.credential if account is not None else _whisper_credential(env)
         if credential is None:
@@ -197,7 +210,7 @@ def available_video_understanding_backends() -> list[str]:
     configured - "null" (honestly unavailable) plus one real,
     credentialed vendor, the identical shape
     ``available_video_generation_backends`` already takes."""
-    return ["null", "whisper", "windows"]
+    return ["local_whisper", "null", "whisper", "windows"]
 
 
 def _build_video_generation(
