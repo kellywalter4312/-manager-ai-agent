@@ -28,7 +28,6 @@ from src.agents.memory_policy import (
     SpecialistMemoryPolicy,
 )
 from src.core.contracts import FINDINGS_KEY, AgentSpec, Task, TaskResult, TaskStatus
-from src.manager.actions import ActionExecutor
 from src.manager.assessor import ContractAssessor
 from src.manager.manager import ManagerAgent
 from src.manager.memory_policy import ManagerMemoryPolicy, MemoryCategory
@@ -675,30 +674,34 @@ class TestMemoriesDoNotLeak:
         assert len(seen) == 1
         assert "memory" not in (seen[0].payload or {})
 
-    def test_specialist_memory_does_not_reach_the_action_layer(self):
-        import src.manager.actions as module
+    def test_the_orchestration_layer_does_not_reach_specialist_memory(self):
+        """The boundary, checked against the canonical orchestration path.
 
-        code = code_of(module)
-        assert ".memory" not in code
-        assert "from src.services.memory" not in code
+        Until 2026-09-15 this was checked against ``src/manager/actions.py``,
+        a staged action layer with no production caller, removed with the rest
+        of that parallel architecture. The property it protected is real and
+        belongs to whatever actually orchestrates - today ``objective_loop``
+        and ``collaboration_entry``."""
+        import src.manager.collaboration_entry as collaboration
+        import src.manager.objective_loop as objective_loop
 
-    def test_the_action_layer_never_touches_specialist_memory(self):
-        from src.manager.brain import BrainAction, BrainDecision
+        for module in (objective_loop, collaboration):
+            code = code_of(module)
+            assert "from src.services.memory" not in code, module.__name__
+            assert ".memory" not in code, module.__name__
+
+    def test_orchestration_never_touches_specialist_memory(self):
+        """Run a real delegation through the canonical path and prove the
+        specialist's own store grew only by its own reflection."""
+        from src.manager.collaboration_entry import answer_with_collaboration
 
         agent = agent_with(ScriptedBrain())
         registry = AgentRegistry()
         registry.register(agent)
         manager = ManagerAgent(registry=registry)
-        executor = ActionExecutor(manager)
 
         before = len(agent.memory)
-        executor.execute(
-            BrainDecision(
-                action=BrainAction.DELEGATE, reason="x", delegate_to="email_agent"
-            ),
-            scan_task(),
-        )
-        # The agent recorded its own reflection, and nothing else touched it.
+        answer_with_collaboration(manager, scan_task())
         assert len(agent.memory) == before + 1
         assert all(r.kind == "domain_lesson" for r in agent.memory.recall(limit=10))
 

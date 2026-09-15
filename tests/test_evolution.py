@@ -469,14 +469,16 @@ class TestIsolationFromEverythingItGoverns:
                 for alias in node.names:
                     assert not alias.name.startswith(forbidden_prefix), (label, alias.name)
 
-    def test_stage_11a_does_not_import_evolution(self):
-        source = (REPO_ROOT / "src" / "extensions.py").read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.Import, ast.ImportFrom)):
-                module = getattr(node, "module", "") or ""
-                names = ", ".join(getattr(n, "name", "") for n in node.names)
-                assert "evolution" not in module and "evolution" not in names
+    def test_stage_11a_is_gone_and_not_replaced_by_another_parallel_ledger(self):
+        """Stage 11.A (``src/extensions.py``) governed the same question this
+        module does - may a declaration be marked active - in its own ledger,
+        with no production caller. It was removed on 2026-09-15 rather than
+        wired in, and nothing may quietly take its place."""
+        assert not (REPO_ROOT / "src" / "extensions.py").exists()
+        governed = {
+            path.name for path in (REPO_ROOT / "src" / "services" / "evolution").glob("*.py")
+        }
+        assert "ecosystem_evolution.py" in governed and "handlers.py" in governed
 
     def test_no_brain_memory_or_voiceprofile_class_is_ever_constructed_here(self):
         source = (REPO_ROOT / "src" / "evolution.py").read_text(encoding="utf-8")

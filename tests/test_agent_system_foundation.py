@@ -219,48 +219,31 @@ class TestTheFullLoopThroughAlreadyWiredMechanisms:
         assert "no matches" in collaboration.contributions[0].content
 
 
-class TestCognitiveLoopRemainsStagedButReal:
-    """The more advanced, Brain-driven action-selection machinery: real,
-    tested, extensible - and, by explicit user decision for this
-    checkpoint, deliberately left unreachable from production. These
-    tests prove "real and reachable-in-principle" without activating it."""
+class TestTheBrainDrivenLoopIsTheCanonicalOne:
+    """This checkpoint left a second, Brain-driven action-selection machinery
+    (``CognitiveLoop``/``ActionExecutor``) staged and deliberately unreachable.
+    On 2026-09-15 it was traced against the canonical architecture and removed
+    rather than activated: ``objective_loop`` already runs the multi-step,
+    Brain-judged loop through ``answer_with_collaboration``, which uses the
+    full ``decide()`` the rest of the system trusts - and the staged pair's own
+    router-concurrence check used the narrower ``diagnose()``. The property
+    that matters is that exactly one such loop exists and it is reachable."""
 
-    def test_cognitive_loop_is_real_and_can_be_constructed_and_run_directly(self):
-        """Proves this is genuine, working code - not documentation, not
-        a stub - reachable the moment a caller deliberately chooses to
-        construct one, exactly as its own module docstring describes."""
-        from src.core.contracts import Task
-        from src.manager.cognitive_loop import CognitiveLoop
-        from src.manager.manager import ManagerAgent
-
-        manager = ManagerAgent()
-        loop = CognitiveLoop(manager)
-        outcome = loop.run(Task(description="do something"))
-        assert outcome.task_id
-        assert outcome.decision is not None
-        assert outcome.action is not None
-
-    def test_it_remains_unreachable_from_any_real_production_entry_point(self):
-        """Re-confirms the standing Trust-in-Stages guarantee this
-        checkpoint was explicitly told to preserve, not lift."""
+    def test_the_staged_duplicate_is_gone(self):
         from scripts.repo_recovery import compute_reachability
 
         report = compute_reachability()
-        assert report.status_of("src.manager.cognitive_loop") != "production"
-        assert report.status_of("src.manager.actions") != "production"
+        every = report.production | report.test_only | report.unreachable
+        assert "src.manager.cognitive_loop" not in every
+        assert "src.manager.actions" not in every
 
-    def test_action_executor_genuinely_refuses_when_the_router_disagrees(self):
-        """Proves the safety property that makes activating this
-        eventually safe: a Brain proposing a delegate nobody else agrees
-        with is refused, never carried out on the model's word alone."""
+    def test_the_canonical_loop_is_production_reachable_and_runs(self):
+        from scripts.repo_recovery import compute_reachability
         from src.core.contracts import Task
-        from src.manager.actions import ActionExecutor, ActionStatus
-        from src.manager.brain import BrainAction, BrainDecision
         from src.manager.manager import ManagerAgent
+        from src.manager.objective_loop import pursue_objective
 
-        manager = ManagerAgent()
-        executor = ActionExecutor(manager)
-        decision = BrainDecision(action=BrainAction.DELEGATE, reason="x", delegate_to="nobody_registered")
-        result = executor.execute(decision, Task(description="do something"))
-        assert result.status is ActionStatus.REFUSED
-        assert not result.executed
+        assert compute_reachability().status_of("src.manager.objective_loop") == "production"
+        outcome = pursue_objective(ManagerAgent(), Task(description="do something"))
+        assert outcome.steps and outcome.steps[0].result is not None
+

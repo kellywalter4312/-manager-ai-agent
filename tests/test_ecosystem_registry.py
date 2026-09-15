@@ -138,17 +138,16 @@ class TestContracts:
         assert not adapter.validate("x").ok
         assert adapter.dependents() == ()
 
-    def test_this_layer_is_structurally_independent_of_stage_11a_11b(self):
-        """CHECK found src/extensions.py (Stage 11.A) and src/evolution.py
-        (Stage 11.B) already govern a related but different question -
-        whether an abstract feature/change *declaration* is approved to
-        be marked active in an immutable ledger, never touching a real
-        provider or credential. This layer answers the complementary,
-        concrete question (what real backends exist, can one genuinely
-        be constructed) - proven structurally independent, not merely by
-        description: neither imports the other."""
+    def test_this_layer_is_structurally_independent_of_the_governed_lifecycle(self):
+        """src/evolution.py (Stage 11.B) governs a related but different
+        question - whether an abstract change *declaration* is approved to be
+        marked active in a ledger, never touching a real provider or
+        credential. This layer answers the complementary, concrete question
+        (what real backends exist, can one genuinely be constructed) - proven
+        structurally independent, not merely by description: neither imports
+        the other. (Stage 11.A's src/extensions.py, which governed the same
+        question in a second unwired ledger, was removed on 2026-09-15.)"""
         import inspect
-        import src.extensions as extensions_module
         import src.evolution as evolution_module
         import src.services.ecosystem.contracts as contracts_module
         import src.services.ecosystem.registry_factory as registry_factory_module
@@ -157,9 +156,7 @@ class TestContracts:
             source = inspect.getsource(module)
             assert "src.extensions" not in source
             assert "src.evolution" not in source
-        for module in (extensions_module, evolution_module):
-            source = inspect.getsource(module)
-            assert "src.services.ecosystem" not in source
+        assert "src.services.ecosystem" not in inspect.getsource(evolution_module)
 
     def test_contracts_module_names_no_specific_vendor_or_category(self):
         """The generic layer must stay generic - Section 2's own

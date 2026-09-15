@@ -51,7 +51,10 @@ from pathlib import Path
 import pytest
 
 from src.core.contracts import Task, TaskResult
-from src.extensions import Extension, ExtensionLedger, deactivate_extension, run_extension_lifecycle
+from src.evolution import RiskLevel
+from src.services.evolution import ecosystem_evolution
+from src.services.evolution.handlers import EvolutionHandler, HandlerResult, register_handler
+from src.services.evolution.inventory import ComponentSnapshot
 from src.manager.capabilities import CapabilityRequest, MANAGER_CAPABILITIES, ManagerCapability, available_capabilities
 
 _NEW_NAME = "future_signal_relay"
@@ -78,14 +81,73 @@ def _capability() -> ManagerCapability:
     )
 
 
-def _extension() -> Extension:
-    return Extension(
-        key=f"capability.{_NEW_NAME}",
-        name="Future Signal Relay (test-only)",
-        kind="capability",
-        version="v1",
-        provides=(_NEW_WORD,),
-    )
+_COMPONENT = f"declaration.{_NEW_NAME}"
+
+
+class _DeclarationHandler(EvolutionHandler):
+    """A component category registered at runtime, standing in for "a feature
+    declaration waiting to be marked active" - the question Stage 11.A's
+    ``src/extensions.py`` used to answer in its own parallel ledger. That
+    module was removed on 2026-09-15 with the rest of the unwired
+    architectures; the canonical governed lifecycle answers it, and
+    ``register_handler`` is how a category it has never heard of joins."""
+
+    def __init__(self):
+        self.marked: "dict[str, str]" = {}
+
+    def applies_to(self, component_id: str) -> bool:
+        return component_id == _COMPONENT
+
+    def initial_version(self, component_id: str) -> str:
+        return "absent"
+
+    def governed_components(self, *, config):
+        return (ComponentSnapshot(
+            component_id=_COMPONENT, category="declaration",
+            label="a declared future capability", version=self.marked.get(_COMPONENT, "absent"),
+        ),)
+
+    def apply(self, proposal, *, context):
+        self.marked[proposal.target] = proposal.proposed_version
+        return HandlerResult(True, f"{proposal.target} is now {proposal.proposed_version}")
+
+    def rollback(self, proposal, *, context):
+        self.marked.pop(proposal.target, None)
+        return HandlerResult(True, f"{proposal.target} is no longer marked active")
+
+
+@pytest.fixture
+def declaration(tmp_path, monkeypatch):
+    """The governed lifecycle, isolated: its own ledger and config, and the
+    handler removed again afterwards."""
+    handler = _DeclarationHandler()
+    register_handler(handler)
+    from src.services.evolution import handlers as handlers_module
+
+    ledger = tmp_path / "state.json"
+
+    def govern(approved: bool, version: str = "v1"):
+        from src.config.settings import Settings
+
+        from src.services.evolution.ledger_store import load_evolution_state
+
+        state = load_evolution_state(ledger)
+        proposed = ecosystem_evolution.propose(
+            state, component_id=_COMPONENT, proposed_version=version,
+            proposed_change="mark the declared capability active",
+            reason="the owner asked for it", expected_benefit="the capability becomes reachable",
+            risk_level=RiskLevel.LOW, ledger_path=ledger,
+        )
+        ran = ecosystem_evolution.run(
+            proposed.state, proposal_id=proposed.proposal.proposal_id, approved=approved,
+            settings=Settings.from_env(env={}, memory="ephemeral"), ledger_path=ledger,
+            accounts_path=tmp_path / "accounts.json", config_path=tmp_path / "config.json",
+            staging_dir=tmp_path / "staging", backups_dir=tmp_path / "backups",
+        )
+        return proposed, ran
+
+    yield handler, govern
+    handlers_module._HANDLERS[:] = [h for h in handlers_module._HANDLERS if h is not handler]
 
 
 def _built(tmp_path, **overrides):
@@ -107,47 +169,45 @@ def _node() -> "str | None":
     return None
 
 
-class TestThe11AApprovalGateIsReal:
-    """Not a mock ledger - the actual src/extensions.py module, exercised
-    against a capability-shaped declaration to answer: can this specific
-    kind of extension ('capability') genuinely pass through it?"""
+class TestTheGovernedApprovalGateIsReal:
+    """Not a mock ledger - the real governed lifecycle, exercised against a
+    declaration-shaped component registered at runtime, to answer: can a
+    category the engine has never heard of genuinely pass through it?"""
 
     def setup_method(self):
         _fixture_is_genuinely_unseen()
 
-    def test_an_unapproved_declaration_never_reaches_active(self):
-        result = run_extension_lifecycle(_extension(), approved=False, ledger=ExtensionLedger())
-        assert result.status.value == "ready"
-        assert not result.applied
-        assert not result.activated
-        assert result.after_ledger.get(_extension().key) is None
+    def test_an_unapproved_declaration_never_reaches_active(self, declaration):
+        handler, govern = declaration
+        _proposed, ran = govern(approved=False)
+        assert not ran.success
+        assert handler.marked == {}
 
-    def test_an_approved_declaration_is_independently_verified_and_activated(self):
-        result = run_extension_lifecycle(_extension(), approved=True, ledger=ExtensionLedger())
-        assert result.applied
-        assert result.verified
-        assert result.activated
-        active = result.after_ledger.get(_extension().key)
-        assert active is not None and active.version == "v1" and active.kind == "capability"
+    def test_an_approved_declaration_is_independently_verified_and_activated(self, declaration):
+        handler, govern = declaration
+        _proposed, ran = govern(approved=True)
+        assert ran.success, ran.reason
+        assert ran.proposal.status.value == "active"
+        assert handler.marked == {_COMPONENT: "v1"}
 
 
 class TestRealRegistrationOnlyFollowsGovernedApproval:
-    """11.A's own docstring: ledger activation never wires the real
-    implementation - that is 'a reviewed, explicit change to a
-    registration point', performed separately. Proven here as an actual
-    two-step sequence rather than described."""
+    """Governed activation never wires the real implementation - that is "a
+    reviewed, explicit change to a registration point", performed separately.
+    Proven as an actual two-step sequence rather than described."""
 
     def setup_method(self):
         _fixture_is_genuinely_unseen()
 
-    def test_the_capability_only_exists_after_both_steps(self):
+    def test_the_capability_only_exists_after_both_steps(self, declaration):
+        _handler, govern = declaration
         before = set(available_capabilities())
 
-        activation = run_extension_lifecycle(_extension(), approved=True, ledger=ExtensionLedger())
-        assert activation.activated
-        # The ledger being ACTIVE changes nothing about what the router
-        # can reach yet - proving the two steps are genuinely separate,
-        # not that step one was a no-op.
+        _proposed, ran = govern(approved=True)
+        assert ran.success
+        # The ledger saying ACTIVE changes nothing about what the router can
+        # reach yet - proving the two steps are genuinely separate, not that
+        # step one was a no-op.
         assert set(available_capabilities()) == before
 
         MANAGER_CAPABILITIES[_NEW_NAME] = _capability()
@@ -172,7 +232,6 @@ class TestTheFullBackendToFrontendChain:
         import scripts.serve_ui as su
         from src.control_center.snapshot import snapshot as build_snapshot
 
-        run_extension_lifecycle(_extension(), approved=True, ledger=ExtensionLedger())
         MANAGER_CAPABILITIES[_NEW_NAME] = _capability()
         try:
             runtime, manager, channel, conversation = _built(tmp_path)
@@ -252,29 +311,36 @@ class TestAgentBoundariesHoldAcrossTheWholeChain:
 class TestRollbackReturnsTheExactPriorState:
     """Section 16's own requirement: not just 'it can be removed' - the
     system after removal must be indistinguishable from before it ever
-    arrived, on both halves (the 11.A ledger and the real registration)."""
+    arrived, on both halves (the governed ledger and the real registration)."""
 
     def setup_method(self):
         _fixture_is_genuinely_unseen()
 
-    def test_removing_both_halves_restores_the_exact_baseline(self, tmp_path):
+    def test_removing_both_halves_restores_the_exact_baseline(self, tmp_path, declaration):
+        handler, govern = declaration
         baseline_capabilities = set(available_capabilities())
-        baseline_ledger = ExtensionLedger()
 
-        activation = run_extension_lifecycle(_extension(), approved=True, ledger=baseline_ledger)
+        proposed, ran = govern(approved=True)
         MANAGER_CAPABILITIES[_NEW_NAME] = _capability()
 
         # Sanity: it really changed something, so removal is a genuine
         # rollback rather than a no-op that was never testing anything.
         assert set(available_capabilities()) != baseline_capabilities
-        assert activation.after_ledger.get(_extension().key) is not None
+        assert handler.marked == {_COMPONENT: "v1"}
 
         del MANAGER_CAPABILITIES[_NEW_NAME]
-        rolled_back_ledger = deactivate_extension(_extension().key, ledger=activation.after_ledger)
+        from src.config.settings import Settings
 
+        rolled = ecosystem_evolution.rollback(
+            ran.state, proposal_id=proposed.proposal.proposal_id, approved=True,
+            settings=Settings.from_env(env={}, memory="ephemeral"),
+            ledger_path=tmp_path / "state.json", accounts_path=tmp_path / "accounts.json",
+            config_path=tmp_path / "config.json", staging_dir=tmp_path / "staging",
+            backups_dir=tmp_path / "backups",
+        )
+        assert rolled.success, rolled.reason
         assert set(available_capabilities()) == baseline_capabilities
-        assert rolled_back_ledger.get(_extension().key) is None
-        assert rolled_back_ledger == baseline_ledger
+        assert handler.marked == {}
 
         runtime, manager, channel, conversation = _built(tmp_path)
         result = manager.handle_task(Task(description=f"run {_NEW_WORD} diagnostics"))

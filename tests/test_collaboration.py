@@ -490,8 +490,10 @@ class TestIsolationFromLaterStages:
                 assert "extensions" not in module and "extensions" not in names
                 assert "evolution" not in module and "evolution" not in names
 
-    def test_extensions_and_evolution_do_not_import_collaboration(self):
-        for relative in ("src/extensions.py", "src/evolution.py"):
+    def test_the_governed_lifecycle_does_not_import_collaboration(self):
+        # src/extensions.py (Stage 11.A) was removed on 2026-09-15 as a
+        # parallel, unwired governance architecture.
+        for relative in ("src/evolution.py", "src/services/evolution/handlers.py"):
             source = (REPO_ROOT / relative).read_text(encoding="utf-8")
             assert "collaboration" not in source
 

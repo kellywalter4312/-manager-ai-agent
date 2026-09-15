@@ -570,7 +570,11 @@ class TestProviderIndependenceOfThisPhasesChanges:
 class TestEvolutionCompatibility:
     def test_no_evolution_or_extensions_file_references_this_phases_additions(self):
         for rel in (
-            "src/evolution.py", "src/extensions.py", "src/upgrade_lifecycle.py",
+            # src/extensions.py (Stage 11.A) was removed on 2026-09-15 as a
+            # parallel, unwired governance architecture; the governed
+            # lifecycle these checks care about lives in src/evolution.py
+            # and src/services/evolution/.
+            "src/evolution.py", "src/services/evolution/handlers.py", "src/upgrade_lifecycle.py",
             "src/upgrade_executor.py", "src/control_center/upgrade_planner.py",
         ):
             text = (REPO_ROOT / rel).read_text("utf-8")

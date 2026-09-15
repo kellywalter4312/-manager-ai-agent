@@ -449,37 +449,17 @@ class TestGovernanceIsPreservedPerStep:
         assert "ActionExecutor" not in imported_modules
 
 
-class TestCognitiveLoopRemainsStagedAndUntouched:
-    """Re-confirms the standing Trust-in-Stages guarantee this checkpoint
-    was explicitly told to preserve - this checkpoint's own new
-    machinery does not depend on, activate, or modify it in any way."""
+class TestTheDiagnoseVsDecideGapThatDecidedTheArchitecture:
+    """The gap CHECK found in the then-staged CognitiveLoop/ActionExecutor:
+    their router-concurrence check used manager.diagnose() (the bare
+    capability router), which - unlike manager.decide(), what the rest of the
+    system actually trusts - has no notion of the Manager's own shape-based
+    capability claims or of being the default owner of unclaimed work.
 
-    def test_it_still_cannot_be_reached_from_any_production_entry_point(self):
-        from scripts.repo_recovery import compute_reachability
-
-        report = compute_reachability()
-        assert report.status_of("src.manager.cognitive_loop") != "production"
-        assert report.status_of("src.manager.actions") != "production"
-
-    def test_it_still_constructs_and_runs_directly_unchanged(self):
-        from src.manager.cognitive_loop import CognitiveLoop
-
-        loop = CognitiveLoop(ManagerAgent())
-        outcome = loop.run(Task(description="do something"))
-        assert outcome.task_id
-
-
-class TestTheDiagnoseVsDecideGapCognitiveLoopWouldHaveInherited:
-    """Documents, rather than fixes, a genuine gap CHECK found in the
-    still-staged CognitiveLoop/ActionExecutor: HANDLE_SELF's Router-
-    concurrence check uses manager.diagnose() (the bare capability
-    router), which - unlike manager.decide(), what the rest of the
-    system actually trusts - has no notion of the Manager's own
-    shape-based capability claims or of being the default owner of
-    unclaimed work. Left exactly as found: this checkpoint's own design
-    does not use CognitiveLoop and so does not need this fixed, and
-    fixing it would mean editing a component Trust-in-Stages keeps
-    deliberately unreachable, for no benefit this checkpoint requires."""
+    That gap is why this checkpoint used ``answer_with_collaboration``
+    instead, and why on 2026-09-15 the staged pair was removed rather than
+    activated. The difference between the two routing questions is real and
+    still worth holding, so it is still proven here."""
 
     def test_diagnose_and_decide_disagree_for_ordinary_novel_wording(self):
         _, manager, _, _ = real_system()

@@ -165,32 +165,47 @@ class TestDeadDuplicateStalePrototypeIdentification:
         assert "ManagerAgent" not in report.duplicate_class_names
         assert report.status_of("src.manager.manager") == "production"
 
-    def test_known_prepared_but_unwired_modules_are_flagged_test_only(self):
-        """Modules ARCHITECTURE.md's own "Architecturally prepared" table
-        already names as real, tested, and never given a production
-        caller - confirmed here by the actual import graph, not by
-        trusting that table.
+    def test_no_module_is_left_prepared_but_unwired(self):
+        """ARCHITECTURE.md's own "Architecturally prepared" table used to name
+        modules that were real, tested, and had never been given a production
+        caller. On 2026-09-15 each was traced against the canonical
+        architecture and resolved rather than left parallel:
 
-        Full Alfred OS Ecosystem Evolution (52.28) gave ``src.evolution``
-        and ``src.upgrade_lifecycle`` (and, transitively,
-        ``src.control_center.manifest``/``upgrade_planner``/
-        ``src.upgrade_executor``) their first real production caller -
-        ``scripts/control_center.py``'s new ``ecosystem`` command - so
-        they are correctly no longer "test_only" and are removed from
-        this list rather than the check being weakened. ``src.extensions``
-        (Stage 11.A, "a new capability arriving") was deliberately left
-        untouched by that checkpoint and remains genuinely test_only.
-        """
+            src.agents.loop              removed - no production brain ever
+                                         implemented its ToolUsingBrain
+                                         contract; the canonical bounded
+                                         multi-step loop is objective_loop
+            src.manager.cognitive_loop   removed - objective_loop's own
+            src.manager.actions          docstring already recorded why they
+                                         were not activated (diagnose() is
+                                         narrower than the decide() the rest
+                                         of the system trusts)
+            src.channels.modality        removed - superseded by the artifact
+                                         store's real content_kind
+            src.extensions               removed - a second governance ledger
+                                         for the question src/evolution.py
+                                         and src/services/evolution/ answer
+            credentials.validation       MIGRATED to credentials.authorization
+                                         and wired to 'provider <category>
+                                         check' - the one live credential
+                                         question the ecosystem registry's
+                                         construction-only validate cannot
+                                         answer
+
+        The invariant that replaces the old list is stronger and needs no
+        maintenance: nothing in src/ is reachable from tests alone."""
         report = compute_reachability()
-        for module in (
-            "src.extensions",
-            "src.manager.cognitive_loop",
-            "src.manager.actions",
-            "src.agents.loop",
+        assert report.test_only == set(), sorted(report.test_only)
+        assert report.unreachable == set(), sorted(report.unreachable)
+        for gone in (
+            "src.extensions", "src.manager.cognitive_loop", "src.manager.actions",
+            "src.agents.loop", "src.channels.modality", "src.services.credentials.validation",
         ):
-            assert report.status_of(module) == "test_only", module
+            assert gone not in report.production | report.test_only | report.unreachable, gone
+            assert not (REPO_ROOT / (gone.replace(".", "/") + ".py")).exists(), gone
 
-        for module in ("src.evolution", "src.upgrade_lifecycle"):
+        for module in ("src.evolution", "src.upgrade_lifecycle", "src.manager.objective_loop",
+                       "src.services.credentials.authorization"):
             assert report.status_of(module) == "production", module
 
     def test_classification_genuinely_depends_on_the_entry_points(self):
