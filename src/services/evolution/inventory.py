@@ -240,7 +240,40 @@ def _surface_components(manager, config) -> tuple[ComponentSnapshot, ...]:
                     version=SURFACE_IMPLEMENTED if descriptor.can_render(kind) else SURFACE_PLANNED,
                 )
             )
+        # A withdrawn surface is genuinely gone from the descriptor - that is
+        # what withdrawing one means - but it must still be *visible* here.
+        # The inventory is the only place the owner can see a component in
+        # order to propose against it, so a surface that vanished the moment
+        # it was withdrawn could never be granted back: it was governable in
+        # one direction only. Listed as withdrawn, "grant it back" is the same
+        # propose/run it always was.
+        result.extend(_withdrawn_surface_components(descriptor, config.values))
     return tuple(result)
+
+
+def _withdrawn_surface_components(descriptor, values) -> "tuple[ComponentSnapshot, ...]":
+    """Every surface this agent has had withdrawn through governance, still
+    listed - so the owner can see one and grant it back."""
+    from src.control_center.interfaces import (
+        SURFACE_COMPONENT_PREFIX, SURFACE_WITHDRAWN, SurfaceKind, surface_agent_key,
+    )
+
+    prefix = f"{SURFACE_COMPONENT_PREFIX}{surface_agent_key(descriptor.agent)}."
+    out = []
+    for component_id, state in sorted((values or {}).items()):
+        if not str(component_id).startswith(prefix) or state != SURFACE_WITHDRAWN:
+            continue
+        try:
+            kind = SurfaceKind(str(component_id)[len(prefix):])
+        except ValueError:
+            continue
+        out.append(ComponentSnapshot(
+            component_id=str(component_id),
+            category="surface",
+            label=f"{descriptor.display_name}: {kind} (withdrawn - grant it back with 'ecosystem {component_id} propose implemented ...')",
+            version=SURFACE_WITHDRAWN,
+        ))
+    return tuple(out)
 
 
 def _brain_components(settings: Settings) -> tuple[ComponentSnapshot, ...]:

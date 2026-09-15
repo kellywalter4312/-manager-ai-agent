@@ -47,7 +47,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from scripts.exchange import exchange, memory_for  # noqa: E402
+from scripts.exchange import exchange, memory_for, record_shared_file  # noqa: E402
 from src.services.audit.action_log import (  # noqa: E402
     DEFAULT_ACTION_LOG_PATH,
     ActionLogEntry,
@@ -66,6 +66,7 @@ from src.agents.tools.live_information import LiveInformationTool  # noqa: E402
 from src.agents.tools.web_search import WebSearchTool  # noqa: E402
 from src.agents.tools.document_generation import DocumentGenerationTool  # noqa: E402
 from src.agents.tools.artifact_production import ArtifactProductionTool  # noqa: E402
+from src.agents.tools.code_assistant import CodeAssistantTool  # noqa: E402
 from src.services.artifacts.content import SHARED_FILE_PREFIX, artifact_ids_in, read_artifact_units  # noqa: E402
 from src.composition import reasoning_settings_fields, rebind_reasoning  # noqa: E402
 from src.services.artifacts.delivery import available_delivery_methods  # noqa: E402
@@ -103,7 +104,7 @@ from src.conversation.conversation import Conversation  # noqa: E402
 from src.providers.connection import AuthorizationState, Connection  # noqa: E402
 from src.providers.connection_resolver import ConnectionResolver  # noqa: E402
 from src.providers.connection_factory import build_connection  # noqa: E402
-from src.providers.factory import ProviderConfigurationError, available_providers  # noqa: E402
+from src.providers.factory import ProviderConfigurationError, available_providers, build_provider  # noqa: E402
 from src.providers.media.factory import (  # noqa: E402
     available_video_generation_backends,
     available_video_understanding_backends,
@@ -111,6 +112,7 @@ from src.providers.media.factory import (  # noqa: E402
 from src.providers.speech_factory import available_speech_providers  # noqa: E402
 from src.manager.cognition import assess_manager  # noqa: E402
 from src.services.credentials.account import ProviderAccount  # noqa: E402
+from src.services.credentials.authorization import check_authorization  # noqa: E402
 from src.services.credentials.account_store_file import (  # noqa: E402
     DEFAULT_ACCOUNTS_PATH,
     load_credential_store,
@@ -243,7 +245,16 @@ HELP = """
   provider <category> revoke <backend> <account-id>
                            remove an account immediately
   provider <category> validate <key> [credential]
-                           attempt real construction, report honestly
+                           attempt real construction, report honestly -
+                           no live external call is ever made
+  provider llm_provider check <backend> [account-id]
+                           ask the vendor whether that credential actually
+                           works, by making one real request with it. The
+                           only check that can answer "is my key funded and
+                           accepted?" - so it leaves the machine, needs an
+                           explicit confirmation, and is recorded in the
+                           durable action log. Reports whether the vendor was
+                           reached at all, separately from whether it said yes.
 
   Accounts are keyed by backend (e.g. 'anthropic', 'runway', 'null'),
   never by category - the same key build_provider/build_media/
@@ -514,6 +525,8 @@ GOVERNED_BACKEND_FIELDS = {
     "media": "media",
     "image_generation_provider": "image_generation",
     "local_assist_provider": "local_assist",
+    "translation_provider": "translation",
+    "desktop_notification_provider": "desktop_notifications",
     "avatar_provider": "avatar_provider",
     "environment_provider": "environment_provider",
     "knowledge_provider": "knowledge_provider",
@@ -546,6 +559,34 @@ def governed_reasoning_settings(settings: Settings, config) -> Settings:
         if (value := config.get(component_id)) and value != getattr(settings, field_name)
     }
     return replace(settings, **overrides) if overrides else settings
+
+
+def _reasoning_mode_note(settings: Settings, backend: str) -> str:
+    """What the *other* reasoning axis is doing, said out loud.
+
+    Which vendor answers (``provider.llm_provider``) and whether the Manager
+    reasons with it at all (``brain.manager``) are deliberately separate -
+    a vendor alone never turns reasoning on. That separation is right, but
+    silence about it was not: "Switched the reasoning provider to 'local'
+    live" read as "Alfred now reasons through local", while every request
+    still answered "no reasoning capability is configured" and nothing on
+    the screen explained why. Neither half is changed here - only whether
+    the person is told which of the two switches is still where it was.
+    """
+    if settings.brain == "null" and backend.strip().lower() != "null":
+        return (
+            f" Note: the Manager's own reasoning mode is still 'null', so Alfred keeps reasoning "
+            f"deterministically (Half Brain) and this backend answers nothing yet. Turn reasoning on with: "
+            "ecosystem brain.manager propose llm low <reason>|<benefit>, then 'ecosystem brain.manager run "
+            "<proposal-id> yes'."
+        )
+    if settings.brain != "null" and backend.strip().lower() == "null":
+        return (
+            f" Note: the Manager's reasoning mode is still '{settings.brain}', but with no vendor behind it "
+            "every reasoning request now fails honestly. Set it back to 'null' with 'ecosystem brain.manager "
+            "propose null ...' to return to deterministic Half Brain answers."
+        )
+    return ""
 
 
 def _apply_reasoning_live(centre: "ControlCenter", store) -> str:
@@ -586,6 +627,26 @@ def _new_family_member(components, component_id: str):
         component_id=component_id, category=sibling.category,
         label=f"{member} (not declared yet)", version=initial,
     )
+
+
+def render_translation(interpreter) -> str:
+    """The interpreter's real, current state, for a terminal or the served page."""
+    if interpreter is None:
+        return "TRANSLATION\n\n  Not assembled in this session."
+    status = interpreter.status()
+    lines = ["TRANSLATION", ""]
+    lines.append(f"  engine:   {status['provider'] or 'none'}" + ("" if status["available"] else f" - {status['reason']}"))
+    lines.append(f"  hearing:  {status['listener'] or 'none'}" + ("" if status["listens"] else f" - {status['listening_reason']}"))
+    lines.append(f"  voice:    {status['voice'] or 'device voices only'}")
+    lines.append("")
+    for language in status["languages"]:
+        translates = "translate" if language["translatable"] else "-"
+        speaks = "local voice" if language["speakable"] else ("device voice" if language["translatable"] else "-")
+        lines.append(f"  {language['name']:<11} {language['code']:<3} {translates:<10} {speaks}")
+    if status["pairs"]:
+        lines.append("")
+        lines.append("  installed packs: " + ", ".join(status["pairs"]))
+    return "\n".join(lines)
 
 
 def run_workspace_types_command(centre: "ControlCenter", agent_name: str, action: str, type_id: str) -> str:
@@ -706,8 +767,8 @@ def build(settings: Settings):
         # provider under the tool name general_assistance's own "research"
         # GeneralCapability already names, so a real, governed research path
         # exists with no new backend and no change to that capability's own
-        # routing. "code_assistant" remains unfilled on purpose; this is a
-        # different, genuinely real capability.
+        # routing. "code_assistant" is filled post-Pre-Stage-9 by
+        # CodeAssistantTool below (it saves written code; it never writes it).
         #
         # Stage 15 granted only CommunicationReadTool here - deliberately,
         # while send/call had no confirmation gate at all, so "a Brain
@@ -815,6 +876,10 @@ def build(settings: Settings):
                 runtime.artifacts, runtime.document_renderer, runtime.media.illustrator,
                 owner_agent=runtime.identity.name,
             ),
+            # Post-Pre-Stage-9: fills the code_assistant extension point -
+            # written code saved as a versioned artifact in the coding
+            # workspace. Never writes or runs code itself.
+            CodeAssistantTool(runtime.artifacts, owner_agent=runtime.identity.name),
             # Files/Documents completion: real visual reasoning reaches
             # Alfred through the Brain's own analyze_image question
             # (bound below via ManagerSkills, exactly like converse) -
@@ -1200,6 +1265,16 @@ def run_capability_registry_command(centre: "ControlCenter", rest: str) -> str:
             return f"FAILED: wrote the enabled state for '{name}', but the independent re-read still reports it disabled"
 
         verb_past = "disabled" if args[0] == "disable" else "enabled"
+        # Post-Pre-Stage-9: live at once in this running session - 'reload'
+        # exists only in the terminal loop, so a choice made from the served
+        # Control Center otherwise waited for a restart.
+        own_skills = getattr(centre.manager, "own_skills", None)
+        if own_skills is not None and hasattr(own_skills, "replace_capabilities"):
+            own_skills.replace_capabilities(filtered_manager_capabilities(reloaded))
+            return (
+                f"'{name}' is now {verb_past} (independently re-read from disk) and live in this session now - "
+                "every start uses the same choice."
+            )
         return (
             f"'{name}' is now {verb_past} (independently re-read from disk). "
             "Persisted only - not yet active on this running process. "
@@ -1377,7 +1452,7 @@ def run_provider_command(centre: "ControlCenter", rest: str) -> str:
         return (
             f"Switched the reasoning provider from '{previous}' to '{backend}' live - the same "
             "conversation, memory, identity and specialists continue. Saved as the choice every "
-            "future start uses."
+            "future start uses." + _reasoning_mode_note(governed, backend)
         )
 
     if action == "validate":
@@ -1393,7 +1468,51 @@ def run_provider_command(centre: "ControlCenter", rest: str) -> str:
         )
         return detail
 
-    return f"unknown provider action '{action}'. Try: accounts, add, select, revoke, use, validate"
+    if action == "check":
+        # The question 'validate' above deliberately cannot answer: would the
+        # vendor actually accept this credential? Only the real request proves
+        # that, so this makes exactly one - which is why it is a confirmed,
+        # audited administrative write and never happens on its own.
+        if category != LLM_CATEGORY:
+            return (
+                f"'check' asks a vendor whether a credential works, which only applies to "
+                f"'{LLM_CATEGORY}' today - '{category}' has no completion call to prove one with. "
+                f"Use 'provider {category} validate <backend>' for real construction instead."
+            )
+        if not action_args:
+            return f"usage: provider {category} check <backend> [account-id]"
+        backend = action_args[0]
+        backend_error = _require_backend(adapter, category, backend)
+        if backend_error:
+            return backend_error
+        account_id = action_args[1] if len(action_args) > 1 else None
+        if account_id is not None:
+            account = next((a for a in store.accounts_for(backend) if a.account_id == account_id), None)
+        else:
+            account = store.active(backend)
+        if account is None:
+            known = ", ".join(a.account_id for a in store.accounts_for(backend)) or "none"
+            return (
+                f"no {'account ' + account_id if account_id else 'active account'} for '{backend}' "
+                f"to check (registered: {known}). Add one with "
+                f"'provider {category} add {backend} <account-id> <credential>'."
+            )
+        try:
+            provider = build_provider(
+                replace(centre.runtime.settings, provider=backend), account=account
+            )
+        except (ProviderConfigurationError, ValueError) as exc:
+            return f"FAILED: could not build '{backend}' from that account: {exc}. Nothing was sent."
+        outcome = check_authorization(provider)
+        where = "the vendor answered" if outcome.reached_vendor else "the vendor was never reached"
+        return (
+            f"{'AUTHORIZED' if outcome.authorized else 'NOT AUTHORIZED'}: "
+            f"{backend}/{account.account_id} - {where}. {outcome.reason}\n"
+            "(A real request was made to the vendor. This is LIVE EXTERNAL VERIFIED evidence "
+            "when it reached them, and an honest 'never reached' when it did not.)"
+        )
+
+    return f"unknown provider action '{action}'. Try: accounts, add, select, revoke, use, validate, check"
 
 
 # ---------------------------------------------------------------------------
@@ -2354,6 +2473,15 @@ def classify_administrative_write(command: str) -> "tuple[bool, str]":
     if verb == "capabilities" and len(parts) >= 3 and parts[1].lower() in ("enable", "disable"):
         return True, f"{parts[1].lower()} the '{parts[2]}' capability"
 
+    if verb == "provider" and len(parts) >= 4 and parts[2].lower() == "check":
+        # The one provider action that leaves the machine: it asks the vendor
+        # to authorise a real request. Confirmed and audited like every other
+        # outward action, never run as a side effect of looking at a screen.
+        return True, (
+            f"send one real request to '{parts[3]}' to find out whether that credential is "
+            "accepted (this leaves the machine and a metered vendor may charge for it)"
+        )
+
     if verb == "provider" and len(parts) >= 3 and parts[2].lower() in ("add", "select", "revoke", "use"):
         category, action = parts[1], parts[2].lower()
         if action == "use" and len(parts) >= 4:
@@ -2455,7 +2583,28 @@ def _administrative_write_succeeded(verb: str, result: str) -> bool:
     """
     text = result.strip()
     if verb == "provider":
-        return text.startswith("added ") or " is now active." in text or text.startswith("revoked ")
+        # 'provider <category> use <backend>' (Campaign 4/8) arrived after this
+        # whitelist was written and has its own two success sentences - the
+        # live reasoning rebind, and the saved-for-next-start form every other
+        # governed backend category returns. Without them a switch that really
+        # happened was recorded in the durable audit trail as `failed`, which
+        # is the audit being wrong in the one direction that matters: it made
+        # a real change to the running system look like a no-op.
+        return (
+            text.startswith("added ")
+            or " is now active." in text
+            or text.startswith("revoked ")
+            or text.startswith("Switched the reasoning provider ")
+            or (text.startswith("Saved: ") and " now uses " in text)
+            # 'check' asked a vendor and got an answer - both outcomes are the
+            # write succeeding; only never reaching them is a failure.
+            or text.startswith("AUTHORIZED:")
+            or (text.startswith("NOT AUTHORIZED:") and "the vendor answered" in text)
+        )
+    if verb == "workspace":
+        # run_workspace_types_command returns early, with no "Saved", for
+        # every refusal (unknown agent, unknown type, nothing to change).
+        return " Saved - " in text
     if verb == "connections":
         return text.startswith("connected ") or text.startswith("disconnected ")
     if verb in ("services", "sites"):
@@ -2597,7 +2746,7 @@ def run_command(
         # current calendar state - never decorative. Read-only, like
         # every other view here: adding/cancelling/rescheduling happens
         # through ordinary conversation, not from this screen.
-        return render_calendar(centre.calendar_items(), columns)
+        return render_calendar(centre.calendar_items(), columns, reminders=centre.reminders())
 
     if verb == "experience":
         # General Time/Event Awareness + Proactive Visual Experience
@@ -2615,7 +2764,13 @@ def run_command(
         # is open, is the owner's choice here - saved in the governed config.
         parts_rest = rest.split()
         if len(parts_rest) >= 3 and parts_rest[1].lower() in ("add", "remove", "use"):
-            return run_workspace_types_command(centre, parts_rest[0], parts_rest[1].lower(), parts_rest[2])
+            result = run_workspace_types_command(centre, parts_rest[0], parts_rest[1].lower(), parts_rest[2])
+            # Confirmed over HTTP like every other administrative write
+            # (classify_administrative_write names it), so it belongs in the
+            # durable trail for the same reason - it changes what the owner's
+            # agents offer, across restarts.
+            _record_if_administrative_write(command, result, action_log_path)
+            return result
         return render_workspaces(centre.workspaces(), columns, governed=centre.governed_values())
 
     if verb == "tasks":
@@ -2654,6 +2809,13 @@ def run_command(
         if not include_complete:
             lines.append(f"  (type 'tasks {view.name} all' to include completed tasks)")
         return "\n".join(lines)
+
+    if verb == "translation":
+        # Universal voice translation: what is installed and switched on - the
+        # engine, the listener, the voice, and every language with whether it
+        # can be translated and spoken. Read-only; choosing the engine is
+        # 'provider translation_provider use <backend>'.
+        return render_translation(getattr(centre.runtime, "translation", None))
 
     if verb == "recordings":
         # Real Audio Recording/Capture checkpoint: read-only state
@@ -2715,9 +2877,32 @@ def run_command(
             units = read_artifact_units(added)
             readable = f"{len(units)} readable unit(s)" if units else "no readable text"
             state = "added" if created else "already present (identical content)"
+            # The share belongs in the room, because in a terminal session this
+            # *is* the room: the next line typed here is the person's next line
+            # in the same conversation. Without this the file was registered
+            # and then invisible to every capability that resolves "this file"
+            # - "read this file to me" answered "share one (attach it in the
+            # conversation or add it in the Control Center)" to the person who
+            # had just done exactly that. The served page's own Control Center
+            # panel is deliberately different (serve_ui.route_upload: added
+            # there, nothing is said in the room) - that upload has no
+            # conversation in front of it to be part of.
+            kind = added.latest.metadata.get("content_kind", "other")
+            shared = record_shared_file(
+                conversation,
+                description=(
+                    f"{SHARED_FILE_PREFIX} {added.latest.title} "
+                    f"(artifact {added.artifact_id}, {kind}, {readable})"
+                ),
+                addressed=owner,
+            )
+            pointer = (
+                "ask Alfred about it - \"read this file to me\", \"what does this file say\""
+                if shared else f"ask Alfred about it with 'artifact {added.artifact_id}'"
+            )
             return (
                 f"{state}: {added.artifact_id} [{added.type}] {added.latest.title!r} "
-                f"owner={owner} ({readable}) - ask Alfred about it, or 'artifacts {added.artifact_id}'"
+                f"owner={owner} ({readable}) - {pointer}, or 'artifacts {added.artifact_id}'"
             )
 
         artifacts = centre.runtime.artifacts.all()

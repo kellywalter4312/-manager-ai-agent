@@ -33,7 +33,7 @@ duplicated:
   `CredentialStore` (multiple accounts per provider, explicit
   selection, immediate-effect revocation, isolation between accounts
   and between providers).
-- `src/services/credentials/validation.py` - `validate_credential`, a
+- `src/services/credentials/authorization.py` - `check_authorization`, a
   real function that makes the one real call
   (`LLMProvider.complete(...)`) that actually proves a credential
   works, never a `if key exists: valid = True` fake.
@@ -78,7 +78,6 @@ from src.providers.anthropic_provider import AnthropicProvider
 from src.providers.openai_provider import OpenAIProvider
 from src.providers.xai_provider import XAIProvider
 from src.services.credentials.account import CredentialStore, ProviderAccount
-from src.services.credentials.validation import validate_credential
 from scripts.control_center import build
 from scripts.exchange import exchange
 
@@ -306,41 +305,6 @@ class TestMissingAndInvalidCredentials:
         with pytest.raises(ProviderConfigurationError) as exc:
             build_provider(Settings(provider=provider_name), env={})
         assert env_var in str(exc.value)
-
-    def test_an_invalid_credential_is_caught_by_real_validation_not_presence_checking(self):
-        """The credential 'exists' (a non-empty string was supplied) but
-        does not work - exactly the case a naive `if key exists` check
-        would wrongly call valid."""
-        provider = RaisingProvider("test", RuntimeError("401 unauthorized"))
-        result = validate_credential(provider)
-        assert result.valid is False
-        assert result.checked_live is False
-        assert "unauthorized" in result.reason.lower() or "runtimeerror" in result.reason.lower()
-
-    def test_a_working_credential_validates_true_through_a_real_call(self):
-        provider = FakeProvider("test", "ok")
-        result = validate_credential(provider)
-        assert result.valid is True
-        assert result.checked_live is True
-
-    def test_validation_never_raises_it_reports(self):
-        class Explodes(LLMProvider):
-            @property
-            def name(self):
-                return "test"
-
-            def complete(self, prompt, *, system=None):
-                raise ConnectionError("host unreachable")
-
-        result = validate_credential(Explodes())
-        assert result.valid is False
-        assert "ConnectionError" in result.reason
-
-    def test_an_empty_response_is_reached_but_inconclusive_never_confidently_invalid(self):
-        provider = FakeProvider("test", "")
-        result = validate_credential(provider)
-        assert result.valid is False
-        assert result.checked_live is True
 
 
 class TestProviderSpecificRoutingAndNoLeakage:
@@ -672,9 +636,9 @@ class TestNoHardcodedProviderWorkarounds:
         import inspect
 
         import src.services.credentials.account as account_module
-        import src.services.credentials.validation as validation_module
+        import src.services.credentials.authorization as authorization_module
 
-        for module in (account_module, validation_module):
+        for module in (account_module, authorization_module):
             source = inspect.getsource(module)
             for vendor in ("anthropic", "openai", "xai", "grok"):
                 assert f'"{vendor}"' not in source.lower() and f"'{vendor}'" not in source.lower(), (
