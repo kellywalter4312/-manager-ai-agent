@@ -208,6 +208,24 @@ def _build_xai(
     return XAIProvider(model=model, api_key=credential)
 
 
+def _build_local(
+    settings: Settings,
+    env: Mapping[str, str] | None = None,
+    account: ProviderAccount | None = None,
+) -> LLMProvider:
+    """Build the local model provider. No credential exists or is asked for;
+    a missing model file is reported when the model is first used, the same
+    honest, lazy boundary every other provider keeps."""
+    from src.providers.local_llm_provider import LocalLLMProvider
+
+    model_path = (account.model if account is not None and account.model else None) or settings.local_model_path
+    return LocalLLMProvider(
+        model_path=model_path,
+        vision_model_path=settings.local_vision_model_path,
+        vision_projector_path=settings.local_vision_projector_path,
+    )
+
+
 # Values are factory callables rather than instances, so a provider is only
 # constructed when it is actually selected. An entry that needs a credential
 # therefore does nothing - and demands nothing - unless chosen. Each takes
@@ -220,6 +238,8 @@ _BUILDERS: dict[
     "anthropic": _build_anthropic,
     "openai": _build_openai,
     "xai": _build_xai,
+    # A small model on this machine - no key, no network at inference time.
+    "local": _build_local,
 }
 
 

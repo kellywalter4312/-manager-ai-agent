@@ -60,6 +60,8 @@ from src.providers.availability import Availability, availability_of
 # reason coherence.py does it: asking the provider registry would couple this
 # observer to the thing it observes.
 NO_MODEL = "null"
+# The provider name of a model running on this machine (llama.cpp).
+LOCAL_MODEL_PROVIDER = "local"
 
 # How far to follow nested routers looking for a provider. FallbackRouter holds
 # a primary which may itself be composite; the bound stops a cyclic or
@@ -89,14 +91,18 @@ class CognitiveMode(str, Enum):
 
     FULL_BRAIN = "full_brain"
     HALF_BRAIN = "half_brain"
+    # A verified small model running on this machine: real model reasoning,
+    # honestly not equivalent to a vendor-backed Full Brain (slower, knows
+    # less, errs more), so it is its own mode rather than a Full Brain label.
+    LOCAL_MODEL = "local_model"
 
     @property
     def label(self) -> str:
-        return {"full_brain": "FULL BRAIN", "half_brain": "HALF BRAIN"}[self.value]
+        return {"full_brain": "FULL BRAIN", "half_brain": "HALF BRAIN", "local_model": "LOCAL MODEL"}[self.value]
 
     @property
     def has_model(self) -> bool:
-        return self is CognitiveMode.FULL_BRAIN
+        return self in (CognitiveMode.FULL_BRAIN, CognitiveMode.LOCAL_MODEL)
 
 
 @dataclass(frozen=True)
@@ -123,6 +129,15 @@ class CognitiveProfile:
         return self.mode is CognitiveMode.FULL_BRAIN
 
     @property
+    def is_local_model(self) -> bool:
+        return self.mode is CognitiveMode.LOCAL_MODEL
+
+    @property
+    def has_model_reasoning(self) -> bool:
+        """Whether any verified model reasons here - vendor or local."""
+        return self.mode.has_model
+
+    @property
     def verified(self) -> bool:
         """Whether a call to the model has actually succeeded.
 
@@ -147,14 +162,14 @@ class CognitiveProfile:
     @property
     def capabilities(self) -> tuple[str, ...]:
         """Everything available in this mode - core always, model when present."""
-        if self.mode is CognitiveMode.FULL_BRAIN:
+        if self.mode.has_model:
             return CORE_CAPABILITIES + MODEL_CAPABILITIES
         return CORE_CAPABILITIES
 
     @property
     def missing(self) -> tuple[str, ...]:
         """What a model would add. Empty in Full Brain."""
-        return () if self.mode is CognitiveMode.FULL_BRAIN else MODEL_CAPABILITIES
+        return () if self.mode.has_model else MODEL_CAPABILITIES
 
     def describe(self) -> str:
         """One line for a log or a startup banner. Never carries a credential:
@@ -295,6 +310,19 @@ def assess_cognition(brain: Any, router: Any = None) -> CognitiveProfile:
             brain_provider=brain_provider,
             router_provider=router_provider,
             degraded=degraded if degraded is not None else availability,
+            availability=availability,
+        )
+
+    if configured and availability.is_usable and set(configured) == {LOCAL_MODEL_PROVIDER}:
+        return CognitiveProfile(
+            mode=CognitiveMode.LOCAL_MODEL,
+            reason=(
+                "local model reasoning verified usable on this machine - a small model, "
+                "not equivalent to a vendor-backed Full Brain"
+            ),
+            brain_name=brain_name,
+            brain_provider=brain_provider,
+            router_provider=router_provider,
             availability=availability,
         )
 

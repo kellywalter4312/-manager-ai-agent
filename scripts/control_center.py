@@ -513,6 +513,7 @@ GOVERNED_BACKEND_FIELDS = {
     "speech_provider": "speech",
     "media": "media",
     "image_generation_provider": "image_generation",
+    "local_assist_provider": "local_assist",
     "avatar_provider": "avatar_provider",
     "environment_provider": "environment_provider",
     "knowledge_provider": "knowledge_provider",

@@ -163,7 +163,9 @@ class RaisingProvider(LLMProvider):
 
 class TestProviderAbstractionAndRegistryReconfirmed:
     def test_the_registry_now_carries_four_entries(self):
-        assert available_providers() == ["anthropic", "null", "openai", "xai"]
+        # Four vendor-or-null entries, plus the local model provider added
+        # later (a small llama.cpp model on this machine).
+        assert available_providers() == ["anthropic", "local", "null", "openai", "xai"]
 
     def test_anthropic_is_unaffected_by_the_two_new_entries(self):
         """Phase 1.3/0.2's own Anthropic coverage still holds - adding two

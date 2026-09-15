@@ -86,7 +86,7 @@ def build_ecosystem_registry(settings: Settings) -> EcosystemRegistry:
             build=lambda key, credential: build_provider(
                 replace(settings, provider=key), account=_credentialed_account(key, credential)
             ),
-            requires_credential=lambda key: key != "null",
+            requires_credential=lambda key: key not in ("null", "local"),
             dependents=("the Manager's own reasoning (ManagerBrain)", "every specialist's own brain"),
         )
     )
@@ -131,6 +131,20 @@ def build_ecosystem_registry(settings: Settings) -> EcosystemRegistry:
             build=lambda key, credential: build_media(replace(settings, media=key)),
             requires_credential=lambda key: False,
             dependents=("the media_production capability's narrate/illustrate/compose operations",),
+        )
+    )
+
+    # The attributed local assistant (null | local) - never a reasoning brain.
+    from src.providers.local_assistant import available_local_assist_backends
+
+    registry.register(
+        GenericCategoryAdapter(
+            "local_assist_provider",
+            list_backends=available_local_assist_backends,
+            active_key=lambda: settings.local_assist,
+            build=lambda key, credential: key,
+            requires_credential=lambda key: False,
+            dependents=("open conversation when no Brain answers (attributed local answers)",),
         )
     )
 

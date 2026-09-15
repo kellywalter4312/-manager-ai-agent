@@ -49,6 +49,7 @@ question; it does not get to orchestrate.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field, replace as dataclass_replace
 from datetime import date, datetime, time, timedelta
@@ -461,6 +462,9 @@ class CapabilityRequest:
     # already has: ``governance.assess()`` itself already degrades
     # honestly (CLARIFY, never a guess) when this is None.
     assess_governance: "Callable[[Task, Sequence[str]], GovernanceBrainVerdict] | None" = None
+    # A small local model capabilities may consult, attributed, for what Half
+    # Brain cannot do alone - never the Manager's reasoning brain.
+    assist: "Any | None" = None
 
     @property
     def knows_the_user(self) -> bool:
@@ -1326,6 +1330,9 @@ def open_conversation(request: CapabilityRequest) -> TaskResult:
     honest failure is neither.
     """
     if request.converse is None:
+        assisted = _assisted_answer(request)
+        if assisted is not None:
+            return assisted
         return TaskResult.failure(
             request.task,
             request.own_name,
@@ -1363,6 +1370,9 @@ def open_conversation(request: CapabilityRequest) -> TaskResult:
 
     decision = request.converse(request.task, notes)
     if not decision.is_decided or not decision.reason.strip():
+        assisted = _assisted_answer(request, context=notes)
+        if assisted is not None:
+            return assisted
         return TaskResult.failure(
             request.task,
             request.own_name,
@@ -1379,6 +1389,27 @@ def open_conversation(request: CapabilityRequest) -> TaskResult:
             "brain": decision.source,
             "knowledge_sources": tuple(evidence.sources) + (MODEL_KNOWLEDGE,),
         },
+    )
+
+
+def _assisted_answer(request: CapabilityRequest, *, context: "Sequence[str]" = ()) -> "TaskResult | None":
+    """An open request answered by the local assistant when the Manager's own
+    Brain could not answer - attributed plainly, so the words are never taken
+    for the Manager's verified reasoning. None when no assistant is equipped or
+    it produced nothing."""
+    if request.assist is None:
+        return None
+    guided = guided_interaction_response(request)
+    if guided is not None:
+        return guided
+    from src.providers.local_assistant import ATTRIBUTION
+
+    text = request.assist.answer(request.task.description, context=tuple(str(n) for n in context)[-8:])
+    if not text:
+        return None
+    return TaskResult.success(
+        request.task, request.own_name, f"{text}\n\n({ATTRIBUTION})",
+        payload={"handled_by": "open_conversation", "brain": "local_assist", "assisted": True},
     )
 
 
@@ -5615,6 +5646,49 @@ def connected_action_intent(task: Task, participants: Sequence[str] = ()) -> boo
     return _marker_present(task.description, CONNECTED_ACTION_MARKERS)
 
 
+def _compact(text: str) -> str:
+    """Letters and digits only, lower-cased - "Bella Salon", "bella-salon" and
+    "bellasalon" are one name."""
+    return re.sub(r"[^a-z0-9]", "", str(text or "").lower())
+
+
+def named_connection(text: str, names: "Sequence[str]", default_name: str) -> "str | None":
+    """The one non-default equipped connection ``text`` names, or None - a name
+    counts only as a whole run of words in the request (so a short name inside
+    an unrelated word never matches). Ambiguous (two named) is None too; the
+    connected_action handler then asks which one is meant."""
+    words = re.findall(r"[a-z0-9]+", str(text or "").lower())
+    found = []
+    for name in names:
+        if name == default_name:
+            continue
+        target = _compact(name)
+        if len(target) < 3:
+            continue
+        for start in range(len(words)):
+            joined = ""
+            for end in range(start, min(len(words), start + 4)):
+                joined += words[end]
+                if joined == target:
+                    found.append(name)
+                    break
+                if len(joined) >= len(target):
+                    break
+            if found and found[-1] == name:
+                break
+    return found[0] if len(found) == 1 else None
+
+
+def _connection_request_text(task: Task) -> str:
+    """The words that choose a connection and an operation: what follows a
+    routing phrase when one was used, otherwise the whole request."""
+    if _marker_present(task.description, CONNECTED_ACTION_MARKERS):
+        # A routing phrase was used: only what follows it counts, so the
+        # phrase's own words never favour an operation.
+        return _after_marker(task.description, CONNECTED_ACTION_MARKERS)
+    return task.description
+
+
 def _meaningful_words(text: str) -> "frozenset[str]":
     """``tokenize(text)`` with the common English function words
     stripped out - the identical ``STOPWORDS`` set
@@ -5684,7 +5758,10 @@ def _select_connection(
     if len(names) <= 1:
         return (names[0] if names else None, ())
 
-    intent_words = _meaningful_words(_after_marker(task.description, CONNECTED_ACTION_MARKERS))
+    named = named_connection(task.description, names, default_name)
+    if named is not None:
+        return (named, ())
+    intent_words = _meaningful_words(_connection_request_text(task))
     scored = [(name, len(_meaningful_words(name) & intent_words)) for name in names]
     best = max(score for _, score in scored)
     default_score = dict(scored).get(default_name, 0)
@@ -5733,7 +5810,7 @@ def _select_operation(
     if len(operations) <= 1:
         return (operations[0] if operations else None, ())
 
-    intent_words = _meaningful_words(_after_marker(task.description, CONNECTED_ACTION_MARKERS))
+    intent_words = _meaningful_words(_connection_request_text(task))
     if not intent_words:
         return (None, ())
 
@@ -5807,9 +5884,42 @@ def _execute_connected_operation(
             f"the '{tool_name}' capability failed: {outcome.error}",
         )
     return TaskResult.success(
-        request.task, request.own_name, outcome.output,
+        request.task, request.own_name, readable_connection_output(connection.name, outcome.output),
         payload={"handled_by": "connected_action", "connection": connection.name, "operation": operation},
     )
+
+
+def readable_connection_output(connection_name: str, output: str) -> str:
+    """What a person reads back from a connection: a web page receipt
+    (``url``/``title``/``text``/``elements``) becomes a short plain summary -
+    the page's own title and words, then its fields, buttons and links by their
+    visible labels - instead of raw JSON. Any other output is returned as it
+    came. The raw result stays in the payload."""
+    try:
+        data = json.loads(output)
+    except (TypeError, ValueError):
+        return output
+    if not isinstance(data, dict) or not ({"url", "title", "text"} & set(data)):
+        return output
+    lines = []
+    title = str(data.get("title") or "").strip()
+    lines.append(f"{connection_name}: {title}" if title else f"{connection_name}: {data.get('url', '')}")
+    text = " ".join(str(data.get("text") or "").split())
+    if text:
+        lines.append(text[:900])
+    groups: "dict[str, list[str]]" = {}
+    for element in data.get("elements") or []:
+        if not isinstance(element, dict):
+            continue
+        tag = str(element.get("tag") or "")
+        kind = "links" if tag == "a" else ("buttons" if tag == "button" or element.get("type") in ("submit", "button") else "fields")
+        label = str(element.get("label") or element.get("locator") or "").strip()
+        if label:
+            groups.setdefault(kind, []).append(label)
+    for kind in ("fields", "buttons", "links"):
+        if groups.get(kind):
+            lines.append(f"{kind.capitalize()}: " + ", ".join(groups[kind]))
+    return "\n".join(lines)
 
 
 def _raise_connected_action_confirmation(
@@ -5995,6 +6105,13 @@ def connected_action(request: CapabilityRequest) -> TaskResult:
         # own boilerplate ("...connected account: ...") rather than
         # anything the person or an earlier step actually supplied.
         available = _declared_argument_values(_after_marker(request.task.description, CONNECTED_ACTION_MARKERS))
+        # A value the request supplies by naming something the connection
+        # genuinely observed (a website's field or button, by its visible
+        # label) - asked of the connection itself, never guessed here.
+        observed = getattr(connection, "values_from_request", None)
+        if observed is not None:
+            for name, value in (observed(operation, request.task.description) or {}).items():
+                available.setdefault(name, value)
         missing = [p.name for p in parameters if p.required and p.name not in available]
         if missing:
             return TaskResult.failure(

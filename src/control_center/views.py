@@ -112,11 +112,18 @@ class BrainView:
         return self.mode == "FULL BRAIN"
 
     @property
+    def is_local_model(self) -> bool:
+        """A verified small model on this machine - real reasoning, honestly
+        labelled as local rather than as a vendor-backed Full Brain."""
+        return self.mode == "LOCAL MODEL"
+
+    @property
     def indicator(self) -> str:
-        """A glyph for a status line. Green only for verified reasoning."""
+        """A glyph for a status line. Green only for verified reasoning - a
+        vendor Full Brain or a verified local model; the mode label says which."""
         if self.degraded:
             return "RED"
-        return "GREEN" if self.is_full else "AMBER"
+        return "GREEN" if (self.is_full or self.is_local_model) else "AMBER"
 
 
 @dataclass(frozen=True)

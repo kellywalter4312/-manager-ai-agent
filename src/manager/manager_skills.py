@@ -38,7 +38,9 @@ from src.core.contracts import AgentSpec, Task, TaskResult
 from src.manager.activity_session import ActivityBrainOps, ActivitySessions
 from src.manager.brain import BrainDecision, GovernanceBrainVerdict
 from src.manager.capabilities import (
+    CONNECTED_ACTION,
     CORRECT_MEMORY,
+    named_connection,
     MANAGER_CAPABILITIES,
     is_new_memory_statement,
     OPEN_CONVERSATION,
@@ -94,6 +96,7 @@ class ManagerSkills(BaseAgent):
         recording_sessions: "RecordingSessionRegistry | None" = None,
         governance_log: "GovernanceLog | None" = None,
         assess_governance: "Callable[[Task, Sequence[str]], GovernanceBrainVerdict] | None" = None,
+        assist: "Any | None" = None,
     ) -> None:
         """``roster`` supplies the currently registered agents.
 
@@ -156,6 +159,8 @@ class ManagerSkills(BaseAgent):
         # open_conversation reports honestly that no reasoning capability
         # is available, rather than raising.
         self._converse = converse
+        # The attributed local assistant (never the reasoning brain).
+        self._assist = assist
         # Files/Documents completion: the identical bound-callable
         # narrowing ``converse`` already has, for real visual reasoning
         # over an image rather than an open-ended text answer. None by
@@ -441,11 +446,22 @@ class ManagerSkills(BaseAgent):
             or pending_correction.is_cancel(task.description)
         ):
             return True
+        # A request that names one of this Manager's own equipped connections
+        # (a declared website or service) is this Manager's - never delegated
+        # away on a specialist's incidental word overlap.
+        if self._names_equipped_connection(task.description):
+            return True
         return any(
             capability.claims is not None
             and capability.claims(task, tuple(a.name for a in self._roster()))
             for capability in self._capabilities.values()
         )
+
+    def _names_equipped_connection(self, text: str) -> bool:
+        resolver = self._connections
+        if resolver is None or CONNECTED_ACTION.name not in self._capabilities:
+            return False
+        return named_connection(text, resolver.names, resolver.default_name) is not None
 
     @property
     def voice(self) -> VoiceProfile:
@@ -610,6 +626,10 @@ class ManagerSkills(BaseAgent):
             or self._activity_sessions.pending_confirmation(self.name) is not None
         ):
             capability = OPEN_CONVERSATION
+        elif self._names_equipped_connection(task.description):
+            # A declared website or service named in the request is reached
+            # through the one governed connected_action capability.
+            capability = self._capabilities[CONNECTED_ACTION.name]
         elif self._answers_pending_correction(task.description):
             # Pre-Stage-9 Campaign 2: the person is answering "which one did
             # you mean?" - resolved deterministically, with or without a
@@ -666,6 +686,7 @@ class ManagerSkills(BaseAgent):
                 recording_sessions=self._recording_sessions,
                 governance_log=self._governance_log,
                 assess_governance=self._assess_governance,
+                assist=self._assist,
             )
         )
         # Pre-Stage-9 Campaign 10 (CON-04): a pending confirmation or

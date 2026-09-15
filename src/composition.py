@@ -39,6 +39,8 @@ so a Control Center may construct all of this simply to look at it.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+
+from src.providers.local_assistant import build_local_assistant
 from typing import Any, Mapping, Sequence
 
 from src.agents.brain_factory import (
@@ -830,6 +832,8 @@ def build_manager(
         # identical way - never a second Brain, never the brain object
         # itself.
         assess_governance=runtime.manager_brain.assess_governance,
+        # The attributed local assistant - off unless the owner chose it.
+        assist=build_local_assistant(runtime.settings),
         # Stage 12: the exact same store ManagerAgent itself uses
         # below - never a second memory.
         recall=manager_memory.recall,

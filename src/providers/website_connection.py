@@ -348,6 +348,69 @@ class WebsiteConnection(Connection):
             detail=detail[:_MAX_DETAIL_CHARS], source=self.name, executed_at=utc_now(),
         )
 
+    def _remember_elements(self, read_page_result: str) -> None:
+        """Keep the fields, controls and links the last page read actually
+        found, so a later "click Book appointment" or "fill Full name with
+        Kelly" can name them by their visible label."""
+        try:
+            elements = json.loads(read_page_result).get("elements") or []
+        except (ValueError, AttributeError):
+            elements = []
+        self._last_elements = [
+            {"locator": str(e.get("locator") or ""), "label": str(e.get("label") or ""), "tag": str(e.get("tag") or "")}
+            for e in elements if isinstance(e, dict) and e.get("locator")
+        ]
+
+    def values_from_request(self, operation: str, text: str) -> "dict[str, str]":
+        """Parameter values this request supplies by pointing at what the last
+        page read genuinely found - never invented. ``click``: the element
+        whose visible label (or locator) the request names. ``fill_field``:
+        "fill <label> with <value>" / "set <label> to <value>". Empty when
+        nothing matches or no page has been read yet."""
+        elements = getattr(self, "_last_elements", None) or []
+        lowered = " ".join(str(text or "").lower().split())
+        op = " ".join(str(operation).split()).lower()
+
+        def element_named(fragment: str):
+            fragment = " ".join(fragment.lower().split()).strip(" '\"")
+            best = None
+            for element in elements:
+                for name in (element["label"].lower(), element["locator"].lower()):
+                    name = " ".join(name.split())
+                    if name and (name == fragment or (len(name) >= 3 and name in fragment)):
+                        if best is None or len(name) > best[0]:
+                            best = (len(name), element)
+            return best[1] if best else None
+
+        if op == "click":
+            found = element_named(lowered)
+            return {"locator": found["locator"]} if found else {}
+        if op == "fill_field":
+            import re as _re
+
+            match = _re.search(r"\b(?:fill(?:\s+in)?|enter|type|set|put)\s+(.+?)\s+(?:with|to|as|=)\s+(.+?)(?:\s+on\s+\S+)?\s*$", str(text or ""), _re.IGNORECASE)
+            if not match:
+                return {}
+            found = element_named(match.group(1))
+            if not found:
+                return {}
+            return {"locator": found["locator"], "value": match.group(2).strip(" '\"")}
+        return {}
+
+    def _ensure_on_site(self) -> None:
+        """Open this site before acting on "the page" when the browser is not
+        on it yet. Found at runtime: the first read_page on a newly equipped
+        site read an empty ``about:blank``, because nothing had ever loaded the
+        site the owner declared. A page already on this site is left exactly
+        where the person's earlier steps put it."""
+        base = self._descriptor.base_url.rstrip("/")
+        try:
+            current = str(self._browser.evaluate("location.href") or "")
+        except RuntimeError:
+            current = ""
+        if not current.startswith(base):
+            self._browser.navigate(base + "/")
+
     def _run(self, op: str, params: "dict[str, Any]") -> str:
         if op == "navigate":
             path = str(params.get("path") or "/")
@@ -360,13 +423,17 @@ class WebsiteConnection(Connection):
 
         if op == "read_page":
             query = str(params.get("query") or "")
-            return str(self._browser.evaluate(_READ_PAGE_JS % json.dumps(query)))
+            self._ensure_on_site()
+            result = str(self._browser.evaluate(_READ_PAGE_JS % json.dumps(query)))
+            self._remember_elements(result)
+            return result
 
         if op == "fill_field":
             locator = params.get("locator")
             value = params.get("value")
             if not locator or value is None:
                 raise _ParameterError(f"'fill_field' on '{self.name}' needs both 'locator' and 'value'")
+            self._ensure_on_site()
             self._browser.evaluate(_FILL_FIELD_JS % (json.dumps(str(locator)), json.dumps(str(value))))
             return f"filled '{locator}'"
 
@@ -374,6 +441,7 @@ class WebsiteConnection(Connection):
             locator = params.get("locator")
             if not locator:
                 raise _ParameterError(f"'click' on '{self.name}' needs 'locator'")
+            self._ensure_on_site()
             try:
                 self._browser.evaluate(_CLICK_JS % json.dumps(str(locator)))
             except BrowserUnavailable:

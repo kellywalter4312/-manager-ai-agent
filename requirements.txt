@@ -70,3 +70,14 @@ websockets>=12.0
 
 # Development dependencies:
 pytest>=8.0
+
+# Optional - local models on this machine (MANAGER_PROVIDER=local,
+# MANAGER_LOCAL_ASSIST=local, offline translation).
+# Model files live under data/models (not tracked). llama-cpp-python needs the
+# prebuilt CPU wheel index on Windows:
+#   pip install llama-cpp-python --prefer-binary --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+# argostranslate's wheel ships a stray top-level "tests" package into
+# site-packages that shadows this repository's tests - delete
+# .venv/Lib/site-packages/tests after installing it.
+llama-cpp-python>=0.3
+argostranslate>=1.9

@@ -261,6 +261,15 @@ class Settings:
     # the others.
     openai_model: str = "gpt-5"
     xai_model: str = "grok-4"
+    # A local model on this machine (MANAGER_PROVIDER=local) - llama.cpp and a
+    # small GGUF file, no account and no network at inference time. Honestly a
+    # local tier, never presented as equivalent to a vendor-backed model.
+    local_model_path: str = "data/models/llm/qwen2.5-1.5b-instruct-q4_k_m.gguf"
+    local_vision_model_path: str = "data/models/vision/moondream2-text-model-f16.gguf"
+    local_vision_projector_path: str = "data/models/vision/moondream2-mmproj-f16.gguf"
+    # Whether capabilities may consult the local model as an attributed
+    # assistant for what Half Brain cannot do alone ("null" | "local").
+    local_assist: str = "null"
     mailbox: str = "memory"
     profile_path: str = "USER.md"
     # Where the user's schedule document lives. Separate from profile_path

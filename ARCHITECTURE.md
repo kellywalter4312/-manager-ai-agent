@@ -9503,3 +9503,69 @@ workspaces; conversation continuity across providers (§52.34).
 - The three verification fixtures in production connection data were confirmed to be the only entries, all at 127.0.0.1. ``reservablething``, ``fixturesite`` and ``govsite`` were removed through the Control Center's own ``services/sites <name> forget`` commands, after a backup. Only those two files changed.
 | ARCH-01 no duplicate architecture in production | VERIFIED WORKING |
 | DOC-01 this document matches the code | VERIFIED WORKING for every row the Pre-Stage-9 campaigns changed |
+
+### 52.44 Post-Pre-Stage-9 campaign, part 1 - local models, several websites, attributed local help
+
+**Owner decisions (2026-09-15).** Install small local models where this laptop
+can really run them (2-core i5-6300U, 7.9 GB RAM, no GPU); never treat them as
+equivalent to a Full Brain. Connect to any number of websites, not one example.
+
+**Local model provider.** ``src/providers/local_llm_provider.py`` -
+``LocalLLMProvider`` (llama.cpp, Qwen2.5-1.5B-Instruct Q4_K_M, optional Moondream2
+vision through ``analyze_image``) is provider ``local``: no credential, one loaded
+model shared per process, honest ``LocalModelUnavailable`` when a file is missing.
+``CognitiveMode.LOCAL_MODEL`` ("LOCAL MODEL") is reported once a local call has
+succeeded - verified reasoning, green indicator, and explicitly not
+``is_full_brain``. Measured at runtime as the Manager's whole brain it was not
+usable: 50-470 s per turn, an open question echoed back, and a broad
+"my favourite colour is teal" mis-judged as not personal. The provider stays
+selectable and honestly labelled, but it is not the recommended brain on this
+machine.
+
+**The attributed local assistant.** ``src/providers/local_assistant.py`` -
+Half Brain keeps deterministic routing, memory, acknowledgements and governance;
+capabilities may consult ``CapabilityRequest.assist`` for bounded language work
+(open questions first) and every such answer ends "answered by the small local
+model on this machine - not verified reasoning". Off by default
+(``Settings.local_assist``); the owner chooses it through the Control Center
+category ``local_assist_provider`` (``provider local_assist_provider use local``),
+saved and honoured on every start. Verified live: after a restart the assistant
+was equipped and cognition still read HALF BRAIN; "My favourite colour is teal",
+its recall and today's date answered instantly and deterministically; an open
+question was answered in 40 s with the attribution.
+
+**Any number of websites and services, by name.** Every declared site/service
+was already loaded into each agent's connection resolver; now a request that
+names one ("read the page on bella salon", "check city-library") is the
+Manager's and reaches ``connected_action`` (``named_connection``), whatever the
+spacing or case. Found and fixed at runtime:
+
+- the first action on a site read ``about:blank``, so it now opens the site first;
+- a field or button can be named by its visible label from the last page read
+  (``WebsiteConnection.values_from_request``);
+- a page reads back as plain words - title, text, fields, buttons, links
+  (``readable_connection_output``) - not JSON.
+
+Verified live with a real browser (Edge over CDP) against two independent local
+websites declared through the confirmed served Control Center route:
+
+- both pages were read;
+- "fill Full name with Kelly Abudu" and "fill Slot with Tuesday 10:00" filled the form;
+- "click Book appointment" asked for confirmation - "no" was honoured, "yes" submitted;
+- the salon's own server received ``full_name=Kelly Abudu&slot=Tuesday 10:00``;
+- production data was unchanged.
+
+**Environment fix.** The ``argostranslate`` wheel installs its own top-level
+``tests`` package into site-packages, which shadowed this repository's ``tests``
+directory (``from tests.x import ...`` resolved to the wrong package). Making
+``tests/`` a package was tried and reverted - many test modules import their
+neighbours by bare name. The stray directory, which held only argostranslate's
+own test files, was removed; ``requirements.txt`` records the step for any
+reinstall.
+
+| Requirement | Status |
+|---|---|
+| Local model provider, honestly labelled | VERIFIED WORKING (quality/speed as the Manager's brain VERIFIED BROKEN on this hardware - not recommended) |
+| Half Brain answers open questions offline, attributed | VERIFIED WORKING |
+| Connect to more than one website at once, by name | VERIFIED WORKING |
+| Read, fill by label and a confirmed submit on a real website | VERIFIED WORKING |
