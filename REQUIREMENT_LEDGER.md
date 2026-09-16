@@ -210,7 +210,7 @@ audit) doesn't lose the same hour tracing the same mismatch.
 
 | ID | Requirement | Status | Evidence | Dependencies / Limitations |
 |---|---|---|---|---|
-| ROOM-01 | Multi-agent conversation, targeted addressing, brainstorming | VERIFIED WORKING | ARCHITECTURE.md §16 and on, addressing model (Phase 4) | none |
+| ROOM-01 | Multi-agent conversation, targeted addressing, brainstorming | VERIFIED WORKING, live delegation re-confirmed 2026-09-16 | ARCHITECTURE.md §16 and on, addressing model (Phase 4). **Live-verified this round**: "Arthur, check my inbox for job opportunities." through Alfred's real composition produced `handled_by="Arthur"`, `delegated=True`, and Arthur's own real analyzer returned a genuine, deterministic, non-fabricated ranked result from the real sample inbox (3 matches among 6 messages, each with real sender/subject/signal data) — never a mock standing in for "a specialist did something." Arthur's brain and memory confirmed structurally distinct from Alfred's own (`is not`) in the same live system | none |
 | ROOM-02 | Addressing works correctly across agents (not just Alfred) | VERIFIED WORKING | §52.35 finding — an earlier audit harness had addressed every message to Alfred, making this look broken when it wasn't | Corrected false-negative, not a real defect |
 | ART-01 | Addressing the Manager on his own private line doesn't block delegation to a specialist | VERIFIED WORKING | §52.35 fix | Was VERIFIED BROKEN |
 | HC-01 | The hardcoded component id `"alfred"` (in handlers.py, ecosystem_evolution.py, inventory.py) | VERIFIED WORKING — legacy alias kept for the one existing production record, new agents use open registration | §52.35 | none |
