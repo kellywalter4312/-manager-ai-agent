@@ -108,6 +108,22 @@ itself is traceable, not just its parts.
 
 ## D. PDF / Document Ecosystem
 
+Cross-capability regression check, live, 2026-09-16 (round 7 of this
+campaign): built a real, isolated system (`scripts.control_center.build`,
+tmp data dir, no mocks) and ran one continuous conversation chaining
+learning -> memory recall -> correction -> file share -> `read_content` ->
+translation -> a final recall, confirming none of these turns corrupt each
+other's state. All five checked outcomes passed
+(`recall_ok`/`correction_ok`/`read_content_ok`/`translate_ok`/`final_recall_ok`
+all True). Along the way, found and fixed a harness bug that is itself worth
+recording: artifacts are owned by an agent's **display name**
+(`runtime.identity.name`, e.g. "Alfred") while canonical Memory is
+deliberately owned by its **stable technical key** ("MANAGER", never the
+display name — see `composition.py::adopt_legacy_manager_memory`'s own
+docstring). Opposite conventions, both intentional in their own domain, but
+nothing in this ledger said so until now — recorded so a future caller (or
+audit) doesn't lose the same hour tracing the same mismatch.
+
 | ID | Requirement | Status | Evidence | Dependencies / Limitations |
 |---|---|---|---|---|
 | PDF-01 | Governed ingestion path for user-supplied files (`POST /upload`, "+ file" control, Control Center "Add file") | VERIFIED WORKING | §52.30 (REPAIR-01), `src/services/artifacts/ingestion.py` | none |
