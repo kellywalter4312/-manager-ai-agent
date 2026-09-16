@@ -26,6 +26,12 @@ implemented - a task asking for a plan was answered with a roster listing and
 reported as done. They will be listed again when a handler exists that
 genuinely plans.
 
+`report`/`reporting` (bare) were removed 2026-09-16 for the identical reason:
+"finish the report" and "I am reporting to my new manager next week" both
+scored highest for this capability on that word alone and were answered with
+a roster listing. `status`/`summary` remain and still cover the genuine
+"status report" phrasing.
+
 The second group of capabilities is the ordinary work a Manager is expected to
 attempt himself - looking something up, explaining something, writing a small
 piece of code - rather than refusing because no specialist owns it. They are
@@ -78,7 +84,7 @@ returned results and decides whether to accept, retry, escalate or report.
 
 ## Capabilities
 
-capabilities, status, roster, report, reporting, summary,
+capabilities, status, roster, summary,
 invite, bring, join, participant, participants,
 research, search, lookup, find, overview, information,
 code, coding, script, function, debug,

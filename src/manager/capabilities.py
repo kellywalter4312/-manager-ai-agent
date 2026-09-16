@@ -761,6 +761,18 @@ PARTICIPANT_INVITATION = ManagerCapability(
 # When a real planning handler is written it declares those words, IDENTITY.md
 # declares them again, and Alfred takes the work on. Until then he does not
 # claim it.
+#
+# `report`/`reporting` (bare) removed - closure campaign, 2026-09-16. The
+# identical failure mode `plan`/`coordinate` above already document, found
+# live: "I have a task: finish the report.", "I need to finish the report."
+# and even the unrelated life statement "I am reporting to my new manager
+# next week" all scored highest for this capability on that one word alone
+# and were answered with Alfred's own roster listing - a task about a
+# document, or a fact about someone's job, mistaken for a request about
+# Alfred himself. "status" alone still reaches this capability correctly
+# ("status report please", "give me a status report" - both proven still
+# routed here in this fix's own regression test), so nothing genuine was
+# lost; only the bare, over-broad word was.
 ROSTER_REPORT = ManagerCapability(
     name="roster_report",
     capabilities=frozenset(
@@ -768,8 +780,6 @@ ROSTER_REPORT = ManagerCapability(
             "capabilities",
             "status",
             "roster",
-            "report",
-            "reporting",
             "summary",
         }
     ),

@@ -463,6 +463,45 @@ class TestDeclaringACapabilityDoesNotCreateOne:
         assert result.agent_name == "Alfred"
         assert "reason about that" in result.error
 
+    def test_bare_report_and_reporting_are_no_longer_claimed_by_the_roster(self):
+        """Closure campaign (2026-09-16): the identical failure mode as
+        plan/coordinate above, found live - "finish the report" and "I am
+        reporting to my new manager next week" both scored highest for this
+        capability on that one word alone and were answered with a roster
+        listing, a task about a document (or an unrelated life fact)
+        mistaken for a request about Alfred himself.
+
+        Unlike plan/coordinate, "report" legitimately belongs to
+        generate_document ("generate a report" is a real document request),
+        so this only asserts it is gone from the roster's own claim - not
+        from handled_words() altogether."""
+        assert "report" not in ROSTER_REPORT.capabilities
+        assert "reporting" not in ROSTER_REPORT.capabilities
+
+    def test_status_report_phrasing_still_reaches_the_roster_report(self):
+        """Nothing genuine was lost removing the bare word - 'status' alone
+        already carries the legitimate "status report" request."""
+        registry = {ROSTER_REPORT.name: ROSTER_REPORT, WEATHER.name: WEATHER}
+        assert select_capability(Task(description="status report please"), registry) is ROSTER_REPORT
+        assert select_capability(Task(description="give me a status report"), registry) is ROSTER_REPORT
+
+    def test_a_task_mentioning_a_report_reaches_the_manager_honestly_not_as_a_completed_roster(self):
+        """The user-visible consequence, asserted rather than described -
+        the identical shape as the plan/coordinate regression test above."""
+        from src.core.contracts import TaskStatus
+        from src.services.identity.identity import load_identity
+
+        manager = ManagerAgent()
+        manager.own_skills = ManagerSkills(
+            load_identity("IDENTITY.md"), roster=manager.registry.all_agents
+        )
+        manager.registry.register(manager.own_skills)
+
+        result = manager.handle_task(Task(description="I need to finish the report"))
+        assert result.status is TaskStatus.FAILED
+        assert result.agent_name == "Alfred"
+        assert "reason about that" in result.error
+
     def test_coordination_reporting_still_works(self):
         """Removing the unimplemented words must not have cost the real ones."""
         from src.services.identity.identity import load_identity
