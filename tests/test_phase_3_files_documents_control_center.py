@@ -316,6 +316,23 @@ class TestImageAnalysisCapability:
         cap = select_capability(Task(description=text), None, participants=["Alfred"])
         assert cap.name == "image_analysis"
 
+    def test_a_reordered_request_also_routes_correctly(self):
+        """Closure campaign (2026-09-16, N-06): the identical shared
+        mechanism WS-02/ORG-01/create_artifact/create_diagram already
+        use - "I want a look at this picture, can you describe it?"
+        states the identical ask IMAGE_ANALYSIS_MARKERS' own fixed
+        phrases cover, in the equally natural opposite order."""
+        for text in (
+            "I want a look at this picture, can you describe it?",
+            "I have a photo: can you describe it?",
+        ):
+            assert image_analysis_intent(Task(description=text)), text
+            cap = select_capability(Task(description=text), None, participants=["Alfred"])
+            assert cap.name == "image_analysis", text
+
+    def test_an_unrelated_declarative_statement_is_not_mistaken_for_an_image_request(self):
+        assert not image_analysis_intent(Task(description="I have a meeting at 3pm."))
+
     def test_with_the_real_default_null_brain_refuses_honestly(self, tmp_path):
         """The real default system's own NullBrain still provides an
         honest analyze_image (bound, never None, exactly like converse)

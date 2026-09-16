@@ -2790,8 +2790,21 @@ IMAGE_AUTHENTICITY = ManagerCapability(
 )
 
 
+_IMAGE_ANALYSIS_NOUNS = ("image", "photo", "picture")
+
+
 def image_analysis_intent(task: Task, participants: Sequence[str] = ()) -> bool:
-    return _marker_present(task.description, IMAGE_ANALYSIS_MARKERS)
+    if _marker_present(task.description, IMAGE_ANALYSIS_MARKERS):
+        return True
+    # Closure campaign (2026-09-16, N-06): "I have a photo I want you to
+    # look at, can you tell me what it shows?" states the identical ask
+    # in the equally natural opposite order and matched nothing - the
+    # same shared mechanism WS-02/ORG-01/create_artifact already use.
+    # No extraction concern here (unlike those): the handler already
+    # falls back to the raw text when it is not an exact marker match
+    # (see the helper just above IMAGE_ANALYSIS's own registration), so
+    # only the intent side needed broadening.
+    return _reordered_subject(task.description, nouns=_IMAGE_ANALYSIS_NOUNS) is not None
 
 
 def image_analysis(request: CapabilityRequest) -> TaskResult:
