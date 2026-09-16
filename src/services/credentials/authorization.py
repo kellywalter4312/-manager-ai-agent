@@ -96,3 +96,42 @@ def check_authorization(provider: LLMProvider) -> AuthorizationCheck:
         reached_vendor=True,
         reason=f"a real completion was returned ({completion.describe()})",
     )
+
+
+def check_speech_authorization(adapter: object) -> AuthorizationCheck:
+    """The speech-provider analogue of ``check_authorization`` above -
+    closure campaign, 2026-09-16. Found live (not by reading code): the
+    Control Center's own ``check`` action refused every category except
+    ``llm_provider`` with an honest "no completion call to prove one with"
+    message, which was literally true for most categories but not for
+    ElevenLabs speech, which already had a real, live, vendor-backed call
+    (``probe_authorization``) sitting unused for exactly this purpose.
+
+    Vendor-neutral over whatever adapter is given, the identical spirit
+    ``check_authorization`` already keeps for ``LLMProvider`` - reached
+    through ``probe_authorization()`` when the adapter has one (a real
+    credentialed vendor), and reported honestly, never guessed, when it
+    does not (a local/free engine - Windows SAPI, Kokoro, none of these -
+    has no credential to check in the first place).
+    """
+    probe = getattr(adapter, "probe_authorization", None)
+    name = getattr(adapter, "name", type(adapter).__name__)
+    if probe is None:
+        return AuthorizationCheck(
+            authorized=False,
+            reached_vendor=False,
+            reason=f"'{name}' is not a credentialed vendor - it has no authorization to check",
+        )
+    try:
+        count = probe()
+    except Exception as exc:  # noqa: BLE001 - deliberate boundary catch, mirrors check_authorization
+        return AuthorizationCheck(
+            authorized=False,
+            reached_vendor=False,
+            reason=f"{type(exc).__name__}: {exc}",
+        )
+    return AuthorizationCheck(
+        authorized=True,
+        reached_vendor=True,
+        reason=f"the vendor returned {count} real voice(s)",
+    )

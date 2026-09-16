@@ -171,6 +171,35 @@ class TestDiscoveryIsReal:
         assert speech.availability.state is AvailabilityState.UNKNOWN
 
 
+class TestProbeAuthorization:
+    """Closure campaign (2026-09-16): the real, un-swallowed vendor call a
+    genuine credential check needs - deliberately distinct from
+    available_voices(), which returns an honestly-empty tuple on ANY
+    failure and so cannot tell "this key is rejected" from "this account
+    has zero voices". This method lets the real exception through instead."""
+
+    def test_a_working_credential_returns_the_real_voice_count(self, monkeypatch):
+        voices = fake_voices_client(voices=[SimpleNamespace(voice_id="v1", name="A", labels={}, verified_languages=None),
+                                             SimpleNamespace(voice_id="v2", name="B", labels={}, verified_languages=None)])
+        speech = adapter(monkeypatch, voices=voices)
+        assert speech.probe_authorization() == 2
+
+    def test_a_rejected_credential_raises_rather_than_returning_empty(self, monkeypatch):
+        voices = fake_voices_client(raises=RuntimeError("401 unauthorized"))
+        speech = adapter(monkeypatch, voices=voices)
+        with pytest.raises(RuntimeError, match="401 unauthorized"):
+            speech.probe_authorization()
+
+    def test_this_is_genuinely_different_from_available_voices_on_failure(self, monkeypatch):
+        """The whole reason this method exists: available_voices() would
+        hide the exact same failure behind an ambiguous empty tuple."""
+        voices = fake_voices_client(raises=RuntimeError("account suspended"))
+        speech = adapter(monkeypatch, voices=voices)
+        assert speech.available_voices() == ()
+        with pytest.raises(RuntimeError):
+            speech.probe_authorization()
+
+
 class TestSpeakRequiresAResolvedVoiceId:
     def test_no_voice_supplied_fails_honestly(self, monkeypatch):
         speech = adapter(monkeypatch)

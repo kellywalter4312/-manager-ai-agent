@@ -21,7 +21,11 @@ import scripts.control_center as cc
 from src.config.settings import Settings
 from src.providers.base import Completion, LLMProvider
 from src.services.credentials.account import ProviderAccount
-from src.services.credentials.authorization import AuthorizationCheck, check_authorization
+from src.services.credentials.authorization import (
+    AuthorizationCheck,
+    check_authorization,
+    check_speech_authorization,
+)
 
 
 class _Answers(LLMProvider):
@@ -76,6 +80,52 @@ class TestTheMechanism:
         assert "never reached the vendor" in never.describe()
 
 
+class _SpeechProbeWorks:
+    name = "test-speech"
+
+    def probe_authorization(self):
+        return 3
+
+
+class _SpeechProbeRaises:
+    name = "test-speech"
+
+    def __init__(self, error: Exception):
+        self._error = error
+
+    def probe_authorization(self):
+        raise self._error
+
+
+class _SpeechNoProbe:
+    name = "windows"
+
+
+class TestTheSpeechMechanism:
+    """check_speech_authorization - closure campaign, 2026-09-16. Found
+    live: the Control Center's own 'check' action refused every category
+    except llm_provider, which was honest for most categories but not
+    speech - ElevenLabsSpeechAdapter already had a real vendor call
+    (probe_authorization) sitting unused for this exact purpose."""
+
+    def test_a_working_credential_is_authorized_through_a_real_call(self):
+        outcome = check_speech_authorization(_SpeechProbeWorks())
+        assert outcome.authorized and outcome.reached_vendor
+        assert "3 real voice" in outcome.reason
+
+    def test_a_rejected_credential_is_not_authorized_and_never_reached(self):
+        outcome = check_speech_authorization(_SpeechProbeRaises(RuntimeError("401 unauthorized")))
+        assert outcome.authorized is False and outcome.reached_vendor is False
+        assert "unauthorized" in outcome.reason.lower()
+
+    def test_an_uncredentialed_engine_is_reported_honestly_not_guessed(self):
+        """Windows/Kokoro/none have no vendor credential to check at all -
+        this must never be confused with a rejected one."""
+        outcome = check_speech_authorization(_SpeechNoProbe())
+        assert outcome.authorized is False and outcome.reached_vendor is False
+        assert "not a credentialed vendor" in outcome.reason
+
+
 class TestItIsReachableFromTheControlCenter:
     @pytest.fixture
     def stores(self, tmp_path, monkeypatch):
@@ -106,10 +156,15 @@ class TestItIsReachableFromTheControlCenter:
         assert "no active account" in out and "add anthropic" in out
 
     def test_a_category_with_no_completion_call_is_told_so(self, stores):
+        """Closure campaign (2026-09-16): 'speech_provider' moved to the
+        checkable set (ElevenLabs got a real probe), so this now exercises a
+        category that genuinely still has none - video generation."""
         runtime, manager, channel, conversation = cc.build(self._settings(stores))
         centre = cc.ControlCenter(runtime, manager)
-        out = cc.run_command(centre, "provider speech_provider check kokoro", 100, channel, conversation)
-        assert "only applies to 'llm_provider'" in out
+        out = cc.run_command(
+            centre, "provider video_generation_provider check pollinations", 100, channel, conversation
+        )
+        assert "only applies to 'llm_provider', 'speech_provider'" in out
 
     def test_the_answer_is_recorded_by_whether_the_vendor_was_reached(self):
         assert cc._administrative_write_succeeded(
@@ -138,4 +193,27 @@ class TestItIsReachableFromTheControlCenter:
         out = cc.run_command(centre, "provider llm_provider check anthropic", 100, channel, conversation)
         assert built == {"backend": "anthropic", "account": "owner"}
         assert out.startswith("AUTHORIZED: anthropic/owner")
+        assert "LIVE EXTERNAL VERIFIED" in out
+
+    def test_the_speech_account_path_runs_without_reaching_a_vendor(self, stores, monkeypatch):
+        """The identical whole-Control-Center path as the LLM test above,
+        proven for speech_provider/elevenlabs - the new category this round
+        added, through the unmodified 'check' command."""
+        runtime, manager, channel, conversation = cc.build(self._settings(stores))
+        centre = cc.ControlCenter(runtime, manager)
+        cc.run_command(
+            centre, "provider speech_provider add elevenlabs owner fake-key-not-real",
+            100, channel, conversation,
+        )
+        built = {}
+
+        def fake_build_speech(settings, env=None, account=None, **kwargs):
+            built["backend"] = settings.speech
+            built["account"] = account.account_id if isinstance(account, ProviderAccount) else None
+            return _SpeechProbeWorks()
+
+        monkeypatch.setattr(cc, "build_speech", fake_build_speech)
+        out = cc.run_command(centre, "provider speech_provider check elevenlabs", 100, channel, conversation)
+        assert built == {"backend": "elevenlabs", "account": "owner"}
+        assert out.startswith("AUTHORIZED: elevenlabs/owner")
         assert "LIVE EXTERNAL VERIFIED" in out

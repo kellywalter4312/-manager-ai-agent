@@ -109,10 +109,17 @@ from src.providers.media.factory import (  # noqa: E402
     available_video_generation_backends,
     available_video_understanding_backends,
 )
-from src.providers.speech_factory import available_speech_providers  # noqa: E402
+from src.providers.speech_factory import (  # noqa: E402
+    SpeechConfigurationError,
+    available_speech_providers,
+    build_speech,
+)
 from src.manager.cognition import assess_manager  # noqa: E402
 from src.services.credentials.account import ProviderAccount  # noqa: E402
-from src.services.credentials.authorization import check_authorization  # noqa: E402
+from src.services.credentials.authorization import (  # noqa: E402
+    check_authorization,
+    check_speech_authorization,
+)
 from src.services.credentials.account_store_file import (  # noqa: E402
     DEFAULT_ACCOUNTS_PATH,
     load_credential_store,
@@ -1473,10 +1480,20 @@ def run_provider_command(centre: "ControlCenter", rest: str) -> str:
         # vendor actually accept this credential? Only the real request proves
         # that, so this makes exactly one - which is why it is a confirmed,
         # audited administrative write and never happens on its own.
-        if category != LLM_CATEGORY:
+        #
+        # Closure campaign (2026-09-16): this used to refuse every category
+        # except 'llm_provider' outright ("no completion call to prove one
+        # with"), which was true for most categories but not 'speech_provider' -
+        # ElevenLabsSpeechAdapter already had a real, live, vendor-backed call
+        # (probe_authorization) sitting unused for exactly this purpose. Video
+        # generation/understanding vendors genuinely have no such call yet, so
+        # they still get the honest refusal below.
+        _CHECKABLE_CATEGORIES = (LLM_CATEGORY, "speech_provider")
+        if category not in _CHECKABLE_CATEGORIES:
+            checkable = "', '".join(_CHECKABLE_CATEGORIES)
             return (
                 f"'check' asks a vendor whether a credential works, which only applies to "
-                f"'{LLM_CATEGORY}' today - '{category}' has no completion call to prove one with. "
+                f"'{checkable}' today - '{category}' has no completion call to prove one with. "
                 f"Use 'provider {category} validate <backend>' for real construction instead."
             )
         if not action_args:
@@ -1497,13 +1514,22 @@ def run_provider_command(centre: "ControlCenter", rest: str) -> str:
                 f"to check (registered: {known}). Add one with "
                 f"'provider {category} add {backend} <account-id> <credential>'."
             )
-        try:
-            provider = build_provider(
-                replace(centre.runtime.settings, provider=backend), account=account
-            )
-        except (ProviderConfigurationError, ValueError) as exc:
-            return f"FAILED: could not build '{backend}' from that account: {exc}. Nothing was sent."
-        outcome = check_authorization(provider)
+        if category == LLM_CATEGORY:
+            try:
+                provider = build_provider(
+                    replace(centre.runtime.settings, provider=backend), account=account
+                )
+            except (ProviderConfigurationError, ValueError) as exc:
+                return f"FAILED: could not build '{backend}' from that account: {exc}. Nothing was sent."
+            outcome = check_authorization(provider)
+        else:
+            try:
+                speech_adapter = build_speech(
+                    replace(centre.runtime.settings, speech=backend), account=account
+                )
+            except (SpeechConfigurationError, ValueError) as exc:
+                return f"FAILED: could not build '{backend}' from that account: {exc}. Nothing was sent."
+            outcome = check_speech_authorization(speech_adapter)
         where = "the vendor answered" if outcome.reached_vendor else "the vendor was never reached"
         return (
             f"{'AUTHORIZED' if outcome.authorized else 'NOT AUTHORIZED'}: "

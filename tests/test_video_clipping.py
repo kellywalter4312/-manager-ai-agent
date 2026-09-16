@@ -284,6 +284,28 @@ class TestClipVideoRoutingAndCapabilityBoundaries:
         )
         assert chosen is not CLIP_VIDEO
 
+    def test_a_time_range_stated_before_the_object_still_routes_to_clip_video(self):
+        """Closure campaign (2026-09-16): found live, not in a unit test - a
+        genuine shared video and a genuinely natural request ("clip 0:01 to
+        0:04 of that video") fell through to open_conversation because the
+        old fixed phrase list only matched a clip-verb immediately followed
+        by "this/the video/footage". The verb and the object are both
+        present here, just in a different, equally natural order."""
+        chosen = select_capability(
+            Task(description="Clip 0:01 to 0:04 of that video."), MANAGER_CAPABILITIES
+        )
+        assert chosen is CLIP_VIDEO
+
+    def test_an_unrelated_use_of_a_clip_verb_with_no_video_noun_does_not_claim_this_capability(self):
+        """The order-free check still requires a video/footage noun - a
+        clip-verb alone, even beside something that looks like a time
+        range, must not claim this capability."""
+        chosen = select_capability(
+            Task(description="I'll pick you up from 2 to 3, can you clip the coupon for me?"),
+            MANAGER_CAPABILITIES,
+        )
+        assert chosen is not CLIP_VIDEO
+
     def test_clip_video_is_not_scoreable(self):
         assert CLIP_VIDEO.scoreable is False
 

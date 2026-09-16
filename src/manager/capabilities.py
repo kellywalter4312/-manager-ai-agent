@@ -3818,6 +3818,25 @@ _CLIP_VIDEO_MARKERS: tuple[str, ...] = (
     "clip the best", "find the moments where", "social clips from", "short clips from",
 )
 
+# Closure campaign (2026-09-16): the fixed phrase list above only ever
+# matched a clip-verb immediately followed by "this/the video/footage" -
+# which never fires for the equally natural "clip 0:01 to 0:04 of that
+# video", where the time range sits between the verb and its object. Found
+# by a live, real end-to-end run (a genuine shared video, a genuine
+# request), not a unit test: the request fell through to open_conversation
+# and was refused with a generic "no reasoning capability" message instead
+# of either clipping or a clip-specific refusal. This second, order-free
+# check keeps the same "phrase plus evidence" discipline the docstring
+# below describes - a clip-verb and a video/footage noun must BOTH be
+# present as whole words, in either order - so "that was quite a task"
+# still cannot claim this capability on an unrelated word alone, and the
+# evidence check in clip_video_intent itself is unchanged.
+_CLIP_VIDEO_VERB_NOUN_PATTERN = re.compile(
+    r"\b(?:clip|cut|trim|extract)\b[\s\S]*\b(?:video|footage)\b"
+    r"|\b(?:video|footage)\b[\s\S]*\b(?:clip|cut|trim|extract)\b",
+    re.IGNORECASE,
+)
+
 
 def clip_video_intent(task: Task, participants: Sequence[str] = ()) -> bool:
     """Whether this request's own shape is an ask to cut real clips from
@@ -3829,7 +3848,7 @@ def clip_video_intent(task: Task, participants: Sequence[str] = ()) -> bool:
     one on the word alone.
     """
     text = task.description
-    if not _marker_present(text, _CLIP_VIDEO_MARKERS):
+    if not (_marker_present(text, _CLIP_VIDEO_MARKERS) or _CLIP_VIDEO_VERB_NOUN_PATTERN.search(text)):
         return False
     return find_video_path(text) is not None or bool(parse_clip_specs(text))
 

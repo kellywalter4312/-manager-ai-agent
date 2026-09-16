@@ -127,6 +127,31 @@ class ElevenLabsSpeechAdapter(SpeechAdapter):
     def availability(self) -> Availability:
         return self._availability
 
+    def probe_authorization(self) -> int:
+        """Make the one real call that proves this credential currently
+        works - the identical role ``check_authorization`` reaches through
+        ``LLMProvider.complete()`` for the reasoning axis, closing the same
+        gap for this one (closure campaign, 2026-09-16: 'check' previously
+        existed only for ``llm_provider`` - every other governed backend,
+        this one included, had construction-only ``validate`` and no way
+        to ask "would the vendor actually accept this key?").
+
+        Deliberately **not** ``available_voices()``: that method swallows
+        every exception and returns an honestly-empty tuple on ANY
+        failure, which is exactly right for a caller that only wants a
+        voice list and never wants to crash over it, but wrong for a
+        credential check - an empty tuple would then mean both "this key
+        is rejected" and "this account genuinely has zero voices",
+        indistinguishable. This method lets the real exception through
+        instead, so ``check_speech_authorization`` can tell the two apart
+        the same honest way ``check_authorization`` already does.
+
+        Returns the real voice count on success. Raises whatever the
+        vendor SDK itself raises on failure - never caught here.
+        """
+        response = self._client.voices.get_all()
+        return len(response.voices)
+
     def listen(self, timeout: float | None = None) -> str:
         raise SpeechUnavailable(
             "the elevenlabs provider is text-to-speech only; it does not "
