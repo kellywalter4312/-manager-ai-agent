@@ -1601,6 +1601,44 @@ def _after_marker(text: str, markers: tuple[str, ...]) -> str:
     return ""
 
 
+# Closure campaign (2026-09-16, REQUIREMENT_LEDGER.md N-06): every
+# _after_marker caller above only ever matches its trigger phrase
+# immediately preceding the subject ("make a diagram of X", "make a
+# handout about X"). "I need a diagram of a tank, can you make one?" -
+# found live, not by reading code - states the same thing in the equally
+# natural opposite order (subject first, confirmation-seeking ask
+# second) and matched nothing, falling through to open_conversation
+# silently instead of creating the artifact or even refusing honestly.
+# The identical fallback src.services.memory.tasks._reordered_task_subject
+# provides for task creation, generalised here to any noun set so
+# create_diagram and create_artifact can share one implementation instead
+# of two copies of the same regex.
+def _reordered_subject(text: str, *, nouns: tuple[str, ...]) -> "str | None":
+    """The subject of a reordered "I have/need/want a <noun> of/about X,
+    can you <verb>?" or "I have/need/want a <noun>[:] X" request - or
+    ``None`` when the text does not have this shape at all, so a caller
+    always tries its ordinary marker-based extraction first and only
+    reaches this as a fallback.
+
+    ``nouns`` names the specific thing this capability makes ("diagram",
+    "map", "handout"...) so an unrelated "I have a meeting at 3pm" can
+    never be mistaken for one - the identical precision every marker set
+    in this file already holds itself to, just order-free.
+    """
+    noun_group = "|".join(re.escape(n) for n in nouns)
+    pattern = re.compile(
+        rf"^(?:i\s+(?:have|need|want|would\s+love|would\s+like)|there'?s)\s+an?\s+(?:{noun_group})\b"
+        r"(?:\s*:|\s+(?:to|for|about|of|showing|explaining))\s*(?P<subject>.+?)"
+        r"(?:,\s*(?:can|could|would)\s+you\s+\w+.*)?$",
+        re.IGNORECASE,
+    )
+    match = pattern.match(str(text or "").strip())
+    if match is None:
+        return None
+    subject = match.group("subject").strip(" ,.:;!?\t\n")
+    return subject or None
+
+
 def forget_intent(task: Task, participants: Sequence[str] = ()) -> bool:
     return _marker_present(task.description, FORGET_MARKERS)
 
@@ -3063,8 +3101,13 @@ def _apply_replacement(doc: "DocumentContent", old: str, new: str) -> "tuple[Doc
     return (edited, count) if count else (doc, 0)
 
 
+_HANDOUT_NOUNS = ("handout",)
+
+
 def create_artifact_intent(task: Task, participants: Sequence[str] = ()) -> bool:
-    return _marker_present(task.description, _HANDOUT_MARKERS) or document_conversion_intent(task.description)
+    if _marker_present(task.description, _HANDOUT_MARKERS) or document_conversion_intent(task.description):
+        return True
+    return _reordered_subject(task.description, nouns=_HANDOUT_NOUNS) is not None
 
 
 def create_artifact(request: CapabilityRequest) -> TaskResult:
@@ -3421,8 +3464,13 @@ _REVISE_DIAGRAM_MARKERS: tuple[str, ...] = (
 _DIAGRAM_PROMPT_MIN_CHARS = 12
 
 
+_DIAGRAM_NOUNS = ("diagram", "map")
+
+
 def create_diagram_intent(task: Task, participants: Sequence[str] = ()) -> bool:
-    return _marker_present(task.description, _DIAGRAM_MARKERS)
+    if _marker_present(task.description, _DIAGRAM_MARKERS):
+        return True
+    return _reordered_subject(task.description, nouns=_DIAGRAM_NOUNS) is not None
 
 
 def create_diagram(request: CapabilityRequest) -> TaskResult:
@@ -3447,7 +3495,8 @@ def create_diagram(request: CapabilityRequest) -> TaskResult:
             f"save it as a real artifact yet. Currently equipped: {equipped}.",
         )
 
-    remainder = _after_marker(request.task.description, _DIAGRAM_MARKERS)
+    remainder = _after_marker(request.task.description, _DIAGRAM_MARKERS) or \
+        (_reordered_subject(request.task.description, nouns=_DIAGRAM_NOUNS) or "")
     if len(remainder) >= _DIAGRAM_PROMPT_MIN_CHARS:
         prompt = remainder
     else:

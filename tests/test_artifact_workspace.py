@@ -840,6 +840,34 @@ class TestDiagramCapabilityRoutingAndBoundaries:
     def test_an_incidental_mention_of_diagram_alone_does_not_falsely_claim(self):
         assert not create_diagram_intent(Task(description="that diagram in the textbook was confusing"))
 
+    def test_a_reordered_request_still_routes_and_extracts_the_real_subject(self):
+        """Closure campaign (2026-09-16, N-06): "make a diagram of X" and
+        "I need a diagram of X, can you make one?" state the identical
+        ask in the equally natural opposite order - found live falling
+        through to open_conversation entirely, silently."""
+        from src.manager.capabilities import _reordered_subject, _DIAGRAM_NOUNS
+
+        chosen = select_capability(
+            Task(description="I need a diagram of a tank, can you make one?"), MANAGER_CAPABILITIES
+        )
+        assert chosen is CREATE_DIAGRAM
+
+        assert _reordered_subject(
+            "I need a diagram of a tank engine cutaway, can you make one?", nouns=_DIAGRAM_NOUNS
+        ) == "a tank engine cutaway"
+
+    def test_an_unrelated_declarative_statement_is_not_mistaken_for_a_diagram(self):
+        assert not create_diagram_intent(Task(description="I have a meeting at 3pm."))
+
+    def test_a_reordered_handout_request_also_routes_correctly(self):
+        """The identical N-06 fix, shared: create_artifact (handouts) uses
+        the same _reordered_subject fallback create_diagram does."""
+        chosen = select_capability(
+            Task(description="I need a handout about photosynthesis, can you make one?"),
+            MANAGER_CAPABILITIES,
+        )
+        assert chosen is CREATE_ARTIFACT
+
     def test_revise_markers_route_to_revise_diagram(self):
         chosen = select_capability(
             Task(description="revise the diagram to add labels"), MANAGER_CAPABILITIES

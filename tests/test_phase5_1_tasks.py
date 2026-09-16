@@ -693,6 +693,31 @@ class TestExtractionFunctionsDirectly:
         assert create_task_intent("remind me to call the bank")
         assert not create_task_intent("what do you think about tasks")
 
+    def test_a_reordered_declaration_is_recognised_and_extracted(self):
+        """Closure campaign (2026-09-16, N-06): "I have a task: X" states
+        the identical thing "add a task: X" does, in the equally natural
+        opposite order - found live falling through to open_conversation
+        entirely, silently, with no task created and no honest refusal
+        either."""
+        from src.services.memory.tasks import extract_task_title
+
+        cases = {
+            "I have a task: finish the report.": "finish the report",
+            "I have a task to finish the report.": "finish the report",
+            "I need a task for finishing the report.": "finishing the report",
+        }
+        for text, expected in cases.items():
+            assert create_task_intent(text), text
+            assert extract_task_title(text) == expected, text
+
+    def test_an_unrelated_declarative_statement_is_not_mistaken_for_a_task(self):
+        """The reordered shape still requires the noun "task" itself -
+        an ordinary "I have a ..." statement about something else must
+        never be mistaken for one."""
+        assert not create_task_intent("I have a meeting at 3pm.")
+        assert not create_task_intent("I have a dentist appointment.")
+        assert not create_task_intent("that was quite a task")
+
     def test_complete_task_intent_recognises_its_own_markers(self):
         assert complete_task_intent("i finished the report")
         assert not complete_task_intent("what are my tasks")

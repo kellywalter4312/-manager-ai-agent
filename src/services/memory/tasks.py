@@ -143,10 +143,45 @@ def _after_marker(text: str, markers: tuple[str, ...]) -> str:
     return ""
 
 
+# Closure campaign (2026-09-16, REQUIREMENT_LEDGER.md N-06): _CREATE_MARKERS
+# above only ever matches the trigger phrase immediately preceding the task's
+# own content ("add a task: X"). "I have a task: finish the report." - found
+# live, not by reading code - states the same thing in the equally natural
+# opposite order and matched nothing at all, silently falling through to
+# open_conversation instead of creating a task or even refusing honestly.
+#
+# This is the shared fallback _after_marker's own callers reach for only
+# when the primary marker-based extraction finds nothing - never a
+# replacement for it, and deliberately narrow: the noun ("task") must
+# still be named, so "I have a meeting at 3pm" (an unrelated declarative
+# statement) is never mistaken for a task the same way _CREATE_MARKERS'
+# own precision already refuses "that was quite a task".
+_REORDERED_TASK_PATTERN = re.compile(
+    r"^(?:i\s+(?:have|need|want|would\s+love|would\s+like)|there'?s)\s+an?\s+task\b"
+    r"(?:\s*:|\s+(?:to|for|about|of))\s*(?P<subject>.+?)"
+    r"(?:,\s*(?:can|could|would)\s+you\s+\w+.*)?$",
+    re.IGNORECASE,
+)
+
+
+def _reordered_task_subject(text: str) -> "str | None":
+    """The task's own content, from the reordered "I have a task: X" shape -
+    see ``_REORDERED_TASK_PATTERN``'s own comment. ``None`` when the text
+    does not have this shape at all, so a caller always tries the ordinary
+    marker-based extraction first and only reaches this as a fallback."""
+    match = _REORDERED_TASK_PATTERN.match(str(text or "").strip())
+    if match is None:
+        return None
+    subject = match.group("subject").strip(" ,.:;!?\t\n")
+    return subject or None
+
+
 def create_task_intent(text: str) -> bool:
     """The ``claims=`` predicate for creating a task - including a reminder
     or alarm set for a time."""
     if _marker_present(text, _CREATE_MARKERS):
+        return True
+    if _reordered_task_subject(text) is not None:
         return True
     return reminder_intent(text)
 
@@ -252,8 +287,13 @@ def extract_reminder(text: str, *, now) -> "tuple[str, object] | None":
 
 
 def extract_task_title(text: str) -> str:
-    """The task's own title - whatever follows the creation marker."""
-    return _after_marker(text, _CREATE_MARKERS)
+    """The task's own title - whatever follows the creation marker, or,
+    when nothing follows one (including the reordered "I have a task: X"
+    shape - see ``_reordered_task_subject``), the reordered subject."""
+    title = _after_marker(text, _CREATE_MARKERS)
+    if title:
+        return title
+    return _reordered_task_subject(text) or ""
 
 
 def build_task_record(text: str, *, agent_name: str, reminder: "tuple[str, object] | None" = None) -> MemoryRecord | None:
