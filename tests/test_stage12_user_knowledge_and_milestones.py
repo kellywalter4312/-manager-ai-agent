@@ -399,6 +399,39 @@ class TestSpecialistCapture:
 # ---------------------------------------------------------------------------
 
 
+class TestExtractMilestoneTypeDerivation:
+    """Closure campaign (2026-09-16, N-09): "I graduated today!" matched
+    the real achievement shape (the verb "graduated" is recognised), but
+    with nothing but a bare time word after it, the stored milestone_type
+    became "today" instead of "graduated" - silently wrong, not honestly
+    refused. Distinct from the verb list's own deliberate, documented
+    limits (this module's own docstring: generic accomplishment verbs,
+    never a fixed vocabulary of achievement *types*) - once the shape is
+    genuinely recognised, its type must never be a meaningless adverb."""
+
+    def test_a_bare_time_word_falls_back_to_the_verb_itself(self):
+        from src.services.memory.milestones import extract_milestone
+
+        milestone_type, description = extract_milestone("I graduated today!")
+        assert milestone_type == "graduated"
+        assert description == "I graduated today!"
+
+    def test_a_real_object_is_still_captured_normally(self):
+        from src.services.memory.milestones import extract_milestone
+
+        milestone_type, _ = extract_milestone("I got promoted to senior engineer!")
+        assert milestone_type == "promoted_to_senior_engineer"
+
+    def test_first_still_prefixes_a_real_object_but_not_a_bare_time_word(self):
+        from src.services.memory.milestones import extract_milestone
+
+        milestone_type, _ = extract_milestone("I just launched my first paying client!")
+        assert milestone_type == "first_paying_client"
+        # A bare time word falls back to the verb, never "first <time word>".
+        milestone_type2, _ = extract_milestone("I just achieved now!")
+        assert milestone_type2 == "achieved"
+
+
 class TestMilestoneCreationAndRetrieval:
     def test_an_explicit_milestone_marker_stores_immediately(self):
         manager = real_manager()

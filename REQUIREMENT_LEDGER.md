@@ -89,6 +89,23 @@ files, 926 extracted user messages).
 | COACH-02 | Not a hardcoded "therapist mode"/"school mode" — natural interaction | VERIFIED WORKING | Same capability handles guidance/reflection/planning without mode-switching, §52.39 | none |
 | COACH-03 | Guidance conversations feed the canonical personal-context system, no second memory | VERIFIED WORKING | Routes through `personal_context.py`, same as MEM-01 | none |
 
+## C2. Milestones & Contextual Celebration (found this round — no prior ledger row)
+
+Added 2026-09-16. Directly answers the campaign's own explicit demand:
+"Do NOT hardcode: birthday -> animation, graduation -> animation..." —
+verify contextual intelligence, not a celebration list. `src/services/memory/milestones.py`'s
+own docstring already states the right architecture ("`milestone_type` is
+whatever phrase the person actually used... never matched against a fixed
+vocabulary"); this section records what live-testing against that claim
+actually found.
+
+| ID | Requirement | Status | Evidence | Dependencies / Limitations |
+|---|---|---|---|---|
+| MILE-01 | Milestone *type* is genuinely derived from what was said, never a fixed vocabulary of achievement kinds | VERIFIED WORKING | `extract_milestone` — live-tested with "I got promoted to senior engineer!" -> `promoted_to_senior_engineer` and "I just launched my first paying client!" -> `first_paying_client`, neither of which appears anywhere in the source as a literal string | none |
+| MILE-02 | Recognition never auto-stores every conversational achievement statement — an explicit governance step, per the project's own "do not automatically turn every conversational statement into a milestone" | VERIFIED WORKING | `tests/test_stage12_user_knowledge_and_milestones.py::test_a_bare_achievement_statement_is_not_silently_stored_by_default` | none |
+| MILE-03 | The trigger *verb* set that recognises the achievement shape at all | VERIFIED PARTIAL, by explicit documented design | `_ACHIEVEMENT` regex: `got/achieved/landed/reached/launched/completed/hit/earned/graduated` — the module's own docstring calls these "verbs of accomplishment in general, not any one domain's vocabulary", the same reasoning `media_production`'s anchoring uses (N-06) | **Found live this round**: "I just finished building my own telescope from scratch!" and "I finally ran my first marathon!" are not recognised — "finished"/"ran" are not in the verb list. Deliberately not broadened this round: an open-ended "any past-tense verb" check would reintroduce false positives this design exists to avoid ("I ran to catch the bus" is not an achievement). Honestly documented as a real, bounded gap in verb *coverage* — distinct from, and not evidence against, MILE-01's claim that the *type* itself is never hardcoded |
+| MILE-04 | Milestone type derivation is correct even when the achievement clause has no real object | VERIFIED WORKING — **repaired 2026-09-16** | Was VERIFIED BROKEN, found live: "I graduated today!" matched the real achievement shape but stored `milestone_type="today"` (a meaningless time adverb) instead of "graduated" — silently wrong, not honestly refused, and downstream-consequential since `milestone_type` is both the storage/retrieval tag and what `request.celebration(milestone_type, ...)` receives for reaction selection. Fixed: a bare time word ("today"/"yesterday"/"now"/"recently"/"finally"/"just"/"already") after the verb falls back to the verb itself as the type. 3 new regression tests; broader batch of 142 across 4 test files passing | none |
+
 ## D0. Four Separable Kinds of Knowing (found this round, governs section D)
 
 `src/providers/knowledge.py`'s own docstring names an architectural

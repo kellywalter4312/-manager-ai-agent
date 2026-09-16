@@ -42,10 +42,22 @@ MILESTONE_KIND = "milestone"
 # "reached", "launched", "completed", "hit", "earned", "graduated" are
 # verbs of accomplishment in general, not any one domain's vocabulary.
 _ACHIEVEMENT = re.compile(
-    r"\bi (?:just )?(?:got|achieved|landed|reached|launched|completed|hit|earned|graduated)\s+"
-    r"(?:my |a |the )?(first\s+)?([^.!?]+)",
+    r"\bi (?:just )?(?P<verb>got|achieved|landed|reached|launched|completed|hit|earned|graduated)\s+"
+    r"(?:my |a |the )?(?P<first>first\s+)?(?P<rest>[^.!?]+)",
     re.IGNORECASE,
 )
+# Closure campaign (2026-09-16, N-09): "I graduated today!" matched
+# _ACHIEVEMENT (the verb "graduated" is in the list), but with nothing
+# but a bare time word after it, group(rest) captured "today" - so the
+# stored milestone_type became "today" instead of "graduated", silently
+# wrong rather than honestly refused. This is a real bug distinct from
+# the verb list's own deliberate, documented limits (see this module's
+# own docstring on why the verb set stays finite): once the achievement
+# *shape* is genuinely recognised, its type must not be a meaningless
+# adverb. These bare completions fall back to the verb itself.
+_BARE_TIME_WORDS = frozenset({
+    "today", "yesterday", "now", "recently", "finally", "just", "already",
+})
 # The single explicit, always-store trigger - the same "an explicit ask
 # is never ambiguous" rule "remember that X" and "record this for X"
 # already live by. A bare achievement statement below this is the
@@ -89,10 +101,16 @@ def extract_milestone(text: str) -> tuple[str, str] | None:
     match = _ACHIEVEMENT.search(stripped)
     if match is None:
         return None
-    is_first = bool(match.group(1))
-    noun_phrase = match.group(2).strip()
+    is_first = bool(match.group("first"))
+    noun_phrase = match.group("rest").strip()
     if not noun_phrase:
         return None
+    # A bare time word ("today", "already"...) is not what was achieved -
+    # the verb itself is the only real content of the sentence in that
+    # case, so it becomes the type instead of a meaningless adverb.
+    if noun_phrase.rstrip(" !").lower() in _BARE_TIME_WORDS:
+        noun_phrase = match.group("verb")
+        is_first = False
     milestone_type = _slug(("first " if is_first else "") + noun_phrase)
     description = stripped.strip()
     return milestone_type, description
