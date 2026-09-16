@@ -28,18 +28,17 @@ already-tested production mechanisms - never a new architecture:
                         continuous multi-step objective rather than in
                         isolation
 
-**A second, real, tested mechanism found genuinely more advanced but
-deliberately not activated:** `src/manager/cognitive_loop.py` +
-`src/manager/actions.py` (`CognitiveLoop`/`ActionExecutor`) already
-implement Brain-driven action *selection* (not just capability-matching)
-with independent Router re-confirmation before anything executes - real,
-comprehensively tested code, asserted to stay unreachable from any
-production entry point by `tests/test_reachable_deliberation.py` (Trust
-in Stages, ARCHITECTURE.md's own standing rule: permission moves only
-when a person moves it). This checkpoint verifies that machinery remains
-real, tested and reachable-in-principle without activating it - see
-`TestCognitiveLoopRemainsStagedButReal` below. No production entry point
-was added.
+**A second, more advanced Brain-driven action-selection mechanism**
+(`src/manager/cognitive_loop.py` + `src/manager/actions.py`,
+`CognitiveLoop`/`ActionExecutor`) was once staged here, deliberately
+unreachable from production. On 2026-09-15 (ARCHITECTURE.md §52.48) it
+was traced against the canonical architecture and removed rather than
+activated: `objective_loop` already runs the multi-step, Brain-judged
+loop through `answer_with_collaboration` using the full `decide()` the
+rest of the system trusts, while the staged pair's own router-concurrence
+check used the narrower `diagnose()`. See `TestTheBrainDrivenLoopIsTheCanonicalOne`
+below, which now asserts the removed pair stays gone and that
+`objective_loop` is the one production-reachable loop.
 
 Every behavioural test here exercises the real production path
 (`scripts/control_center.py::build()` + `scripts/exchange.py::exchange()`)

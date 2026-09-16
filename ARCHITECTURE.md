@@ -4,29 +4,19 @@
 what exists, this file wins — and where this file and the *code* disagree, the
 code wins and this file is wrong and must be corrected.
 
-Last synchronised against: `HEAD = 33a55bc`, with the Phase 1 channel/event
-work, the Phase 2 Conversation, the Phase 2.5 memory/provenance work and the
-Phase 3 voice identity, the Phase 3.5 audit fix, Phase 4 addressing, Phase 5
-invitation, Phase 5.1 identity resolution, per-agent integration grants,
-Phase 5.2 session continuity, the interface foundation, its visual pass
-(§26), its live-serving milestone (§27), its live-interaction milestone
-(§28), its per-agent visual identity (§29), its consolidated
-`AgentVisualIdentity` resolver (§30) and its agent workspace foundation
-(§31), its camera-focus/Room-presence extension (§32), Alfred's genuine
-3D WebGL/Three.js environment (§33), its generalization to every
-agent's own 3D environment (§34), per-agent genuine 3D Brain and
-Memory interfaces (§35), the Conversation Room's own genuine 3D
-environment (§36), the replaceable Visual Environment Registry (§37),
-the first stage of Governed System Evolution — the versioning and
-migration seam, `SYSTEM_VERSION` (§38) — Stage 5's stable Manager
-identity and memory ownership (§39), Stage 6's Upgrade Manifest (§40),
-Stage 7's Upgrade Planner (§41), Stage 8's Upgrade Executor (§42),
-Stage 8A's ambient voice activation and continuous voice conversation
-(§43), Stage 9's governed upgrade lifecycle (§44), Stage 10's production
-speech provider seam and multimodal foundation (§45), Stage 11.1's agent
-personality foundation (§46), and Stage 11.2's agent voice identity and
-Conversation Room voice path (§47) present and **uncommitted**.
-**3832 tests passing.**
+Last synchronised against: `HEAD = 0bca94a` (2026-09-15), which carries
+everything the previous synchronisation line named (Phase 1 through
+Stage 11.2, §1–§47) plus the full Pre-Stage-9 closure campaign: REPAIR-01
+(§52.30) through Campaign 13 (§52.41), and the five Post-Pre-Stage-9
+campaigns (§52.44–§52.48) that resolved the owner's standing status list
+and removed every module that had been left prepared-but-unwired.
+**7785 tests passing, both fixed-order and randomised-order, working
+tree clean.** See `REQUIREMENT_LEDGER.md` for the current, single
+canonical status of every tracked requirement — this file's own §0–§4
+below predate the Pre-Stage-9 campaigns and are known stale in places
+(e.g. §0.3's row for `cognitive_loop.py`/`actions.py`, both removed in
+§52.48); treat REQUIREMENT_LEDGER.md as authoritative for status and
+this section as authoritative for implementation narrative only.
 
 Status vocabulary, used strictly:
 
@@ -61,11 +51,14 @@ detailed section is authoritative and this one is stale and must be
 corrected to match it — the same rule the document's own opening
 paragraph already states for itself versus the code.
 
-**Current, accurate test count (uncommitted working tree, not the `HEAD`
-this document's own header was last synchronised against): 5834 passed,
-both fixed-order and randomised-order, as of 0.4 Canonical Project State.**
-The header above is a historical record of an actual commit and is left
-alone; this line is the live figure.
+**Current, accurate test count: 7785 passed, both fixed-order and
+randomised-order, at HEAD `0bca94a` (2026-09-15), working tree clean.**
+This line and the header above were both stale as of 2026-09-16 (the
+header still named `33a55bc`, this line still said 5834) and have been
+corrected in the same pass that created `REQUIREMENT_LEDGER.md` — see
+that file for current per-requirement status; this section is narrative
+history only and is not re-derived from it automatically, so it can
+drift again and should be spot-checked, not trusted blindly.
 
 ### 0.1 What Alfred OS is (requirements)
 
@@ -119,7 +112,7 @@ this section's writing):
 | Clarification / conflict resolution (general, not fact-type-specific) | ✅ COMPLETE | `src/manager/guided_interaction.py`, `ManagerBrain.discern_ambiguity` | `tests/test_interaction_clarification_and_learning.py::TestClarificationAndConflictResolution` (7) | A stated "either Tuesday or Wednesday" genuinely produced a clarifying question through real `exchange()`; the chosen value was retained and a *pre-existing* conflicting record was genuinely superseded |
 | Interactive guided learning/assessment (arbitrary subject) | ✅ COMPLETE | `src/manager/guided_interaction.py`, `ManagerBrain.discern_activity_start`/`compose_activity_question`/`evaluate_activity_answer`, `src/manager/activity_session.py` | `tests/test_interaction_clarification_and_learning.py::TestInteractiveLearningAndAssessment` (11) | A real multi-question session on two unrelated, never-hardcoded subjects (arithmetic, Japanese greetings) genuinely asked questions, graded answers with exact deterministic scoring, adapted the next question to prior answers, and preserved a progress summary to real governed memory on completion |
 | Full agent loop (objective→plan/decompose→delegate→collaborate→execute→observe→adapt→remember→continue) | ✅ COMPLETE, via already-wired mechanisms | `collaboration_candidates`/`start_collaboration`/`answer_with_collaboration` (`src/manager/collaboration_entry.py`) composed with existing memory/conversation | `tests/test_agent_system_foundation.py::TestTheFullLoopThroughAlreadyWiredMechanisms` (6) | One continuous real objective ("check my inbox... and give me your take on the market") genuinely delegated to Arthur, whose real analyzer ran against the real sample inbox; Alfred's synthesis genuinely cited Arthur's real finding; a follow-up genuinely adapted using that result; a stated preference was genuinely retained and correctly recalled several turns later |
-| Brain-driven action selection (`CognitiveLoop`/`ActionExecutor`) | 🟡 PREPARED — deliberately staged, by explicit user decision | `src/manager/cognitive_loop.py`, `src/manager/actions.py` | `tests/test_agent_system_foundation.py::TestCognitiveLoopRemainsStagedButReal` (3), pre-existing `test_cognitive_loop.py`/`test_action_layer.py`/`test_reachable_deliberation.py` | Constructed and run directly, proving it is genuine working code; independently re-confirmed **not** reachable from any production entry point (`compute_reachability`); its own Router-concurrence safety check proven to refuse a delegation nobody else agrees with. Not activated — see §52.9 |
+| Brain-driven action selection (`CognitiveLoop`/`ActionExecutor`) | **Removed, 2026-09-15 (§52.48)** — traced against the canonical architecture and deleted rather than activated, along with its dedicated tests | was `src/manager/cognitive_loop.py`, `src/manager/actions.py` (now removed); canonical loop is `src/manager/objective_loop.py` | `tests/test_agent_system_foundation.py::TestTheBrainDrivenLoopIsTheCanonicalOne` asserts the removed pair stays unreferenced and that `objective_loop` is the one production-reachable loop | This row previously described the pair as 🟡 PREPARED-but-staged; that state ended at §52.48 — see ARCHITECTURE.md §52.48 (line ~9872) and REQUIREMENT_LEDGER.md row N-02 |
 
 ### 0.4 Current work
 
