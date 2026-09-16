@@ -332,6 +332,61 @@ def is_question_or_request(text: str) -> bool:
     return _is_question_or_request(text)
 
 
+# Closure campaign (2026-09-16, REQUIREMENT_LEDGER.md N-08): found live -
+# "I am a Python expert." matched no extractor at all and silently fell
+# through to open_conversation, not learned and not honestly refused
+# either. _SKILL_LEARNED_PATTERNS above only recognises a completed
+# "learned/mastered/know" verb; extract_habitual_statement deliberately
+# excludes "am" (_NOT_A_LIFE_VERB) because "I am wondering"/"I am hoping"
+# are mental-state hedges, not facts. Neither shape covers the single most
+# ordinary way a person states a profession, role or identity: "I am a/an
+# <noun>." This is precisely the founding example the whole-ecosystem
+# closure brief itself names (Python -> C++ -> Java learning must not
+# need new code per subject) - and "I am a Python developer" is the
+# natural phrasing, not "I have learned Python developer".
+#
+# "a bit"/"a little"/"a lot" are excluded because they are hedge
+# quantifiers, not an article introducing a profession/role noun - "I am
+# a bit worried" must never be learned as an identity fact the way "I am
+# a doctor" genuinely should be.
+_IDENTITY_HEDGE_OPENERS = frozenset({"bit", "little", "lot"})
+_IDENTITY_STATEMENT = re.compile(
+    r"\bi'?m\s+an?\s+(?P<topic>[^.!?]{2,80})|\bi\s+am\s+an?\s+(?P<topic2>[^.!?]{2,80})",
+    re.IGNORECASE,
+)
+_STARTS_WITH_VOWEL_SOUND = re.compile(r"^[aeiou]", re.IGNORECASE)
+
+
+def _a_or_an(word: str) -> str:
+    return "an" if _STARTS_WITH_VOWEL_SOUND.match(word) else "a"
+
+
+def extract_identity_statement(text: str) -> "PersonalContextCandidate | None":
+    """"I am a Python developer.", "I'm a vegetarian." - an ordinary
+    profession/role/identity statement, the one common shape none of the
+    other extractors in this module recognise (see the comment above)."""
+    stripped = strip_vocative_address(str(text or "")).strip()
+    if _is_question_or_request(stripped) or _NEGATED.search(stripped):
+        return None
+    match = _IDENTITY_STATEMENT.search(stripped)
+    if match is None:
+        return None
+    topic = match.group("topic") or match.group("topic2")
+    first_word = topic.strip().split(None, 1)[0].lower() if topic.strip() else ""
+    if first_word in _IDENTITY_HEDGE_OPENERS:
+        return None
+    topic = _reject_if_stopword(_clean_topic(topic))
+    if topic is None:
+        return None
+    topic = _bounded(topic)
+    return PersonalContextCandidate(
+        topic=topic,
+        content=f"The user is {_a_or_an(topic)} {topic}.",
+        category="identity",
+        status=STATUS_CURRENT,
+    )
+
+
 def extract_skill_learned(text: str) -> "PersonalContextCandidate | None":
     stripped = str(text or "")
     if _is_question_or_request(stripped):
@@ -609,13 +664,14 @@ _IRREGULAR_THIRD_PERSON = {"have": "has", "be": "is", "go": "goes", "do": "does"
 def extract_personal_context_candidate(text: str) -> "PersonalContextCandidate | None":
     """Every deterministic shape this module recognises, tried in order:
     discontinuation first (a "no longer/changed" statement should never be
-    mistaken for a fresh one), then skill-acquired, then a study statement,
-    then update-declaration/starting, then the general possessive
-    declaration. The first genuine match wins; nothing here ever combines
-    two shapes from one sentence."""
+    mistaken for a fresh one), then skill-acquired, then an identity
+    statement ("I am a Python developer" - closure campaign, 2026-09-16),
+    then a study statement, then update-declaration/starting, then the
+    general possessive declaration. The first genuine match wins; nothing
+    here ever combines two shapes from one sentence."""
     for extractor in (
-        extract_discontinued, extract_skill_learned, extract_learning_activity,
-        extract_update_declaration, extract_possessive_declaration,
+        extract_discontinued, extract_skill_learned, extract_identity_statement,
+        extract_learning_activity, extract_update_declaration, extract_possessive_declaration,
         # Last: every shape above is more specific, and a habitual statement
         # is the general case they are special cases of.
         extract_habitual_statement,

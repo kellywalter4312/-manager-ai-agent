@@ -15,6 +15,7 @@ from src.services.memory.personal_context import (
     build_personal_context_record,
     current_personal_context_for,
     extract_discontinued,
+    extract_identity_statement,
     extract_personal_context_candidate,
     extract_skill_learned,
     extract_update_declaration,
@@ -46,6 +47,49 @@ class TestSkillLearned:
 
     def test_no_false_positive_on_ordinary_conversation(self):
         assert extract_skill_learned("I don't know what to do") is None
+
+
+class TestIdentityStatement:
+    """Closure campaign (2026-09-16, N-08): "I am a Python expert." matched
+    no extractor at all - not extract_skill_learned (needs a completed
+    "learned/mastered/know" verb), not extract_habitual_statement
+    (deliberately excludes "am") - and silently fell through to
+    open_conversation, live, in a real conversation. This is precisely
+    the campaign's own founding example: Python -> C++ -> Java learning
+    must not need new code per subject, and "I am a Python developer" is
+    the single most natural way to say it."""
+
+    def test_i_am_a_x(self):
+        c = extract_identity_statement("I am a Python expert.")
+        assert c is not None and c.topic == "Python expert" and c.category == "identity"
+        assert c.content == "The user is a Python expert."
+
+    def test_im_contraction_and_an_before_a_vowel(self):
+        c = extract_identity_statement("I'm an engineer.")
+        assert c is not None and c.content == "The user is an engineer."
+
+    def test_reaches_the_general_extractor_and_intent_too(self):
+        assert extract_personal_context_candidate("I am a doctor.") is not None
+        assert personal_context_intent("I am a vegetarian.")
+
+    def test_hedge_quantifiers_are_never_mistaken_for_an_identity(self):
+        """"a bit"/"a little"/"a lot" are quantifiers, not an article
+        introducing a profession/role noun - must never be learned as if
+        the user's identity were "bit worried"."""
+        assert extract_identity_statement("I am a bit worried about my exam.") is None
+        assert extract_identity_statement("I am a little tired today.") is None
+
+    def test_a_question_is_never_learned_as_a_statement(self):
+        assert extract_identity_statement("Am I a good fit for this role?") is None
+
+    def test_a_negated_identity_is_not_learned_as_a_positive_one(self):
+        assert extract_identity_statement("I'm not a Python expert.") is None
+
+    def test_bare_i_am_with_no_article_is_left_to_the_ordinary_path(self):
+        """"I am tired"/"I am sorry" have no article at all - out of this
+        extractor's scope entirely, exactly as intended."""
+        assert extract_identity_statement("I am tired.") is None
+        assert extract_identity_statement("I am sorry about that.") is None
 
 
 class TestUpdateDeclarationAndStarting:
