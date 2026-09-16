@@ -333,6 +333,23 @@ class TestImageAnalysisCapability:
     def test_an_unrelated_declarative_statement_is_not_mistaken_for_an_image_request(self):
         assert not image_analysis_intent(Task(description="I have a meeting at 3pm."))
 
+    def test_a_creation_request_does_not_falsely_claim_analysis_on_the_shared_noun(self):
+        """Real word/intent collision found live (2026-09-16): "image"/
+        "picture" are legitimate nouns for both an analysis request and a
+        generation request - the noun alone previously let image_analysis
+        (alphabetically first) silently win every such collision, even
+        ones clearly asking to *create* something. The confirmation
+        clause's own verb now disambiguates."""
+        assert not image_analysis_intent(
+            Task(description="I would love an image of a cat, can you make one?")
+        )
+        assert not image_analysis_intent(
+            Task(description="I want a picture of a sunset, can you generate it?")
+        )
+        assert image_analysis_intent(
+            Task(description="I want a look at this picture, can you describe it?")
+        )
+
     def test_with_the_real_default_null_brain_refuses_honestly(self, tmp_path):
         """The real default system's own NullBrain still provides an
         honest analyze_image (bound, never None, exactly like converse)

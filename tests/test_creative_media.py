@@ -317,6 +317,81 @@ class TestMediaProductionShapeRecognition:
         cap = select_capability(Task(description=text), None, participants=["Alfred"])
         assert cap.name != "media_production", text
 
+    @pytest.mark.parametrize(
+        "text,expected_operation",
+        [
+            ("I want a video of a futuristic city, can you generate it?", "generate_video"),
+            ("I have a video of these clips, can you compose it?", "compose"),
+            ("I would love an image of a cat, can you make one?", "illustrate"),
+            ("I need a voiceover for this scene, can you narrate it?", "narrate"),
+        ],
+    )
+    def test_a_reordered_request_selects_the_correct_operation(self, text, expected_operation):
+        """Closure campaign (2026-09-16, N-06's sixth and final instance):
+        "generate a video of X" and "I want a video of X, can you generate
+        it?" state the identical ask in the equally natural opposite
+        order. Was deliberately left unfixed in the first N-06 pass
+        because the anchoring is explicit, stated design (distinguishing
+        *talking about* media from *asking* for it) - re-examined once the
+        shared _reordered_subject mechanism existed and was proven not to
+        match a question at all, so that guard survives intact.
+
+        compose/generate_video share "video"/"clip" vocabulary, so this
+        also proves the confirmation clause's own verb - not the noun
+        alone - correctly disambiguates which one is meant, the identical
+        distinction the forward-ordered patterns already draw."""
+        from src.manager.capabilities import _media_reordered_operation
+
+        cap = select_capability(Task(description=text), None, participants=["Alfred"])
+        assert cap.name == "media_production", text
+        assert _media_reordered_operation(text) == expected_operation, text
+
+    def test_scene_does_not_collide_between_illustrate_and_video_operations(self):
+        """A narrower version of the same collision class, found while
+        fixing the image_analysis one: "scene" is ambiguous between a
+        single illustration and a video segment. The reordered fallback's
+        priority order used to check illustrate's nouns unconditionally
+        first, so a "scene" mentioned with a clearly video-shaped verb
+        (compose/generate) would have been silently misrouted to
+        illustrate regardless."""
+        from src.manager.capabilities import _media_reordered_operation
+
+        assert _media_reordered_operation("I need a scene of a sunset, can you make one?") == "generate_video"
+        assert _media_reordered_operation("I need a scene of a sunset, can you compose it?") == "compose"
+
+    def test_a_question_about_media_still_never_matches_even_reordered(self):
+        """The reordered fallback's own false-positive guard: it can only
+        ever match a declarative "I have/need/want" shape, never a
+        question - "what is a good style for narration here?" has no
+        such opener."""
+        cap = select_capability(
+            Task(description="What is a good style for narration here?"), None, participants=["Alfred"]
+        )
+        assert cap.name != "media_production"
+
+    def test_does_not_collide_with_image_analysis_on_the_shared_noun(self):
+        """A real word/intent collision found live while building this
+        fix: "image"/"picture" are legitimate nouns for BOTH a generation
+        request (media_production) and an analysis request
+        (image_analysis) - the noun alone cannot tell them apart, and
+        image_analysis previously won every such collision purely by
+        sorting first alphabetically (N-07's tie-break). The confirmation
+        clause's own verb now disambiguates: "make it" means generate,
+        "describe it" means analyse."""
+        from src.manager.capabilities import IMAGE_ANALYSIS
+
+        generation = select_capability(
+            Task(description="I would love an image of a cat, can you make one?"),
+            None, participants=["Alfred"],
+        )
+        assert generation.name == "media_production"
+
+        analysis = select_capability(
+            Task(description="I want a look at this picture, can you describe it?"),
+            None, participants=["Alfred"],
+        )
+        assert analysis is IMAGE_ANALYSIS
+
 
 # ---------------------------------------------------------------------------
 # 6. general_assistance no longer dumps a roster for creative writing

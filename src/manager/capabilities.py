@@ -2791,6 +2791,21 @@ IMAGE_AUTHENTICITY = ManagerCapability(
 
 
 _IMAGE_ANALYSIS_NOUNS = ("image", "photo", "picture")
+# A real word/intent collision, found live (2026-09-16) while extending the
+# identical reordered mechanism to media_production: "I would love an image
+# of a cat, can you make one?" and "I want a look at this picture, can you
+# describe it?" both name "image"/"picture" as their noun, so the noun
+# alone cannot tell a generation request from an analysis request apart -
+# and image_analysis (alphabetically before media_production) silently won
+# every such collision (N-07's tie-break mechanism), including the ones
+# that were clearly asking to *create* something. The confirmation
+# clause's own verb is what actually distinguishes them, so this now
+# requires an analysis-shaped verb there and explicitly excludes
+# creation-shaped ones - never both capabilities trusting the noun alone.
+_IMAGE_ANALYSIS_REORDERED_VERB = re.compile(
+    r"\b(?:describe|look|see|tell|show|analyz[es]|explain)\b", re.IGNORECASE
+)
+_IMAGE_CREATION_VERB = re.compile(r"\b(?:make|generate|create|produce|draw)\b", re.IGNORECASE)
 
 
 def image_analysis_intent(task: Task, participants: Sequence[str] = ()) -> bool:
@@ -2804,7 +2819,11 @@ def image_analysis_intent(task: Task, participants: Sequence[str] = ()) -> bool:
     # falls back to the raw text when it is not an exact marker match
     # (see the helper just above IMAGE_ANALYSIS's own registration), so
     # only the intent side needed broadening.
-    return _reordered_subject(task.description, nouns=_IMAGE_ANALYSIS_NOUNS) is not None
+    if _reordered_subject(task.description, nouns=_IMAGE_ANALYSIS_NOUNS) is None:
+        return False
+    if _IMAGE_CREATION_VERB.search(task.description):
+        return False
+    return bool(_IMAGE_ANALYSIS_REORDERED_VERB.search(task.description))
 
 
 def image_analysis(request: CapabilityRequest) -> TaskResult:
@@ -3765,6 +3784,33 @@ _MEDIA_GENERATE_VIDEO_PATTERN = re.compile(
 )
 
 
+# Closure campaign (2026-09-16, N-06): the last of six confirmed
+# instances, deliberately left unfixed in the first pass because this
+# function's anchoring is explicit, stated design - distinguishing
+# *talking about* narration/images/video from *asking* for the
+# tool-gated work. Re-examined once the shared mechanism existed and
+# was proven elsewhere: _reordered_subject's declarative-desire shape
+# ("I have/need/want a <noun>...") cannot match a question at all - "what
+# is a good style for narration here?" has no such opener - so the same
+# false-positive guard this function's docstring describes survives
+# intact. Confirmed live before applying. Noun sets mirror each pattern's
+# own vocabulary above, never invented.
+_MEDIA_NARRATE_NOUNS = ("narration", "voiceover")
+# "scene" deliberately excluded from the *reordered* illustrate noun set
+# (the forward-ordered _MEDIA_ILLUSTRATE_PATTERN above still recognises
+# "draw a scene", unaffected - that pattern is verb-anchored, so "scene"
+# there never collides with compose/generate_video). Found live: unlike
+# the forward-ordered patterns, which disambiguate by verb first, the
+# reordered fallback's priority order checked illustrate's nouns
+# unconditionally before compose/generate_video's, so "I need a scene of
+# a sunset, can you compose it?" would have been silently routed to
+# illustrate regardless of the verb actually asking for composition.
+# image/picture/illustration/drawing/character remain unambiguous.
+_MEDIA_ILLUSTRATE_NOUNS = ("image", "picture", "illustration", "drawing", "character")
+_MEDIA_COMPOSE_NOUNS = ("video", "clip", "scene")
+_MEDIA_GENERATE_VIDEO_NOUNS = ("video", "clip", "animation", "anime")
+
+
 def media_production_intent(task: Task, participants: Sequence[str] = ()) -> bool:
     """Whether this request's *shape* is an imperative ask to actually
     produce one real media asset now - the identical "anchored verb in
@@ -3777,14 +3823,41 @@ def media_production_intent(task: Task, participants: Sequence[str] = ()) -> boo
     this shape and correctly falls through to open_conversation, the
     identical distinction general_assistance_intent already draws
     between discussing a subject and asking for the tool-gated work.
+    The reordered fallback below preserves this: it can only ever match
+    a declarative "I have/need/want" shape, never a question.
     """
     working = _strip_vocative(task.description).strip()
-    return bool(
+    if (
         _MEDIA_NARRATE_PATTERN.match(working)
         or _MEDIA_ILLUSTRATE_PATTERN.match(working)
         or _MEDIA_COMPOSE_PATTERN.match(working)
         or _MEDIA_GENERATE_VIDEO_PATTERN.match(working)
-    )
+    ):
+        return True
+    return _media_reordered_operation(working) is not None
+
+
+# compose/generate_video share "video"/"clip" in their noun vocabulary -
+# the reordered form still needs the same verb distinction the
+# forward-ordered patterns already draw (assembling existing pieces vs.
+# synthesising something new), so this checks the confirmation clause's
+# own verb rather than guessing from the noun alone.
+_MEDIA_REORDERED_GENERATE_VERB = re.compile(r"\b(?:generate|create|produce|make)\b", re.IGNORECASE)
+_MEDIA_VIDEO_ISH_NOUNS = tuple(dict.fromkeys(_MEDIA_COMPOSE_NOUNS + _MEDIA_GENERATE_VIDEO_NOUNS))
+
+
+def _media_reordered_operation(working: str) -> "str | None":
+    """Which of the four operations a reordered request names, or None -
+    the shared lookup ``media_production_intent`` and ``media_production``
+    both use, so intent detection and operation selection can never
+    disagree about the same request."""
+    if _reordered_subject(working, nouns=_MEDIA_NARRATE_NOUNS) is not None:
+        return "narrate"
+    if _reordered_subject(working, nouns=_MEDIA_ILLUSTRATE_NOUNS) is not None:
+        return "illustrate"
+    if _reordered_subject(working, nouns=_MEDIA_VIDEO_ISH_NOUNS) is not None:
+        return "generate_video" if _MEDIA_REORDERED_GENERATE_VERB.search(working) else "compose"
+    return None
 
 
 def media_production(request: CapabilityRequest) -> TaskResult:
@@ -3810,7 +3883,11 @@ def media_production(request: CapabilityRequest) -> TaskResult:
     elif _MEDIA_GENERATE_VIDEO_PATTERN.match(working):
         operation = "generate_video"
     else:
-        operation = "compose"
+        # Neither forward-ordered pattern matched - try the reordered
+        # shape (the same shared lookup media_production_intent already
+        # used to claim this request) before falling back to the
+        # original, unconditional "compose" default.
+        operation = _media_reordered_operation(working) or "compose"
 
     if not request.tools.permits("media_production"):
         equipped = ", ".join(request.tools.names()) or "none"
