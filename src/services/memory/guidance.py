@@ -15,8 +15,19 @@ set of notes a Brain can reason over when one is configured:
                         that moves a stated goal, then the oldest open task
 
 **Nothing about anyone's life is written here.** Situations, goals, tasks and
-commitments are whatever the person said; links between them are found by the
-words they share, and said to be exactly that.
+commitments are whatever the person said. A link between a goal and what serves
+it carries its evidence, strongest first, and is said to be exactly that:
+
+    told        the person said so ("my running is for my half marathon goal") -
+                kept as a personal-context fact, superseded when they say
+                otherwise ("... isn't for ...")
+    shared words  the commitment or task and the goal share a word
+    suggested   a Brain, given the real goals, commitments and tasks, proposed
+                it - validated against those sources and offered for the person
+                to confirm, never stored as if they had said it
+
+With no model, links the words do not show are asked about, never guessed: the
+local model measured unreliable at this (see REQUIREMENT_LEDGER.md).
 
 **Safety first.** A message that speaks of ending one's life or self-harm is
 answered with care and a plain pointer to real help before anything else - a
@@ -111,7 +122,124 @@ _GOAL_LINK = re.compile(
     re.IGNORECASE,
 )
 
+_TEACH_LINK = re.compile(
+    r"^\s*(?:(?:please|also|so|ok(?:ay)?|note(?:\s+that)?|remember(?:\s+that)?|fyi)\s*,?\s*)*"
+    r"(?:my\s+)?(?P<thing>[^.?!]{3,120}?)\s+"
+    r"(?P<neg>is\s+not|isn't|are\s+not|aren't|does\s+not|doesn't|do\s+not|don't|has\s+nothing\s+to\s+do\s+with)?\s*"
+    r"(?:(?:is|are)\s+)?(?:(?:really|all|mainly|mostly|actually)\s+)?"
+    r"(?:for|part\s+of|towards?|serves?|supports?|feeds?\s+into|counts?\s+towards?|helps?\s+(?:me\s+)?(?:with|towards?|reach|achieve|get\s+to)?)\s+"
+    r"(?:(?:my|the|our)\s+)?(?:(?:goal|aim|ambition)\s+(?:of\s+|to\s+|:\s*)?(?P<goal_after>[^.?!]{2,120}?)|(?P<goal_before>[^.?!]{2,120}?)\s+(?:goal|aim|ambition))"
+    r"\s*[.!]*\s*$",
+    re.IGNORECASE,
+)
+
+
+def parse_goal_link(text: str) -> "tuple[str, str, bool] | None":
+    """``(thing, goal phrase, negated)`` when the person says what serves - or
+    does not serve - one of their goals. The word "goal" (or aim/ambition) is
+    required, so "this gift is for my mum" is never read as one."""
+    match = _TEACH_LINK.match(str(text or ""))
+    if match is None:
+        return None
+    thing = " ".join(match.group("thing").split()).strip(" ,:;")
+    goal = " ".join((match.group("goal_after") or match.group("goal_before") or "").split()).strip(" ,:;")
+    if not thing or not goal or not stems(thing) or not stems(goal):
+        return None
+    return thing, goal, bool(match.group("neg"))
+
+
+def best_match(phrase: str, candidates: Sequence[str]) -> "str | None":
+    """The one candidate sharing the most words with ``phrase`` - None when
+    nothing shares a word, or two candidates tie."""
+    wanted = stems(phrase)
+    scored = sorted(((len(wanted & stems(c)), c) for c in candidates), key=lambda row: -row[0])
+    if not scored or scored[0][0] == 0 or (len(scored) > 1 and scored[1][0] == scored[0][0]):
+        return None
+    return scored[0][1]
+
+
+LINK_CATEGORY = "goal_link"
+
+
+def goal_link_candidate(thing: str, goal: str, negated: bool) -> PersonalContextCandidate:
+    verb = "does not serve" if negated else "serves"
+    return PersonalContextCandidate(
+        topic=f"link: {thing.lower()} -> {goal.lower()}", content=f"The user said {thing} {verb} their goal: {goal}.",
+        category=LINK_CATEGORY, status=STATUS_CURRENT, value=("not:" if negated else "") + goal,
+    )
+
+
+@dataclass(frozen=True)
+class GoalLink:
+    item: str
+    goal: str
+    evidence: str  # "told", "shared words: ...", "suggested"
+
+
+def taught_links(records: Iterable) -> "tuple[tuple[str, str, bool], ...]":
+    """Every current told link: ``(thing, goal, negated)``."""
+    found = []
+    for record in records:
+        if getattr(record, "category", "") != LINK_CATEGORY or getattr(record, "status", "") != STATUS_CURRENT:
+            continue
+        topic = str(record.topic)
+        if not topic.startswith("link: ") or " -> " not in topic:
+            continue
+        thing = topic[len("link: "):].split(" -> ", 1)[0]
+        value = str(record.value or "")
+        found.append((thing, value[len("not:"):] if value.startswith("not:") else value, value.startswith("not:")))
+    return tuple(found)
+
+
+def goal_connections(
+    goals: Sequence[str], items: Sequence[str], taught: "Sequence[tuple[str, str, bool]]" = (),
+) -> "dict[str, list[GoalLink]]":
+    """For each goal, what serves it and on what evidence - told links first,
+    then shared words; a told "does not serve" removes a shared-words link."""
+    links: "dict[str, list[GoalLink]]" = {goal: [] for goal in goals}
+    denied = set()
+    for thing, goal_phrase, negated in taught:
+        goal = goal_phrase if goal_phrase in links else best_match(goal_phrase, goals)
+        if goal is None:
+            continue
+        item = best_match(thing, items) or thing
+        if negated:
+            denied.add((item.lower(), goal))
+        elif all(link.item.lower() != item.lower() for link in links[goal]):
+            links[goal].append(GoalLink(item, goal, "told"))
+    for goal in goals:
+        for item in items:
+            shared = stems(item) & stems(goal)
+            if not shared or (item.lower(), goal) in denied or any(link.item.lower() == item.lower() for link in links[goal]):
+                continue
+            links[goal].append(GoalLink(item, goal, "shared words: " + ", ".join(sorted(shared))))
+    return links
+
+
+_SUGGESTION = re.compile(r"\s*(?P<item>[^;=]{2,160}?)\s*=>\s*(?P<goal>[^;]{2,160}?)\s*(?:;|$)")
+
+
+def validated_suggestions(answer: str, goals: Sequence[str], items: Sequence[str],
+                          known: "dict[str, list[GoalLink]]") -> "list[GoalLink]":
+    """Links a Brain proposed as ``item => goal ; ...``, kept only when both ends
+    are one of the person's real items and goals and the link is not already
+    known - a suggestion is never a new fact."""
+    kept = []
+    for match in _SUGGESTION.finditer(str(answer or "")):
+        # Exact names only: the Brain was given them, and a near-miss ("buy a
+        # yacht" for "buy a wetsuit") is a different thing, not a typo.
+        item = next((i for i in items if i.lower() == match.group("item").strip().lower()), None)
+        goal = next((g for g in goals if g.lower() == match.group("goal").strip().lower()), None)
+        if item is None or goal is None:
+            continue
+        if any(link.item.lower() == item.lower() for link in known.get(goal, [])) or any(k.item == item and k.goal == goal for k in kept):
+            continue
+        kept.append(GoalLink(item, goal, "suggested"))
+    return kept
+
+
 LIFE, TALK, PLAN, PRIORITY, GOALS, SITUATION, CRISIS = "life", "talk", "plan_week", "priority", "goal_link", "situation", "crisis"
+TEACH_LINK = "teach_goal_link"
 
 
 def guidance_kind(text: str) -> "str | None":
@@ -120,6 +248,8 @@ def guidance_kind(text: str) -> "str | None":
         return CRISIS
     if extract_situation(working) is not None:
         return SITUATION
+    if parse_goal_link(working) is not None:
+        return TEACH_LINK
     if _GOAL_LINK.search(working):
         return GOALS
     if _PLAN_WEEK.search(working):
@@ -151,13 +281,15 @@ class DatedItem:
     label: str
 
 
-def linked_goals(text: str, goals: Sequence[str]) -> "tuple[str, ...]":
-    wanted = stems(text)
-    return tuple(goal for goal in goals if wanted & stems(goal))
+def linked_goals(text: str, goals: Sequence[str], taught: "Sequence[tuple[str, str, bool]]" = ()) -> "tuple[str, ...]":
+    """The goals ``text`` serves: what the person told me first, then shared words."""
+    connections = goal_connections(goals, [text], taught)
+    return tuple(goal for goal in goals if connections[goal])
 
 
 def priorities(
     *, now: datetime, tasks: Sequence[OpenTask], goals: Sequence[str], limit: int = 5,
+    taught: "Sequence[tuple[str, str, bool]]" = (),
 ) -> "list[tuple[str, str]]":
     """``(task, why)`` ranked: missed reminders first, then reminders due in the
     next day, then tasks sharing words with a stated goal, then the oldest."""
@@ -167,9 +299,9 @@ def priorities(
             ranked.append((0, task.due.timestamp(), task.title, f"a reminder you missed ({task.due:%a %d %b %H:%M})"))
         elif task.due is not None and task.due < now + timedelta(days=1):
             ranked.append((1, task.due.timestamp(), task.title, f"due {task.due:%a %H:%M}"))
-        elif linked_goals(task.title, goals):
+        elif linked_goals(task.title, goals, taught):
             ranked.append((2, task.created.timestamp() if task.created else 0.0, task.title,
-                           f"it moves your goal: {linked_goals(task.title, goals)[0]}"))
+                           f"it moves your goal: {linked_goals(task.title, goals, taught)[0]}"))
         else:
             age = (now - task.created).days if task.created else 0
             ranked.append((3, task.created.timestamp() if task.created else 0.0, task.title,

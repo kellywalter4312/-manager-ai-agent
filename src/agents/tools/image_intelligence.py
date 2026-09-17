@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Callable, Mapping
 
 from src.agents.tools.tool import Tool, ToolSpec
+from src.providers.media.image_edits import apply_edit_plan, parse_edit_instruction, vocabulary
 from src.providers.media.image_techniques import (
     ImageTechniqueError,
     compare_images,
@@ -77,7 +78,40 @@ class ImageIntelligenceTool(Tool):
             return self._transform(json.loads(content))
         if operation == "compare":
             return self._compare(json.loads(content))
-        raise ValueError(f"unknown image_intelligence operation {operation!r}; expected techniques, transform or compare")
+        if operation == "plan":
+            request = json.loads(content)
+            plan = parse_edit_instruction(str(request.get("instruction") or ""), self.techniques())
+            return json.dumps({"steps": [s.to_dict() for s in plan.steps], "not_understood": list(plan.not_understood),
+                               "vocabulary": list(vocabulary(self.techniques()))})
+        if operation == "edit":
+            return self._edit(json.loads(content))
+        raise ValueError(
+            f"unknown image_intelligence operation {operation!r}; expected techniques, transform, plan, edit or compare"
+        )
+
+    def _edit(self, request: dict) -> str:
+        """An ordered plan of edits applied to one image, every step verified,
+        saved as one new image derived from it."""
+        steps = list(request.get("steps") or [])
+        if not steps:
+            raise ImageTechniqueError("there are no edits to make")
+        source, data = self._image_bytes(str(request.get("artifact_id") or ""))
+        result = apply_edit_plan(data, steps, self.techniques())
+        summary = ", ".join(step["detail"] for step in result.applied)
+        title = f"{source.latest.title} (edited)"
+        artifact = register_new_artifact(
+            self._store, type=IMAGE_TYPE, owner_agent=self._owner_agent, title=title[:120],
+            content_bytes=ImageContent(prompt=f"Edited '{source.latest.title}': {summary}").to_json().encode("utf-8"),
+            rendition_format="png", rendition_bytes=result.data,
+            related_artifact_ids=(source.artifact_id,),
+            metadata={"content_kind": "image", "technique": "edit", "media_type": "image/png",
+                      "edits": json.dumps([{"op": s["op"], "clause": s["clause"]} for s in result.applied])},
+        )
+        return json.dumps({
+            "artifact_id": artifact.artifact_id, "source_id": source.artifact_id, "title": artifact.latest.title,
+            "applied": list(result.applied), "width": result.width, "height": result.height,
+            "rendition": dict(artifact.latest.renditions).get("png", ""),
+        })
 
     def _image_bytes(self, artifact_id: str) -> "tuple[object, bytes]":
         artifact = self._store.get(str(artifact_id).strip().lower())

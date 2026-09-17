@@ -212,22 +212,30 @@ class ElevenLabsSpeechAdapter(SpeechAdapter):
                 )
         return tuple(options)
 
-    def speak(self, text: str, voice: VoiceProfile | None = None) -> bool:
+    # ElevenLabs' multilingual model speaks the language of the text it is
+    # given in any voice, keeping that voice's own accent.
+    speaks_across_languages = True
+
+    def spoken_languages(self) -> "tuple[str, ...]":
+        """The languages the account's voices are verified to speak, as ElevenLabs reports them."""
+        return tuple(sorted({o.language for o in self.available_voices() if o.language}))
+
+    def synthesize(self, text: str, voice: VoiceProfile | None = None) -> bytes:
         voice_id = _voice_id_for(voice)
         if voice_id is None:
-            reason = (
-                f"no elevenlabs voice id configured for '{voice.key}'"
-                if voice is not None
+            raise SpeechUnavailable(
+                f"no elevenlabs voice id configured for '{voice.key}'" if voice is not None
                 else "no voice profile supplied and elevenlabs has no default voice"
             )
-            self._availability = Availability(state=AvailabilityState.UNAVAILABLE, reason=reason)
-            return False
+        chunks: Any = self._client.text_to_speech.convert(voice_id, text=text, output_format=_OUTPUT_FORMAT)
+        return b"".join(chunks)
 
+    def speak(self, text: str, voice: VoiceProfile | None = None) -> bool:
         try:
-            chunks: Any = self._client.text_to_speech.convert(
-                voice_id, text=text, output_format=_OUTPUT_FORMAT
-            )
-            audio = b"".join(chunks)
+            audio = self.synthesize(text, voice)
+        except SpeechUnavailable as exc:
+            self._availability = Availability(state=AvailabilityState.UNAVAILABLE, reason=str(exc))
+            return False
         except Exception as exc:  # noqa: BLE001 - a paid HTTP API fails in more ways than OSError
             self._availability = Availability(state=AvailabilityState.UNAVAILABLE, reason=str(exc))
             return False

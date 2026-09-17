@@ -94,23 +94,26 @@ class TestSurfaceKindsAreOpen:
 class TestSurfacesEvolveThroughGovernance:
     def test_an_agent_surface_is_proposed_applied_and_rolled_back(self, isolated):
         system = _system(isolated)
+        # Campaign 2 built Arthur's mailbox screen, so the governed lifecycle
+        # is shown withdrawing it and rolling the withdrawal back.
         component = surface_component_id("Arthur", "mailbox")
         assert component in _cmd(system, "ecosystem")
-        assert not _arthur_surface(system, "mailbox").can_render("mailbox")
+        assert _arthur_surface(system, "mailbox").can_render("mailbox")
 
-        proposed = _cmd(system, f"ecosystem {component} propose implemented low render the mailbox|browse messages directly")
+        proposed = _cmd(system, f"ecosystem {component} propose withdrawn low hide the mailbox|owner choice")
         proposal = _proposal_id(proposed)
         ran = _cmd(system, f"ecosystem {component} run {proposal} yes")
         assert ran.startswith("OK"), ran
         assert "Live now" in ran
-        assert _arthur_surface(system, "mailbox").can_render("mailbox")
+        assert not _arthur_surface(system, "mailbox").can_render("mailbox")
         snapshot = json.loads(su.route("/snapshot.json", system)[1])
         arthur = next(a for a in snapshot["agents"] if a["name"] == "Arthur")
-        assert "mailbox" in arthur["interface"]["implemented"]
+        assert "mailbox" not in arthur["interface"]["implemented"]
+        assert su.route("/surface/Arthur/mailbox.json", system)[0] == 404
 
         rolled = _cmd(system, f"ecosystem {component} rollback {proposal} yes")
         assert rolled.startswith("OK"), rolled
-        assert not _arthur_surface(system, "mailbox").can_render("mailbox")
+        assert _arthur_surface(system, "mailbox").can_render("mailbox")
 
     def test_a_brand_new_kind_can_be_granted_and_opens_its_route(self, isolated):
         # Every agent now has a Workspace by default (post-Pre-Stage-9), so the

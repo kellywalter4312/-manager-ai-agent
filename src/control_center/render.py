@@ -639,7 +639,18 @@ def render_workspaces(items: tuple[WorkspaceAgentView, ...], columns: int | None
         out.append("  no agent has declared a Workspace yet")
         return "\n".join(out)
 
-    from src.control_center.workspace_catalog import active_workspace_for, workspaces_for
+    from src.control_center.workspace_catalog import active_workspace_for, all_workspaces, workspaces_for
+
+    out.append("")
+    out.append("  WORKSPACES")
+    for t in all_workspaces(governed or {}):
+        state = " [archived]" if t.archived else ""
+        profile = ", ".join(t.capabilities) if t.capabilities else "any work"
+        out.append(f"    {t.workspace_id}: {t.label}{state} - panels {', '.join(t.panels)}; capabilities: {profile}")
+        if t.description:
+            out.append(f"      {t.description}")
+    out.append("    manage: workspace create|rename|describe|profile|panels|archive|restore|remove <id> ...")
+    out.append("    per agent: workspace <agent> add|remove|use <id>")
 
     for item in items:
         out.append("")

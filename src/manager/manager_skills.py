@@ -258,6 +258,8 @@ class ManagerSkills(BaseAgent):
         # collaborator already has: select_voice reports honestly that
         # no voice options are available, rather than crashing.
         self._discover_voices = discover_voices
+        self._voice_facts = None
+        self._workspace_scope = None
         # What this agent offers as a screen, asked the same way
         # EmailAgent already answers it (see src/agents/email_agent.py's
         # own ``interface`` property) - a declaration, not a grant, per
@@ -337,6 +339,18 @@ class ManagerSkills(BaseAgent):
         room exists - the identical construction-order reason
         bind_conversation_history has."""
         self._shared_files = shared_files
+
+    def bind_workspace_scope(self, scope: "Callable[[str, tuple[str, ...]], str | None]") -> None:
+        """Whether work belongs in the workspace this agent is in right now -
+        ``scope(agent, names)`` returns why not, or None. Read per turn from
+        the governed config, so a move or a profile change is live at once."""
+        self._workspace_scope = scope
+
+    def bind_voice_facts(self, voice_facts: "Callable[[], Any]") -> None:
+        """What the speech provider that actually speaks for this agent can do,
+        read live (``voice_configuration.voice_facts``) - bound once the channel
+        exists, and current across a live provider switch."""
+        self._voice_facts = voice_facts
 
     def bind_discover_voices(self, discover_voices: "Callable[[], tuple[Any, ...]]") -> None:
         """Wire the real, live voice-discovery call in, once the speech
@@ -661,6 +675,11 @@ class ManagerSkills(BaseAgent):
         )
 
         self._last_selected = (task.id, capability.name)
+        scope = self._workspace_scope
+        if scope is not None and not capability.anywhere:
+            refusal = scope(self.name, (capability.name, *sorted(capability.capabilities)))
+            if refusal:
+                return TaskResult.failure(task, self.name, refusal)
         result = capability.handle(
             CapabilityRequest(
                 task=task,
@@ -692,6 +711,7 @@ class ManagerSkills(BaseAgent):
                 activity_sessions=self._activity_sessions,
                 activity_brain=self._activity_brain,
                 discover_voices=self._discover_voices,
+                voice_facts=self._voice_facts,
                 recording_sessions=self._recording_sessions,
                 governance_log=self._governance_log,
                 assess_governance=self._assess_governance,

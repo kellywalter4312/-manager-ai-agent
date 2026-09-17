@@ -55,6 +55,7 @@ capabilities mechanically, and nothing recalled here can move it.
 
 from __future__ import annotations
 
+import re
 from enum import Enum
 from typing import Any, Sequence
 
@@ -216,6 +217,22 @@ class ManagerAgent:
         # should change a future decision?" - and an event that turned out to be
         # knowledge would still have to go through the policy to be remembered.
         self.events = events if events is not None else EventLog()
+
+        # Campaign 2 workspaces: bound by the composition root once the
+        # governed config and tools exist; absent, nothing is scoped.
+        self._workspace_scope = None
+        self._workspace_navigation = None
+
+    def bind_workspaces(self, *, scope, navigation) -> None:
+        """Workspaces for every agent this Manager delegates to, not only its
+        own skills: ``scope(agent, names)`` says why work does not belong in
+        the workspace an agent is in (or None), and ``navigation(agent, task)``
+        answers a request to move between workspaces for that agent (or None).
+        A specialist registered later is covered with no change."""
+        self._workspace_scope = scope
+        self._workspace_navigation = navigation
+        if self.own_skills is not None and hasattr(self.own_skills, "bind_workspace_scope"):
+            self.own_skills.bind_workspace_scope(scope)
 
     def register_agent(self, agent: BaseAgent) -> None:
         """Convenience passthrough so callers can set up a Manager in one place."""
@@ -460,6 +477,16 @@ class ManagerAgent:
             # later has a working board with no change here. The Manager's own
             # board is its task capabilities, reached through execute().
             if agent is not self.own_skills:
+                if self._workspace_navigation is not None:
+                    moved = self._workspace_navigation(agent.name, task)
+                    if isinstance(moved, TaskResult):
+                        return moved
+                if self._workspace_scope is not None:
+                    asked = set(re.findall(r"[a-z0-9_]+", str(task.description).lower()))
+                    named = tuple(sorted(asked & {str(c).lower() for c in agent.spec.capabilities}))
+                    refusal = self._workspace_scope(agent.name, named) if named else None
+                    if refusal:
+                        return TaskResult.failure(task, agent_name=agent.name, error=refusal)
                 board = getattr(agent, "workspace_task_reply", None)
                 if callable(board):
                     answered = board(task)

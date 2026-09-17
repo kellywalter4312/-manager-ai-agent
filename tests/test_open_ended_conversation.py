@@ -372,7 +372,10 @@ class TestVoiceProfileIsUnaffected:
         from src.services.identity.voice import VoiceProfile
 
         names = {f.name for f in dataclasses.fields(VoiceProfile)}
-        assert names == {"key", "accent", "pace", "pitch", "warmth", "preferred_voice", "style"}
+        # "language" (the language spoken, kept apart from the voice and its
+        # accent) is a characteristic, never a vendor fact - see
+        # test_no_field_name_mentions_a_vendor for the invariant that matters.
+        assert names == {"key", "accent", "pace", "pitch", "warmth", "preferred_voice", "style", "language"}
 
 
 # ---------------------------------------------------------------------------

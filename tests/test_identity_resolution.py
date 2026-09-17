@@ -310,7 +310,7 @@ class TestThisIsNotASecondRouter:
             # recognised by their own request shape.
             "coach",
             "communication", "complete_task", "connected_action", "correct_memory",
-            "create_artifact",
+            "create_3d_model", "create_artifact",
             "create_diagram",
             "create_task", "current_datetime", "forget",
             "general_assistance", "generate_document", "image_analysis",
@@ -334,7 +334,7 @@ class TestThisIsNotASecondRouter:
             "read_content",
             "recall_memory", "record_this", "reopen_task", "revise_artifact", "revise_diagram",
             "select_voice",
-            "small_talk", "start_recording", "stop_recording", "temporal_derivation", "transcribe_media", "translate", "update_task",
+            "small_talk", "start_recording", "stop_recording", "temporal_derivation", "transcribe_media", "translate", "translate_media", "update_task", "workspace_navigation",
         ]
 
 

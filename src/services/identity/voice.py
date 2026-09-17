@@ -89,11 +89,16 @@ class VoiceProfile:
     warmth: str = ""
     preferred_voice: str = ""
     style: Mapping[str, Any] = field(default_factory=dict)
+    # The language this agent speaks in - kept apart from the voice (who is
+    # heard) and the accent (how that voice sounds): "speak Italian" sets
+    # this; "English with an Italian accent" does not. Blank means the
+    # language replies are written in.
+    language: str = ""
 
     def __post_init__(self) -> None:
         if not str(self.key).strip():
             raise ValueError("a VoiceProfile must have a key")
-        for name in ("key", "accent", "pace", "pitch", "warmth", "preferred_voice"):
+        for name in ("key", "accent", "pace", "pitch", "warmth", "preferred_voice", "language"):
             object.__setattr__(self, name, " ".join(str(getattr(self, name)).split()))
         object.__setattr__(self, "key", self.key.lower())
         object.__setattr__(self, "style", dict(self.style))

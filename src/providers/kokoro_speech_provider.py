@@ -123,13 +123,65 @@ def _play_wav_bytes(audio: bytes) -> bool:
             Path(path).unlink(missing_ok=True)
 
 
+# Kokoro's own published voice-naming convention (hexgrad/Kokoro-82M,
+# VOICES.md): the first letter of a voice id names the language and variety
+# the voice was trained on, the second its gender. Provider-native metadata,
+# carried in the one adapter it describes - never an Alfred-level list, and
+# never a claim about any other provider. ``lang`` is the phonemizer code the
+# engine is asked to speak a language with.
+_KOKORO_VOICE_FAMILIES: "dict[str, tuple[str, str, str, str]]" = {
+    # prefix: (language code, language name, accent/variety, engine lang)
+    "a": ("en", "english", "american", "en-us"),
+    "b": ("en", "english", "british", "en-gb"),
+    "e": ("es", "spanish", "spanish", "es"),
+    "f": ("fr", "french", "french", "fr-fr"),
+    "h": ("hi", "hindi", "indian", "hi"),
+    "i": ("it", "italian", "italian", "it"),
+    "j": ("ja", "japanese", "japanese", "ja"),
+    "p": ("pt", "portuguese", "brazilian", "pt-br"),
+    "z": ("zh", "chinese", "mandarin", "cmn"),
+}
+_KOKORO_GENDERS = {"f": "female", "m": "male"}
+# A pace a person or an identity document states, as the engine's speed.
+_PACE_SPEEDS = {
+    "slow": 0.8, "slower": 0.8, "measured": 0.93, "relaxed": 0.93, "calm": 0.93,
+    "normal": 1.0, "steady": 1.0, "natural": 1.0,
+    "brisk": 1.08, "quick": 1.15, "fast": 1.2, "faster": 1.2,
+}
+
+
+def _family(voice_id: str) -> "tuple[str, str, str, str] | None":
+    return _KOKORO_VOICE_FAMILIES.get(str(voice_id or "")[:1].lower())
+
+
+def _language_code(value: object) -> "str | None":
+    """A spoken-language setting ("italian", "it", "Italian") as a code this
+    adapter's convention knows, or None."""
+    token = " ".join(str(value or "").split()).lower()
+    if not token:
+        return None
+    for code, name, _accent, _lang in _KOKORO_VOICE_FAMILIES.values():
+        if token in (code, name):
+            return code
+    return None
+
+
 class KokoroSpeechAdapter(SpeechAdapter):
     """Text-to-speech via the real, local Kokoro ONNX engine. Speaking only.
 
     No ``listen()`` - Kokoro is a synthesis model, not a recognizer, the
     same honest stance ``ElevenLabsSpeechAdapter`` already takes for the
     half of the contract it does not implement.
+
+    **Voice, spoken language and pace are separate.** Any installed voice can
+    be asked to speak any language this engine phonemizes; a voice speaking a
+    language other than the one it was trained on carries that training's
+    accent (an Italian-trained voice speaking English is English with an
+    Italian accent, never Italian). Every archive beside the default one in
+    the same folder is read, so installing a voice is adding a file.
     """
+
+    speaks_across_languages = True
 
     def __init__(
         self,
@@ -139,6 +191,7 @@ class KokoroSpeechAdapter(SpeechAdapter):
         self._model_path = model_path
         self._voices_path = voices_path
         self._engine: Any = None
+        self._styles: "dict[str, Any] | None" = None
         self._availability = Availability()
 
     @property
@@ -155,40 +208,56 @@ class KokoroSpeechAdapter(SpeechAdapter):
             "listen. Type instead, or select a provider that hears."
         )
 
+    def _voice_archives(self) -> "list[Path]":
+        default = Path(self._voices_path)
+        found = [default] if default.is_file() else []
+        folder = default.parent
+        if folder.is_dir():
+            found.extend(sorted(p for p in folder.glob("*.npz") if p != default))
+        return found
+
+    def _voice_styles(self) -> "dict[str, Any]":
+        """Every voice array in every archive in the voices folder, by id -
+        read once, first archive wins for a repeated id."""
+        if self._styles is not None:
+            return self._styles
+        import numpy as np
+
+        styles: "dict[str, Any]" = {}
+        for archive_path in self._voice_archives():
+            try:
+                archive = np.load(archive_path)
+                for voice_id in archive.files:
+                    styles.setdefault(voice_id, archive[voice_id])
+            except Exception as exc:  # noqa: BLE001 - one unreadable archive never hides the others
+                logger.warning("kokoro voice archive %s could not be read: %s", archive_path, exc)
+        self._styles = styles
+        return styles
+
     def available_voices(self) -> "tuple[VoiceOption, ...]":
-        """The real voice ids this project's own local archive genuinely
-        contains - read directly from ``voices.npz``'s own keys (a plain
-        numpy archive; listing its member names costs one small local
-        read, never loading the ONNX engine or the arrays themselves),
-        never the vendor's full ~54-voice catalog this project never
-        downloaded (see this module's own docstring on why).
+        """Every installed voice with the language, accent and gender Kokoro's
+        own naming convention publishes for it. A voice id outside that
+        convention is still offered, with those facts honestly unknown."""
+        options = []
+        for voice_id in sorted(self._voice_styles()):
+            family = _family(voice_id)
+            gender = _KOKORO_GENDERS.get(voice_id[1:2].lower()) if family else None
+            options.append(VoiceOption(
+                voice_id=voice_id, name=voice_id, provider=self.name,
+                language=family[1] if family else None, accent=family[2] if family else None,
+                locale=family[3] if family else None, gender=gender,
+            ))
+        return tuple(options)
 
-        **What is - and is not - honestly knowable about each voice.**
-        This project has no in-repo evidence for the upstream project's
-        own voice-naming convention, so no accent, locale or per-voice
-        language is asserted from a voice id's shape - that would be a
-        guess, not a reported fact, exactly what this checkpoint's own
-        brief forbids. What *is* a genuine, verifiable fact about every
-        voice this adapter can produce is ``speak()``'s own call below:
-        it always passes ``lang="en-us"`` to the engine, regardless of
-        which voice is chosen - a fact about this integration, not a
-        claim about the vendor's own catalog, and reported as such
-        (``language="english"``, ``locale="en-US"``) for every voice
-        this method returns. Accent and gender are left honestly
-        ``None`` - no verifiable source for either exists here.
-        """
-        try:
-            import numpy as np
+    def spoken_languages(self) -> "tuple[str, ...]":
+        """The languages this installation can speak: every language of the
+        convention for which a voice of that language is installed (the engine
+        phonemizes a language it has voices for)."""
+        installed = {(_family(v) or ("", "", "", ""))[1] for v in self._voice_styles()}
+        return tuple(sorted(name for name in installed if name))
 
-            archive = np.load(self._voices_path)
-            ids = tuple(archive.files)
-        except Exception as exc:  # noqa: BLE001 - a local file read fails in more ways than OSError
-            logger.warning("kokoro voice archive could not be read: %s", exc)
-            return ()
-        return tuple(
-            VoiceOption(voice_id=vid, name=vid, provider=self.name, language="english", locale="en-US")
-            for vid in ids
-        )
+    def pace_words(self) -> "tuple[str, ...]":
+        return tuple(_PACE_SPEEDS)
 
     def _engine_or_raise(self) -> Any:
         if self._engine is not None:
@@ -198,25 +267,54 @@ class KokoroSpeechAdapter(SpeechAdapter):
         self._engine = Kokoro(self._model_path, self._voices_path)
         return self._engine
 
-    def speak(self, text: str, voice: VoiceProfile | None = None) -> bool:
+    def synthesize(self, text: str, voice: VoiceProfile | None = None) -> bytes:
+        """The spoken audio for ``text`` as a complete WAV - never played.
+        Raises ``SpeechUnavailable`` with a plain reason when it cannot."""
         voice_id = _voice_id_for(voice)
         if voice_id is None:
-            reason = (
-                f"no kokoro voice id configured for '{voice.key}'"
-                if voice is not None
+            raise SpeechUnavailable(
+                f"no kokoro voice id configured for '{voice.key}'" if voice is not None
                 else "no voice profile supplied and kokoro has no default voice"
             )
-            self._availability = Availability(state=AvailabilityState.UNAVAILABLE, reason=reason)
-            return False
+        styles = self._voice_styles()
+        if voice_id not in styles:
+            raise SpeechUnavailable(f"the kokoro voice '{voice_id}' is not installed")
+        family = _family(voice_id)
+        wanted = _language_code(getattr(voice, "language", "")) or "en"
+        if wanted == "en":
+            lang = family[3] if family and family[0] == "en" else "en-us"
+        else:
+            match = next((f for f in _KOKORO_VOICE_FAMILIES.values() if f[0] == wanted), None)
+            if match is None or match[1] not in self.spoken_languages():
+                raise SpeechUnavailable(f"kokoro cannot speak '{voice.language}' with the voices installed here")
+            lang = match[3]
+        speed = _PACE_SPEEDS.get(str(getattr(voice, "pace", "") or "").lower(), 1.0)
+        engine = self._engine_or_raise()
+        # The engine was loaded with the default archive, so a voice from it is
+        # sent by id; a voice from any other archive is sent as its own style.
+        chosen: Any = voice_id if voice_id in self._default_archive_ids() else styles[voice_id]
+        options = {"speed": speed} if speed != 1.0 else {}
+        samples, sample_rate = engine.create(text, voice=chosen, lang=lang, **options)
+        return _pcm_wav_bytes(samples, sample_rate)
+
+    def _default_archive_ids(self) -> "frozenset[str]":
+        import numpy as np
 
         try:
-            engine = self._engine_or_raise()
-            samples, sample_rate = engine.create(text, voice=voice_id, lang="en-us")
+            return frozenset(np.load(self._voices_path).files)
+        except Exception:  # noqa: BLE001 - an unreadable default archive holds nothing
+            return frozenset()
+
+    def speak(self, text: str, voice: VoiceProfile | None = None) -> bool:
+        try:
+            audio = self.synthesize(text, voice)
+        except SpeechUnavailable as exc:
+            self._availability = Availability(state=AvailabilityState.UNAVAILABLE, reason=str(exc))
+            return False
         except Exception as exc:  # noqa: BLE001 - a local ONNX engine fails in more ways than OSError
             self._availability = Availability(state=AvailabilityState.UNAVAILABLE, reason=str(exc))
             return False
 
-        audio = _pcm_wav_bytes(samples, sample_rate)
         if not _play_wav_bytes(audio):
             self._availability = Availability(
                 state=AvailabilityState.UNAVAILABLE,

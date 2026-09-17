@@ -352,13 +352,26 @@ def effective_voice_for(
         return None
 
     agent_key = getattr(agent, "name", base.key)
+    # The agent's own spoken-language and pace settings apply whichever voice
+    # is chosen below - separate facts, never folded into the voice itself.
+    from src.services.identity.voice_configuration import apply_voice_settings
+
+    base = apply_voice_settings(base, agent_key, recall=recall)
 
     override = voice_preference_for(agent_key, recall=recall)
     if override:
         if discover_voices is not None:
-            for option in discover_voices():
+            options = tuple(discover_voices())
+            for option in options:
                 if option.name.lower() == override.lower() or option.voice_id.lower() == override.lower():
                     return _apply_provider_choice(base, provider=option.provider, voice_id=option.voice_id, name=option.name)
+            # The chosen voice belongs to another provider: the accent that was
+            # asked for, re-resolved against the voices this provider has.
+            from src.services.identity.voice_configuration import voice_for_settings
+
+            carried = voice_for_settings(options, agent_key, recall=recall)
+            if carried is not None:
+                return _apply_provider_choice(base, provider=carried.provider, voice_id=carried.voice_id, name=carried.name)
         return replace(base, preferred_voice=override)
 
     choice = autonomous_voice_choice_for(agent_key, recall=recall)

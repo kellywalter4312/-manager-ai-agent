@@ -77,6 +77,10 @@ def stems(text: str) -> "frozenset[str]":
         for suffix, keep in (("ies", "y"), ("ied", "y"), ("ing", ""), ("ed", ""), ("es", ""), ("s", "")):
             if word.endswith(suffix) and len(word) - len(suffix) >= 3:
                 word = word[: -len(suffix)] + keep
+                # "swimming" -> "swimm" -> "swim", "planned" -> "plan"; never
+                # "filling" -> "fil" or "passed" -> "pas".
+                if suffix in ("ing", "ed") and len(word) > 3 and word[-1] == word[-2] and word[-1] not in "aeiouylsz":
+                    word = word[:-1]
                 break
         if len(word) > 3 and word.endswith("e"):
             word = word[:-1]

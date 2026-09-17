@@ -91,6 +91,11 @@ DEFAULT_LISTEN_TIMEOUT_SECONDS = 10.0
 # that is not time spent listening.
 _PROCESS_TIMEOUT_PADDING_SECONDS = 8.0
 _SPEAK_TIMEOUT_SECONDS = 15.0
+# A stated pace as SAPI's own speaking rate (-10 .. 10).
+_PACE_RATES = {
+    "slow": -3, "slower": -3, "measured": -1, "relaxed": -1, "calm": -1,
+    "normal": 0, "steady": 0, "natural": 0, "brisk": 1, "quick": 2, "fast": 3, "faster": 3,
+}
 
 _LISTEN_SCRIPT = """
 Add-Type -AssemblyName System.Speech
@@ -358,12 +363,44 @@ class WindowsSpeechAdapter(SpeechAdapter):
         self._availability = Availability(state=AvailabilityState.AVAILABLE)
         return text
 
-    def speak(self, text: str, voice: VoiceProfile | None = None) -> bool:
+    # A Windows voice speaks the one culture it was installed for: choosing a
+    # spoken language means choosing a voice of that language, and an accent
+    # borrowed from another language is not something this engine can do.
+    speaks_across_languages = False
+
+    def spoken_languages(self) -> "tuple[str, ...]":
+        """The languages the voices installed on this machine speak."""
+        return tuple(sorted({o.language for o in self.available_voices() if o.language}))
+
+    def pace_words(self) -> "tuple[str, ...]":
+        return tuple(_PACE_RATES)
+
+    def _voice_lines(self, voice: VoiceProfile | None) -> str:
         selected = _select_voice_name(voice, self.installed_voice_names())
-        voice_line = f'$synth.SelectVoice("{selected}")' if selected else ""
+        lines = f'$synth.SelectVoice("{selected}")' if selected else ""
+        rate = _PACE_RATES.get(str(getattr(voice, "pace", "") or "").lower())
+        if rate is not None:
+            lines += f"\n  $synth.Rate = {int(rate)}"
+        return lines
+
+    def speak(self, text: str, voice: VoiceProfile | None = None) -> bool:
         return self._synthesize(
-            text, output_line="$synth.SetOutputToDefaultAudioDevice()", voice_line=voice_line
+            text, output_line="$synth.SetOutputToDefaultAudioDevice()", voice_line=self._voice_lines(voice)
         )
+
+    def synthesize(self, text: str, voice: VoiceProfile | None = None) -> bytes:
+        """The spoken audio as a complete WAV, written by the engine itself to
+        a temporary file - never played."""
+        handle = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        handle.close()
+        try:
+            if not self._synthesize(
+                text, output_line=f'$synth.SetOutputToWaveFile("{handle.name}")', voice_line=self._voice_lines(voice),
+            ):
+                raise SpeechUnavailable(self._availability.reason or "windows speech synthesis failed")
+            return Path(handle.name).read_bytes()
+        finally:
+            Path(handle.name).unlink(missing_ok=True)
 
     def _synthesize(self, text: str, *, output_line: str, voice_line: str = "") -> bool:
         """Shared by the real ``speak()`` (default audio device) and by

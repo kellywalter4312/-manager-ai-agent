@@ -373,9 +373,13 @@ class VoiceChannel(Channel):
         intent = presentation_intent_for_turn(response.turn)
         if self._presence is not None and answered and intent is not None:
             self._presence.set_intent(answered, intent)
+        voice = self._voice_of(response)
+        speech_text = response.speech
+        if voice is not None and voice.language and response.speech:
+            speech_text, voice = self._in_spoken_language(response.speech, voice)
         try:
             with speaking(self._presence, answered):
-                spoken = self._speech.speak(response.speech, self._voice_of(response))
+                spoken = self._speech.speak(speech_text, voice)
         finally:
             if self._presence is not None and answered and intent is not None:
                 self._presence.clear_intent(answered)
@@ -383,6 +387,44 @@ class VoiceChannel(Channel):
         if not spoken and self._speech.available:
             logger.warning("the speech engine accepted nothing to say")
         return replace(response, spoken=spoken)
+
+    def bind_translate(self, translate) -> None:
+        """How a reply reaches a spoken language other than the one it was
+        written in - the runtime's own offline translation, or None."""
+        self._translate = translate
+
+    def _in_spoken_language(self, text: str, voice: VoiceProfile) -> "tuple[str, VoiceProfile]":
+        """The words to say and the voice to say them in when the agent speaks a
+        chosen language. A reply is translated first; when it cannot be, it is
+        said in the language it was written in rather than read out as nonsense
+        in the wrong phonetics."""
+        from dataclasses import replace as _replace
+
+        from src.services.identity.voice_configuration import canonical_language
+        from src.services.translation.languages import guess_language, language_by_code
+
+        wanted = canonical_language(voice.language)
+        written_code = guess_language(text)
+        written = language_by_code(written_code).name.lower() if written_code and language_by_code(written_code) else "english"
+        if wanted is None or wanted == written:
+            return text, voice
+        speakable = getattr(self._speech, "spoken_languages", None)
+        try:
+            spoken = {canonical_language(x) for x in speakable()} if callable(speakable) else set()
+        except Exception:  # noqa: BLE001 - a provider that cannot say what it speaks speaks as written
+            spoken = set()
+        if wanted not in spoken:
+            # The provider now speaking cannot say that language (the setting
+            # was made on another provider): said as written, never read out in
+            # the wrong phonetics.
+            return text, _replace(voice, language="")
+        translate = getattr(self, "_translate", None)
+        if translate is not None:
+            try:
+                return translate(text, wanted, written).text, voice
+            except Exception as exc:  # noqa: BLE001 - an untranslatable reply is spoken as written
+                logger.info("could not translate the reply into %s: %s", wanted, exc)
+        return text, _replace(voice, language="")
 
     def _voice_of(self, response: Response) -> VoiceProfile | None:
         """Whose voice this answer should be said in.

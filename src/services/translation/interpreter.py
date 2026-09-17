@@ -125,7 +125,10 @@ class Interpreter:
     def _resolve(self, value: object) -> Language:
         language = language_named(value) or language_by_code(value)
         if language is None:
-            raise InterpretationError(f"I don't know a language called '{value}'.")
+            raise InterpretationError(
+                f"I don't know a language called '{value}' - no installed language pack names it. "
+                f"The installed packs cover {self._installed_names()}."
+            )
         return language
 
     def _installed_names(self) -> str:

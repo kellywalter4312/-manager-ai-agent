@@ -71,7 +71,9 @@ def _install_fake_engine(monkeypatch, calls: list[str]):
     (loading a real model, a real speaker) are stubbed.
     """
 
-    def create(text, *, voice, lang="en-us"):
+    # The real engine's signature: a declared pace ("measured") now reaches it
+    # as a speaking speed.
+    def create(text, *, voice, lang="en-us", speed=1.0):
         calls.append(voice)
         return [0.0, 0.1, -0.1], 24000
 
@@ -228,23 +230,37 @@ class TestAvailableVoicesDiscoversTheRealLocalArchiveHonestly:
     genuine, verifiable fact about this project's own speak() call
     (always lang="en-us"), not a claim about the vendor's catalog."""
 
-    def test_returns_the_real_archive_entries_this_machine_actually_has(self):
+    def test_returns_every_voice_in_every_archive_this_machine_actually_has(self):
+        import numpy as np
+
         adapter = KokoroSpeechAdapter()
         options = adapter.available_voices()
         ids = {o.voice_id for o in options}
-        # This project's own real, checked-in archive - see this
-        # module's own docstring on why only these two voices exist.
-        assert ids == {"am_eric", "bm_daniel"}
+        on_disk = set()
+        for archive in Path("data/voices/kokoro").glob("*.npz"):
+            on_disk |= set(np.load(archive).files)
+        # Read from the real archives, never a list: the default two-voice
+        # archive plus every other archive installed beside it.
+        assert ids == on_disk and {"am_eric", "bm_daniel"} <= ids
         assert all(o.provider == "kokoro" for o in options)
 
-    def test_language_and_locale_are_honestly_asserted_accent_and_gender_are_not(self):
-        adapter = KokoroSpeechAdapter()
-        for option in adapter.available_voices():
-            assert option.language == "english"
-            assert option.locale == "en-US"
-            # No verifiable in-repo source for either exists - never guessed.
-            assert option.accent is None
-            assert option.gender is None
+    def test_language_accent_and_gender_come_from_kokoros_published_convention(self):
+        # Whole-ecosystem campaign 2: voice, spoken language and accent are
+        # separate. Kokoro's own naming convention (first letter language and
+        # variety, second gender) is the source - the same convention
+        # translation's language table already relies on (if_sara Italian,
+        # ef_dora Spanish, bf_emma British English).
+        by_id = {o.voice_id: o for o in KokoroSpeechAdapter().available_voices()}
+        assert (by_id["am_eric"].language, by_id["am_eric"].accent, by_id["am_eric"].gender) == ("english", "american", "male")
+        assert (by_id["bm_daniel"].language, by_id["bm_daniel"].accent) == ("english", "british")
+
+    def test_a_voice_outside_the_convention_is_offered_with_nothing_guessed(self, tmp_path):
+        import numpy as np
+
+        np.savez(tmp_path / "voices.npz", **{"custom_voice": np.zeros((4, 1, 256), dtype=np.float32)})
+        (option,) = KokoroSpeechAdapter(voices_path=str(tmp_path / "voices.npz")).available_voices()
+        assert option.voice_id == "custom_voice"
+        assert option.language is None and option.accent is None and option.gender is None
 
     def test_a_missing_or_unreadable_archive_returns_empty_never_raises(self):
         adapter = KokoroSpeechAdapter(voices_path=str(Path("does") / "not" / "exist.npz"))

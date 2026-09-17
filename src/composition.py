@@ -309,6 +309,10 @@ class Runtime:
     # a local multilingual voice - read by the translate capability, the served
     # page and the Control Center alike. None only for a Runtime built by hand.
     translation: Any = None
+    # Where a translation can be shown live - the page, the Control Center, a
+    # connected screen reading the snapshot. One per runtime, kept across a
+    # live backend rebind.
+    translation_display: Any = None
 
     # ------------------------------------------------------------------
     # Named accessors for the one specialist this project ships.
@@ -576,7 +580,12 @@ def build_runtime(
 
     from src.providers.translation.factory import build_interpreter
 
-    runtime = _replace(runtime, translation=build_interpreter(settings, transcriber=runtime.media.transcriber))
+    from src.services.translation.outputs import TranslationDisplay
+
+    runtime = _replace(
+        runtime, translation=build_interpreter(settings, transcriber=runtime.media.transcriber),
+        translation_display=TranslationDisplay(),
+    )
     logger.info("runtime ready: %s", runtime.describe())
     return runtime
 
@@ -608,7 +617,9 @@ def build_channel(runtime: Runtime, manager: ManagerAgent) -> Channel:
     to the channel too, so a real ``deliver()`` call and a real
     snapshot read are looking at one shared, live signal - never two.
     """
-    return VoiceChannel(manager, speech=runtime.speech, presence=runtime.presence_registry)
+    channel = VoiceChannel(manager, speech=runtime.speech, presence=runtime.presence_registry)
+    channel.bind_translate(translate_for(runtime))
+    return channel
 
 
 def build_conversation(manager: ManagerAgent, person: str = "you") -> Conversation:
@@ -793,6 +804,8 @@ def rebind_backends(
         skills.bind_discover_voices(discover if discover is not None else (lambda: ()))
     if channel is not None and hasattr(channel, "_speech"):
         channel._speech = replacement.speech
+        if hasattr(channel, "bind_translate"):
+            channel.bind_translate(translate_for(replacement))
     logger.info("backends rebound live: %s", replacement.describe())
     return replacement
 

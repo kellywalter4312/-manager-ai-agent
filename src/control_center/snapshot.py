@@ -222,6 +222,17 @@ def _workspace_types(agent_name: str, governed_values: Any) -> dict[str, Any]:
     }
 
 
+def _workspace_definitions(centre: Any, agents: "list[dict[str, Any]]") -> "list[dict[str, Any]]":
+    from src.control_center.workspace_catalog import all_workspaces
+
+    values = centre.governed_values()
+    return [
+        {**t.to_dict(), "agents": [a["name"] for a in agents if t.workspace_id in [w["id"] for w in a.get("workspace_types", [])]],
+         "active_for": [a["name"] for a in agents if a.get("active_workspace") == t.workspace_id]}
+        for t in all_workspaces(values)
+    ]
+
+
 def _recordings(recordings: Any) -> dict[str, Any]:
     """This agent's own real recordings and current live recording
     session, exactly as ``ControlCenter.recordings()`` already resolved
@@ -344,9 +355,14 @@ def _translation(runtime: Any) -> dict[str, Any]:
     """What the interpreter can do right now - languages, hearing, voices.
     Read from the runtime's own interpreter, never a list here."""
     interpreter = getattr(runtime, "translation", None)
+    display = getattr(runtime, "translation_display", None)
     if interpreter is None:
-        return {"available": False, "reason": "translation is not assembled in this session", "languages": []}
-    return interpreter.status()
+        return {"available": False, "reason": "translation is not assembled in this session", "languages": [],
+                "display": display.state() if display is not None else None}
+    from src.services.translation.outputs import translation_outputs
+
+    return {**interpreter.status(), "outputs": list(translation_outputs()),
+            "display": display.state() if display is not None else None}
 
 
 def _speech(channel: Any) -> dict[str, Any]:
@@ -413,6 +429,8 @@ def _artifacts(store: Any) -> list[dict[str, Any]]:
             # from (a clip's own source video, say). Empty when nothing
             # tracked was used, honestly.
             "related_artifact_ids": list(artifact.latest.related_artifact_ids),
+            # Campaign 2: the workspace its agent was working in when it was made.
+            "workspace": dict(artifact.latest.metadata).get("workspace"),
             # The fourth, distinct concern src/services/artifacts/delivery.py's
             # own docstring names - computed fresh here, never persisted
             # alongside the version it describes, so an interface never
@@ -596,6 +614,9 @@ def snapshot(
         "speech": _speech(channel),
         # Universal voice translation: the interpreter's real state.
         "translation": _translation(centre.runtime),
+        # Campaign 2: every workspace the owner has, archived ones included,
+        # with which agents have each - the Control Center's own view of them.
+        "workspaces": _workspace_definitions(centre, agents),
         "system": {
             # The assembled product's own version - a different concept
             # from this payload's own "version" key above (SNAPSHOT_VERSION,

@@ -63,6 +63,16 @@ SEND_WORDS = frozenset({"send", "compose", "reply", "draft", "forward"})
 DEFAULT_FETCH_LIMIT = 20
 
 
+
+class InterfaceFeatureNames:
+    """The surface kinds this agent answers ``surface_view`` for - the
+    values of ``InterfaceFeature``, named here without importing the Control
+    Center into an agent module."""
+
+    MAILBOX = "mailbox"
+    OPPORTUNITIES = "opportunities"
+
+
 class EmailAgent(CognitiveAgent):
     """Reads a mailbox and reports on its contents."""
 
@@ -223,13 +233,11 @@ class EmailAgent(CognitiveAgent):
         no permission: the Gmail scope is still readonly, no Outbox exists, and
         sending is still refused. All this changes is what a screen may offer.
 
-        Chat and activity are marked implemented because the Control Center
-        renders both today. The mailbox and opportunity surfaces are declared
-        and not yet implemented, which is the honest state - this agent really
-        does read a mailbox and really does produce ranked findings, and the
-        interface for looking through them directly has not been built. Saying
-        so beats either hiding the shape of the work or pretending a screen
-        exists.
+        Chat and activity are rendered by the Control Center. The mailbox and
+        opportunity surfaces are implemented too (whole-ecosystem campaign 2):
+        ``surface_view`` answers each with what this agent really reads and
+        really ranks, and the served page renders it as a screen - read-only,
+        exactly as the mailbox itself is.
         """
         from src.control_center.interfaces import InterfaceDescriptor, InterfaceFeature
 
@@ -245,10 +253,77 @@ class EmailAgent(CognitiveAgent):
                 }
             ),
             implemented=frozenset(
-                {InterfaceFeature.CHAT, InterfaceFeature.ACTIVITY}
+                {
+                    InterfaceFeature.CHAT,
+                    InterfaceFeature.ACTIVITY,
+                    InterfaceFeature.MAILBOX,
+                    InterfaceFeature.OPPORTUNITIES,
+                }
             ),
             summary="reads a mailbox and ranks what it finds against your profile",
         )
+
+    def surface_view(self, kind: str, *, limit: "int | None" = None) -> "dict | None":
+        """What one of this agent's screens shows, read now - never cached,
+        never a copy kept anywhere. Read-only: the mailbox is fetched exactly
+        as a request would fetch it, and nothing is sent, replied to, labelled
+        or deleted.
+
+        Answered in the generic surface shape the page renders for any agent
+        (``title``, ``items`` of ``title/subtitle/detail/meta/link/group``,
+        ``notes``), with the structured fields beside it. None for a kind this
+        agent has no screen for. Raises ``MailboxError`` when the mailbox
+        cannot be read - the caller reports it."""
+        kind = str(kind or "").strip().lower()
+        if kind not in (InterfaceFeatureNames.MAILBOX, InterfaceFeatureNames.OPPORTUNITIES):
+            return None
+        messages = list(self._mailbox.fetch(limit=limit or self._fetch_limit))
+        notes = ["Read-only - nothing here sends, replies to, labels or deletes mail."]
+        if kind == InterfaceFeatureNames.MAILBOX:
+            return {
+                "agent": self._name, "kind": kind, "title": f"{self._name}'s inbox",
+                "count": len(messages), "can_send": self.can_send, "notes": notes,
+                "items": [
+                    {
+                        "id": m.id, "title": " ".join(m.subject.split()) or "(no subject)", "subtitle": m.sender,
+                        "detail": " ".join(m.body.split())[:280],
+                        "meta": [m.received_at.isoformat(), *sorted(m.labels)],
+                    }
+                    for m in messages
+                ],
+            }
+        groups = []
+        items = []
+        for analyzer in self._analyzers:
+            report = analyzer.analyze(messages)
+            ranked = tuple(getattr(report, "ranked", report.findings))
+            ambiguous = tuple(getattr(report, "ambiguous", ()))
+            groups.append({"analyzer": report.analyzer, "considered": report.considered,
+                           "ranked": len(ranked), "ambiguous": len(ambiguous)})
+            for group, findings in (("ranked", ranked), ("ambiguous", ambiguous)):
+                for finding in findings:
+                    items.append(self._finding_item(finding, report.analyzer, group))
+        if not items:
+            notes.append(f"No findings among {len(messages)} message(s).")
+        return {"agent": self._name, "kind": kind, "title": f"What {self._name} found", "count": len(items),
+                "analyzers": groups, "notes": notes, "items": items}
+
+    @staticmethod
+    def _finding_item(finding, analyzer: str, group: str) -> dict:
+        what = finding.role or "Opportunity"
+        where = f" at {finding.company}" if finding.company else ""
+        meta = [f"score {finding.score}"]
+        for label in ("band", "location", "salary", "deadline", "employment_type"):
+            value = getattr(finding, label, None)
+            if value:
+                meta.append(f"{label.replace('_', ' ')}: {getattr(value, 'value', value)}")
+        reasons = tuple(getattr(finding, "reasons", ()) or ()) or tuple(f"signal: {s}" for s in finding.signals)
+        return {
+            "id": finding.message_id, "group": group, "analyzer": analyzer,
+            "title": f"{what}{where}", "subtitle": f"{finding.sender} - {finding.subject}",
+            "detail": "; ".join(reasons[:4]), "meta": meta, "link": getattr(finding, "apply_link", None) or "",
+            "missing_skills": list(getattr(finding, "missing_skills", ()) or ()),
+        }
 
     @property
     def can_send(self) -> bool:

@@ -782,12 +782,21 @@ class TestSpecialistInterfacesAreDiscovered:
         assert descriptor.offers(InterfaceFeature.OPPORTUNITIES)
 
     def test_declared_but_unbuilt_surfaces_are_shown_as_planned(self):
-        """The same honesty a capability without its tool gets."""
-        arthur = manager().registry.get("Arthur")
-        descriptor = describe_interface(arthur)
-        assert InterfaceFeature.MAILBOX in descriptor.planned
-        assert not descriptor.can_render(InterfaceFeature.MAILBOX)
+        """The same honesty a capability without its tool gets. (Arthur's
+        mailbox and opportunity screens were planned here until campaign 2
+        built them - they now render, and are no longer called planned.)"""
+        descriptor = InterfaceDescriptor(
+            agent="x", display_name="x",
+            features=frozenset({InterfaceFeature.CHAT, InterfaceFeature.SOURCES}),
+            implemented=frozenset({InterfaceFeature.CHAT}),
+        )
+        assert InterfaceFeature.SOURCES in descriptor.planned
+        assert not descriptor.can_render(InterfaceFeature.SOURCES)
         assert "planned" in descriptor.describe()
+
+        arthur = describe_interface(manager().registry.get("Arthur"))
+        assert arthur.can_render(InterfaceFeature.MAILBOX) and arthur.can_render(InterfaceFeature.OPPORTUNITIES)
+        assert InterfaceFeature.MAILBOX not in arthur.planned
 
     def test_a_surface_cannot_be_implemented_without_being_offered(self):
         descriptor = InterfaceDescriptor(

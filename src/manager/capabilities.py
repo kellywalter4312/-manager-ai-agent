@@ -437,6 +437,9 @@ class CapabilityRequest:
     # same honest-refusal shape every other optional collaborator here
     # already has.
     discover_voices: "Callable[[], tuple[Any, ...]] | None" = None
+    # What the provider speaking for this agent can do - voices, spoken
+    # languages, cross-language accents, paces - read live.
+    voice_facts: "Callable[[], Any] | None" = None
     # Real Audio Recording/Capture checkpoint: the one shared, live
     # "is this agent recording right now" signal - see
     # src/services/identity/recording_session.py's own docstring for why
@@ -539,6 +542,11 @@ class ManagerCapability:
     # is reachable only through its own `claims`, never through this
     # fallback.
     scoreable: bool = True
+    # Campaign 2 workspaces: whether this handler answers in any workspace an
+    # agent is in, whatever that workspace's capability profile - talking,
+    # describing itself, its own memory, moving between workspaces. A
+    # profile scopes *work*; it never makes an agent unable to converse.
+    anywhere: bool = False
 
     def __post_init__(self) -> None:
         if not self.name.strip():
@@ -779,6 +787,7 @@ PARTICIPANT_INVITATION = ManagerCapability(
 # lost; only the bare, over-broad word was.
 ROSTER_REPORT = ManagerCapability(
     name="roster_report",
+    anywhere=True,
     capabilities=frozenset(
         {
             "capabilities",
@@ -911,6 +920,7 @@ SELF_DESCRIPTION = ManagerCapability(
     # chosen so a total, repeatable order puts identity first for the one
     # kind of request that is unambiguously about identity.
     name="about_self",
+    anywhere=True,
     # Deliberately NARROW. The first attempt declared "who", "name" and
     # "role" as well, and scoring - which runs for every task this claim
     # does not catch - then handed "who should I send this to" to the
@@ -943,6 +953,7 @@ CONVERSATIONAL_FLOOR = ManagerCapability(
     # Alfred's own handlers, never a competitor for one that already
     # claims part of the same message.
     name="small_talk",
+    anywhere=True,
     capabilities=_CONVERSATIONAL_WORDS,
     handle=natural_acknowledgement,
     description="Answers short conversational turns - greetings, thanks, acknowledgements - naturally.",
@@ -1530,6 +1541,7 @@ def _assisted_answer(request: CapabilityRequest, *, context: "Sequence[str]" = (
 
 OPEN_CONVERSATION = ManagerCapability(
     name="open_conversation",
+    anywhere=True,
     # Kinds of interaction, never subjects - the same discipline
     # GeneralCapability's own docstring states: no entry here for a car, a
     # football club, a country or a market, and there must never be one.
@@ -1833,6 +1845,7 @@ def recall_memory(request: CapabilityRequest) -> TaskResult:
 
 FORGET = ManagerCapability(
     name="forget",
+    anywhere=True,
     capabilities=frozenset({"forget"}),
     handle=forget_this,
     description="Removes a stored memory when a person explicitly asks to be forgotten.",
@@ -1847,6 +1860,7 @@ FORGET = ManagerCapability(
 
 RECALL_MEMORY = ManagerCapability(
     name="recall_memory",
+    anywhere=True,
     capabilities=frozenset({"recall"}),
     handle=recall_memory,
     description="Answers 'what do you remember about X' from this agent's own governed memory.",
@@ -2472,6 +2486,7 @@ def correct_memory(request: CapabilityRequest) -> TaskResult:
 
 CORRECT_MEMORY = ManagerCapability(
     name="correct_memory",
+    anywhere=True,
     capabilities=frozenset({"correct", "correction"}),
     handle=correct_memory,
     description="Replaces or invalidates an existing memory when the user explicitly corrects it.",
@@ -4102,8 +4117,8 @@ _CLIP_VIDEO_MARKERS: tuple[str, ...] = (
 # still cannot claim this capability on an unrelated word alone, and the
 # evidence check in clip_video_intent itself is unchanged.
 _CLIP_VIDEO_VERB_NOUN_PATTERN = re.compile(
-    r"\b(?:clip|cut|trim|extract)\b[\s\S]*\b(?:video|footage)\b"
-    r"|\b(?:video|footage)\b[\s\S]*\b(?:clip|cut|trim|extract)\b"
+    r"\b(?:clip|cut|trim|extract|pull\s+out|grab)\b[\s\S]*\b(?:video|footage)\b"
+    r"|\b(?:video|footage)\b[\s\S]*\b(?:clip|cut|trim|extract|pull\s+out|grab)\b"
     # "Give me the part of the video between 2 and 6 seconds" - a piece of
     # the video asked for by name; the time-range evidence check below still
     # has to hold, so "the best part of the video was the ending" never is.
@@ -4124,7 +4139,33 @@ def clip_video_intent(task: Task, participants: Sequence[str] = ()) -> bool:
     text = task.description
     if not (_marker_present(text, _CLIP_VIDEO_MARKERS) or _CLIP_VIDEO_VERB_NOUN_PATTERN.search(text)):
         return False
-    return find_video_path(text) is not None or bool(parse_clip_specs(text))
+    # Ordinary talk about a video clip is not a request to cut one ("I ran 5
+    # to 10 miles, then watched a video clip"): the order-free verb/noun
+    # shape only counts when the sentence actually asks for something, and a
+    # number range that measures something else (miles, people, dollars) is
+    # never a clip boundary. The explicit imperative markers above ("clip this
+    # video", "cut the video") are requests by themselves.
+    if not _marker_present(text, _CLIP_VIDEO_MARKERS) and not _CLIP_REQUEST_CUE.search(text):
+        return False
+    if find_video_path(text) is not None:
+        return True
+    return bool(parse_clip_specs(_NON_TIME_RANGES.sub(" ", text)))
+
+
+# A sentence that asks: an imperative opening (after an optional "please" or
+# a name), or a request phrase anywhere. Grammar only.
+_CLIP_REQUEST_CUE = re.compile(
+    r"(?:^|[,;:]\s*)\s*(?:(?:please|ok(?:ay)?|hey|so|now)\s*,?\s+)?(?:[A-Z][a-z]+\s*,\s*)?(?:please\s+)?"
+    r"(?:clip|cut|trim|extract|make|give|get|create|pull|grab|find|export|save|send|produce|split|take)\b"
+    r"|\b(?:can|could|would|will)\s+you\b|\bplease\b|\bi\s+(?:need|want|would\s+like)\b|\bi'd\s+like\b|"
+    r"\blet'?s\b|\bhelp\s+me\b|\bfor\s+me\b",
+    re.IGNORECASE,
+)
+# "5 to 10 miles", "between 20 and 30 people" - a range of something other than time.
+_NON_TIME_RANGES = re.compile(
+    r"\b\d+(?:\.\d+)?\s*(?:-|to|and|until|through)\s*\d+(?:\.\d+)?\s+(?!(?:s|secs?|seconds?|mins?|minutes?|hours?|hrs?)\b)[a-z]+",
+    re.IGNORECASE,
+)
 
 
 def clip_video(request: CapabilityRequest) -> TaskResult:
@@ -7754,7 +7795,7 @@ def _weekly_review(request: CapabilityRequest, records, commitments, now, today,
             target=commitment.target, done=count if count is not None else 0,
             gap=max(0, commitment.target - (count or 0)),
         ))
-    goals = [item for item in records if item.status == STATUS_CURRENT and item.category not in ("commitment", "progress", "review") and _GOAL_TOPIC.search(item.topic)]
+    goals = [item for item in records if item.status == STATUS_CURRENT and item.category not in ("commitment", "progress", "review", "goal_link") and _GOAL_TOPIC.search(item.topic)]
     from src.services.memory.coaching import stems as _coach_stems
 
     tracked = set().union(*(_coach_stems(c.area) for c in commitments)) if commitments else set()
@@ -7821,7 +7862,7 @@ def coach(request: CapabilityRequest) -> TaskResult:
                 style = requested
                 changed_style = f"Done - I'll coach you {requested}ly from now on." if requested == "ruthless" else "Done - I'll go easier on you from now on."
 
-    goals = [item for item in context if item.status == STATUS_CURRENT and _GOAL_TOPIC.search(item.topic)]
+    goals = [item for item in context if item.status == STATUS_CURRENT and item.category != "goal_link" and _GOAL_TOPIC.search(item.topic)]
     pending = list(request.recall(kind=MemoryCategory.TASK.value, tags={"task:pending"}, limit=200))
     missed = []
     for record in pending:
@@ -7922,6 +7963,10 @@ def translation_request(text: str) -> "tuple[str, str] | None":
 
 
 def translate_intent(task: Task, participants: Sequence[str] = ()) -> bool:
+    # "Translate this video into English" is media translation, which hears
+    # the media first - never the words "this video" translated.
+    if translate_media_intent(task, participants):
+        return False
     return translation_request(task.description) is not None
 
 
@@ -8044,18 +8089,76 @@ _IMAGE_OF_SUBJECT = re.compile(r"\b(?:an?|some)\s+(?:new\s+)?(?:image|photo|pict
 IMAGE_TOOL = "image_intelligence"
 
 
+# A question about an image ("is this photo too dark?") asks for an answer, not
+# an edit - unless it is a polite request ("could you crop this photo?").
+_IMAGE_QUESTION = re.compile(
+    r"^\s*(?:is|are|was|were|does|do|did|has|have|what|what's|whats|why|how|which|who|when|where|should)\b", re.IGNORECASE,
+)
+_IMAGE_EDIT_REQUEST = re.compile(
+    r"\b(?:make|turn|change|convert|edit|transform|restyle|styli[sz]e|retouch|redo|give)\s+(?:this|the|my|that|our)\s+(?:\w+\s+)?"
+    r"(?:image|photo|photograph|picture|pic|screenshot|selfie|scan)\b(?!\s+(?:of|about)\b)",
+    re.IGNORECASE,
+)
+
+
 def image_transform_intent(task: Task, participants: Sequence[str] = ()) -> bool:
+    from src.providers.media.image_edits import parse_edit_instruction
     from src.providers.media.image_techniques import current_techniques, technique_for_request
 
     text = str(task.description or "")
-    if not _IMAGE_NOUN.search(text) or _IMAGE_OF_SUBJECT.search(text):
+    if not _IMAGE_NOUN.search(text) or _IMAGE_OF_SUBJECT.search(text) or _IMAGE_QUESTION.search(text):
         return False
-    return technique_for_request(text, current_techniques()) is not None
+    techniques = current_techniques()
+    return (
+        technique_for_request(text, techniques) is not None
+        or bool(parse_edit_instruction(text, techniques).steps)
+        # An edit asked of the image in words no operation reads ("make this
+        # photo look like a watercolour") still belongs here - to be restated
+        # by a Brain, or refused honestly - never to general conversation.
+        or bool(_IMAGE_EDIT_REQUEST.search(text))
+    )
+
+
+def _image_edit_plan(request: CapabilityRequest) -> "tuple[dict | None, str | None]":
+    """The edit plan for this request: read deterministically, and - only when
+    part of it could not be read and a Brain is available - restated by the
+    Brain in the edit vocabulary and read again the same way. Returns
+    (plan, refusal)."""
+    outcome = request.tools.invoke(IMAGE_TOOL, {"operation": "plan", "content": json.dumps({"instruction": request.task.description})})
+    if not outcome.ok:
+        return None, f"I couldn't read that as image edits: {outcome.error}"
+    plan = json.loads(outcome.output)
+    plan["planner"] = "deterministic"
+    if plan["not_understood"] and request.converse is not None:
+        notes = (
+            "Restate the person's image-editing request as edits separated by ' ; ', in the order asked, using ONLY "
+            "these forms (fill in the numbers, colours and quoted text the person asked for; never add an edit they did "
+            "not ask for). If something they asked for cannot be expressed with these forms, include 'CANNOT: <that part>'.\n"
+            + "\n".join(f"- {line}" for line in plan["vocabulary"]),
+        )
+        decision = request.converse(request.task, notes)
+        restated = decision.reason.strip() if decision is not None and decision.is_decided else ""
+        if restated and "CANNOT:" not in restated:
+            again = request.tools.invoke(IMAGE_TOOL, {"operation": "plan", "content": json.dumps({"instruction": restated})})
+            if again.ok:
+                replanned = json.loads(again.output)
+                if replanned["steps"] and not replanned["not_understood"]:
+                    replanned["planner"] = decision.source
+                    return replanned, None
+    if plan["not_understood"]:
+        understood = "; ".join(step["clause"] for step in plan["steps"])
+        return None, (
+            (f"I can do this part: {understood}. But I" if understood else "I")
+            + " don't know how to " + "; ".join(repr(x) for x in plan["not_understood"])
+            + " - nothing was changed. The edits I can make: " + " | ".join(plan["vocabulary"])
+        )
+    return plan, None
 
 
 def image_transform(request: CapabilityRequest) -> TaskResult:
-    """Run the technique the request names on the image it points at, saving
-    the result as a new image derived from it."""
+    """Edit the image the request points at as its instruction says - one
+    named technique, or an ordered plan of parametric edits, each verified -
+    saving the result as a new image derived from it."""
     if not request.tools.permits(IMAGE_TOOL):
         return TaskResult.failure(request.task, request.own_name, "Image techniques are not installed for me right now.")
     described, _path = _shared_media(request, ("image",))
@@ -8063,6 +8166,26 @@ def image_transform(request: CapabilityRequest) -> TaskResult:
         return TaskResult.failure(
             request.task, request.own_name,
             "Which image? Share it in this conversation (or name it with 'artifact <id>') and I'll work on it.",
+        )
+    plan, refusal = _image_edit_plan(request)
+    if refusal is not None:
+        return TaskResult.failure(request.task, request.own_name, refusal)
+    if not (len(plan["steps"]) == 1 and plan["steps"][0]["op"] == "technique"):
+        edited = request.tools.invoke(IMAGE_TOOL, {"operation": "edit", "content": json.dumps({
+            "artifact_id": described["artifact_id"], "steps": plan["steps"],
+        })})
+        if not edited.ok:
+            return TaskResult.failure(request.task, request.own_name, f"I couldn't edit the image: {edited.error}")
+        made = json.loads(edited.output)
+        done = "; ".join(f"{s['step']}. {s['detail']} (checked, {s['size'][0]}x{s['size'][1]})" for s in made["applied"])
+        return TaskResult.success(
+            request.task, request.own_name,
+            (
+                f"Artifact created: id={made['artifact_id']} type=image title={made['title']!r} png={made['rendition']} - "
+                f"edited: {done}. Your original (artifact {made['source_id']}) is unchanged."
+            ),
+            payload={"handled_by": "image_transform", "technique": "edit", "planner": plan["planner"],
+                     "edits": [s["op"] for s in made["applied"]], "artifact_id": made["artifact_id"], "source_id": made["source_id"]},
         )
     outcome = request.tools.invoke(
         IMAGE_TOOL,
@@ -8177,7 +8300,7 @@ def _guidance_sources(request: CapabilityRequest, now, today) -> dict:
     records = _personal_records(request)
     goals = [
         item for item in records
-        if item.status == STATUS_CURRENT and item.category not in ("commitment", "progress", "review") and _GOAL_TOPIC.search(item.topic)
+        if item.status == STATUS_CURRENT and item.category not in ("commitment", "progress", "review", "goal_link") and _GOAL_TOPIC.search(item.topic)
     ]
     situation = next((item for item in records if item.category == SITUATION_CATEGORY and item.status == STATUS_CURRENT), None)
     commitments = commitments_from(records)
@@ -8223,8 +8346,9 @@ def _guidance_notes(sources: dict) -> "tuple[str, ...]":
 
 def personal_guidance(request: CapabilityRequest) -> TaskResult:
     from src.services.memory.guidance import (
-        CRISIS, CRISIS_REPLY, GOALS, LIFE, PLAN, PRIORITY, SITUATION, TALK,
-        extract_situation, guidance_kind, linked_goals, plan_week, priorities,
+        CRISIS, CRISIS_REPLY, GOALS, LIFE, PLAN, PRIORITY, SITUATION, TALK, TEACH_LINK,
+        best_match, extract_situation, goal_connections, goal_link_candidate, guidance_kind, parse_goal_link,
+        plan_week, priorities, taught_links, validated_suggestions,
     )
 
     text = request.task.description
@@ -8249,9 +8373,30 @@ def personal_guidance(request: CapabilityRequest) -> TaskResult:
 
     sources = _guidance_sources(request, now, today)
     goal_texts = [goal.value or goal.content for goal in sources["goals"]]
+    taught = taught_links(_personal_records(request))
+    items = [c.describe for c in sources["commitments"]] + [t.title for t in sources["tasks"]]
+
+    if kind == TEACH_LINK:
+        thing, goal_phrase, negated = parse_goal_link(text)
+        goal = best_match(goal_phrase, goal_texts)
+        if goal is None:
+            known = "; ".join(goal_texts) or "none yet - say \"my goal this year is ...\""
+            return TaskResult.failure(
+                request.task, request.own_name,
+                f"Which goal is that? I couldn't tell which one '{goal_phrase}' means. Your goals: {known}.",
+            )
+        item = best_match(thing, items) or thing
+        if not _retain_candidate(request, goal_link_candidate(item, goal, negated)):
+            return TaskResult.failure(request.task, request.own_name, "I couldn't keep that just now.")
+        tracked = "" if item in items else " (it isn't something you track yet - tell me as a commitment or task and I'll count it)"
+        return TaskResult.success(
+            request.task, request.own_name,
+            f"Noted: {item} {'does not serve' if negated else 'serves'} your goal: {goal}.{tracked}",
+            payload={**payload, "item": item, "goal": goal, "negated": negated},
+        )
 
     if kind in (PLAN, PRIORITY):
-        ranked = priorities(now=now, tasks=sources["tasks"], goals=goal_texts)
+        ranked = priorities(now=now, tasks=sources["tasks"], goals=goal_texts, taught=taught)
         plan = plan_week(
             today=today, now=now, items=sources["items"], tasks=sources["tasks"],
             commitments=sources["commitments"], done=sources["done"], goals=goal_texts,
@@ -8287,23 +8432,53 @@ def personal_guidance(request: CapabilityRequest) -> TaskResult:
                 "You haven't told me a goal yet, so there's nothing to connect them to. "
                 "Say \"my goal this year is ...\".", payload={**payload, "goals": 0},
             )
+        connections = goal_connections(goal_texts, items, taught)
         lines = []
-        for goal in sources["goals"][:6]:
-            serving = [c.describe for c in sources["commitments"] if linked_goals(c.area, [goal.value or goal.content])]
-            serving += [t.title for t in sources["tasks"] if linked_goals(t.title, [goal.value or goal.content])]
-            said = describe_for_user(goal).rstrip(".")
+        for record, goal in list(zip(sources["goals"], goal_texts))[:6]:
+            said = describe_for_user(record).rstrip(".")
+            serving = connections.get(goal, [])
             if serving:
-                lines.append(f"- {said}: served by {', '.join(serving)}.")
+                lines.append(f"- {said}: served by " + ", ".join(
+                    f"{link.item} ({'you told me' if link.evidence == 'told' else link.evidence})" for link in serving) + ".")
             else:
-                lines.append(f"- {said}: nothing you track shares its words - no commitment or task visibly moves it.")
-        unlinked = [c.describe for c in sources["commitments"] if not linked_goals(c.area, goal_texts)]
-        if unlinked:
-            lines.append("Commitments not tied to any stated goal by their words: " + ", ".join(unlinked) + ".")
-        floor = "How your goals and commitments connect (matched by the words they share):\n" + "\n".join(lines)
-        return _with_brain_if_available(request, sources, floor, payload, instruction=(
-            "Explain how the person's weekly commitments and tasks serve their goals, where they do not, and one "
-            "concrete change for each unsupported goal."
+                lines.append(f"- {said}: nothing you track is linked to it yet.")
+        linked_items = {link.item.lower() for links in connections.values() for link in links}
+        unlinked = [item for item in items if item.lower() not in linked_items]
+        suggestions = []
+        if request.converse is not None and unlinked and goal_texts:
+            decision = request.converse(request.task, (
+                "Propose which of the person's commitments/tasks plausibly serve which of their goals, using ONLY the "
+                "exact names below, written as 'item => goal' separated by ' ; '. Propose nothing when no link is "
+                "plausible.",
+                "Goals: " + " | ".join(goal_texts),
+                "Commitments and tasks not yet linked: " + " | ".join(unlinked),
+            ))
+            if decision is not None and decision.is_decided:
+                suggestions = validated_suggestions(decision.reason, goal_texts, unlinked, connections)
+                payload = {**payload, "brain": decision.source}
+        if suggestions:
+            lines.append("Possible links (suggested, not confirmed - tell me if they're right): " + "; ".join(
+                f"{s.item} for {s.goal}" for s in suggestions) + ".")
+        still = [item for item in unlinked if item not in {s.item for s in suggestions}]
+        if still:
+            lines.append("Not linked to any goal: " + ", ".join(still) + ".")
+        if still or any(not connections.get(goal) for goal in goal_texts):
+            example_goal = next((g for g in goal_texts if not connections.get(g)), goal_texts[0])
+            example_item = still[0] if still else (items[0] if items else "your running")
+            said_goal = f"goal {example_goal}" if example_goal.lower().startswith("to ") else f"{example_goal} goal"
+            lines.append(f"If one serves a goal, tell me - e.g. \"{example_item} is for my {said_goal}\".")
+        floor = "How your goals, commitments and tasks connect:\n" + "\n".join(lines)
+        counts = {"links": sum(len(v) for v in connections.values()), "suggested": len(suggestions),
+                  "told": sum(1 for v in connections.values() for link in v if link.evidence == "told")}
+        # With a Brain, its advice follows the evidence - the labelled links stay
+        # exactly as found, never rewritten into prose that hides their source.
+        advised = _with_brain_if_available(request, sources, floor, {**payload, **counts}, instruction=(
+            "The person's goal links are listed with their evidence. Advise one concrete change for each goal nothing "
+            "serves, using only the listed sources. Do not restate the links."
         ))
+        if advised.succeeded and (advised.payload or {}).get("brain") not in (None, "deterministic"):
+            return TaskResult.success(request.task, request.own_name, floor + "\n\n" + advised.output, payload=advised.payload)
+        return TaskResult.success(request.task, request.own_name, floor, payload={**payload, **counts, "brain": "deterministic"})
 
     # LIFE or TALK - guided reflection grounded in what is known.
     known = []
@@ -8368,6 +8543,328 @@ PERSONAL_GUIDANCE = ManagerCapability(
         "from their own situation, goals, commitments, tasks and calendar, with a safe, honest floor in Half Brain."
     ),
     claims=personal_guidance_intent,
+    scoreable=False,
+)
+
+# ---------------------------------------------------------------------------
+# Campaign 2: media translated and routed to outputs - "translate this video
+# into English subtitles", "give me French subtitles for this recording",
+# "translate this audio into Spanish and read it to me". Any language the
+# installed engine translates; the outputs are an open registry.
+# ---------------------------------------------------------------------------
+
+_MEDIA_NOUN = re.compile(
+    r"\b(?:video|videos|recording|recordings|audio|clip|movie|film|episode|show|footage|voice\s+note|podcast|interview)\b",
+    re.IGNORECASE,
+)
+_SUBTITLE_WORDS = re.compile(r"\b(?:subtitle[sd]?|caption(?:s|ed)?|closed\s+captions?)\b", re.IGNORECASE)
+_TRANSLATE_WORD = re.compile(r"\btranslat(?:e|ed|ion)\b|\bdub\b", re.IGNORECASE)
+_INTO_LANGUAGE = re.compile(r"\b(?:in|into|to)\s+(?P<language>[A-Za-z][A-Za-z\-]{2,20})\b", re.IGNORECASE)
+_NOT_A_TARGET = frozenset({"the", "this", "that", "my", "your", "me", "text", "words", "subtitles", "captions", "audio", "speech"})
+_LANGUAGE_ADJECTIVE = re.compile(r"\b(?P<language>[A-Za-z][A-Za-z\-]{2,20})\s+(?:subtitles?|captions?)\b", re.IGNORECASE)
+
+
+def _media_target_language(text: str) -> "str | None":
+    from src.services.identity.voice_configuration import canonical_language
+
+    for pattern in (_LANGUAGE_ADJECTIVE, _INTO_LANGUAGE):
+        for match in pattern.finditer(text):
+            found = canonical_language(match.group("language"))
+            if found:
+                return found
+    # A language no table here knows yet ("into Swahili") is still the target
+    # named - a capitalised word after into/to - so the request reaches the
+    # translator, which says honestly whether it can do it.
+    for match in _INTO_LANGUAGE.finditer(text):
+        word = match.group("language")
+        if word[:1].isupper() and word.lower() not in _NOT_A_TARGET:
+            return word
+    return None
+
+
+def translate_media_intent(task: Task, participants: Sequence[str] = ()) -> bool:
+    text = str(task.description or "")
+    if not _MEDIA_NOUN.search(text):
+        return False
+    if _SUBTITLE_WORDS.search(text):
+        # Captions with no language named are captions in the language spoken.
+        return True
+    return bool(_TRANSLATE_WORD.search(text)) and _media_target_language(text) is not None
+
+
+def _requested_translation_outputs(text: str) -> "list[str]":
+    outputs = []
+    if _SUBTITLE_WORDS.search(text) or not re.search(r"\b(?:read|speak|say|dub|voice|out\s+loud|aloud)\b", text, re.IGNORECASE):
+        outputs += ["subtitles"]
+        if re.search(r"\b(?:video|movie|film|episode|show|footage|clip)\b", text, re.IGNORECASE):
+            outputs += ["captioned_video"]
+    if re.search(r"\b(?:read|speak|say|dub|voice|out\s+loud|aloud)\b", text, re.IGNORECASE):
+        outputs += ["audio"]
+    outputs += ["display"]
+    return list(dict.fromkeys(outputs))
+
+
+def translate_media(request: CapabilityRequest) -> TaskResult:
+    if not request.tools.permits("translation_output"):
+        return TaskResult.failure(request.task, request.own_name, "Media translation is not installed for me right now.")
+    text = request.task.description
+    target = _media_target_language(text)
+    described, _path = _shared_media(request, ("video", "audio", "voice_recording"))
+    if described is None:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "Which video or recording? Share it in this conversation (or name it with 'artifact <id>') and I'll translate it.",
+        )
+    outcome = request.tools.invoke("translation_output", {"operation": "translate_media", "content": json.dumps({
+        "artifact_id": described["artifact_id"], "target": target, "outputs": _requested_translation_outputs(text),
+    })})
+    if not outcome.ok:
+        return TaskResult.failure(request.task, request.own_name, f"I couldn't translate that: {outcome.error}")
+    result = json.loads(outcome.output)
+    if target is None or result["source_language"] == result["target_language"]:
+        lines = [f"Captioned '{result['source_title']}' in the language spoken ({result['source_language']}):"]
+    else:
+        lines = [f"Translated '{result['source_title']}' from {result['source_language']} into {result['target_language']}:"]
+    lines.extend(f"  {int(l['start']) // 60}:{int(l['start']) % 60:02d} {l['text']}" for l in result["lines"][:8])
+    for name, produced in result["outputs"].items():
+        if "artifact_id" in produced:
+            lines.append(f"- {name}: artifact {produced['artifact_id']} (artifact/{produced['artifact_id']}.{produced['format']})")
+        elif "lines" in produced:
+            lines.append(f"- {name}: shown on the live display ({produced['lines']} line(s))")
+        else:
+            lines.append(f"- {name}: {produced.get('skipped') or produced.get('error')}")
+    return TaskResult.success(
+        request.task, request.own_name, "\n".join(lines),
+        payload={"handled_by": "translate_media", "target": result["target_language"], "source": result["source_language"],
+                 "outputs": result["outputs"]},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Campaign 2: genuine 3D content - "make a 3D model of X", described as parts
+# by the person, or restated as parts by a Brain, assembled into a real glTF
+# mesh and checked to be three-dimensional before it is saved.
+# ---------------------------------------------------------------------------
+
+_MODEL3D_REQUEST = re.compile(
+    r"\b(?:3d|3-d|three[\s-]dimensional)\s+(?:model|object|scene|version|render(?:ing)?|mesh|sculpture|figure|shape|print|asset)\b"
+    r"|\b(?:model|build|make|create|sculpt|render)\b[^.?!]{0,60}?\bin\s+3d\b"
+    r"|\b(?:make|build|create|design|give\s+me|generate|sculpt)\s+(?:me\s+)?(?:an?\s+|the\s+)?3d\s+\w+",
+    re.IGNORECASE,
+)
+_MODEL3D_SUBJECT = re.compile(
+    r"\b(?:3d|3-d|three[\s-]dimensional)\s+(?:model|object|scene|version|render(?:ing)?|mesh|sculpture|figure|shape|asset)\s+of\s+(?P<a>[^:;.?!]{2,80})"
+    r"|\b(?:make|build|create|design|give\s+me|generate|sculpt)\s+(?:me\s+)?(?:an?\s+|the\s+)?3d\s+(?P<b>[^:;.?!]{2,80})"
+    r"|\b(?:model|build|make|create|sculpt|render)\s+(?P<c>[^:;.?!]{2,60}?)\s+in\s+3d\b",
+    re.IGNORECASE,
+)
+
+
+def create_3d_model_intent(task: Task, participants: Sequence[str] = ()) -> bool:
+    text = str(task.description or "")
+    return bool(_MODEL3D_REQUEST.search(text)) and not re.match(r"^\s*(?:what|why|how|is|are|does|do)\b", text, re.IGNORECASE)
+
+
+def create_3d_model(request: CapabilityRequest) -> TaskResult:
+    """Genuine 3D content for any subject: the parts the person described, or -
+    with a Brain - the subject restated as parts in the same grammar and read by
+    the same parser. Nothing is saved that is not a valid, three-dimensional
+    glTF mesh; without parts or a Brain the request is refused with the grammar."""
+    if not request.tools.permits("model3d"):
+        return TaskResult.failure(request.task, request.own_name, "3D model building is not installed for me right now.")
+    text = request.task.description
+    found = _MODEL3D_SUBJECT.search(text)
+    subject = " ".join((next((g for g in found.groups() if g), "") if found else "").split()).strip(" ,") or "a model"
+    subject = re.split(r"\s+(?:with|made\s+of|using)\s+", subject, maxsplit=1)[0]
+    subject = re.sub(r"^(?:model|object|scene|version|render(?:ing)?|mesh|sculpture|figure|shape|asset)\s+of\s+", "", subject,
+                     flags=re.IGNORECASE) or "a model"
+    parsed = json.loads(request.tools.invoke("model3d", {"operation": "parse", "content": json.dumps({"description": text})}).output)
+    grammar = json.loads(request.tools.invoke("model3d", {"operation": "grammar", "content": "{}"}).output)
+    description, planner = text, "described"
+    if parsed["not_understood"] and parsed["parts"]:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "I can build the parts I understood (" + ", ".join(p["name"] for p in parsed["parts"]) + "), but not: "
+            + "; ".join(repr(x) for x in parsed["not_understood"]) + ". Nothing was built. " + grammar["grammar"],
+        )
+    if not parsed["parts"] and len(grammar["generators"]) == 1:
+        no_model = (
+            f"To build {subject} in 3D I need its parts, and no reasoning model worked them out"
+            " (the local model on this machine was measured unreliable at decomposing objects)."
+            " Describe them and I'll build a real 3D mesh: " + grammar["grammar"]
+        )
+        if request.converse is None:
+            return TaskResult.failure(request.task, request.own_name, no_model)
+        decision = request.converse(request.task, (
+            f"Break '{subject}' into simple geometric parts so it can be built as a 3D model. {grammar['grammar']} "
+            "Use realistic proportions in one consistent unit, and describe every part it needs to be recognisable. "
+            "Respond with ONLY the parts.",
+        ))
+        if decision is None or not decision.is_decided:
+            return TaskResult.failure(request.task, request.own_name, no_model)
+        restated = decision.reason.strip()
+        again = json.loads(request.tools.invoke("model3d", {"operation": "parse", "content": json.dumps({"description": restated})}).output)
+        if not again["parts"] or again["not_understood"]:
+            return TaskResult.failure(
+                request.task, request.own_name,
+                f"The parts I was given for {subject} weren't all buildable ({restated[:200]}). Nothing was built. "
+                "Describe its parts and I'll build it: " + grammar["grammar"],
+            )
+        description, planner = restated, decision.source or "brain"
+    outcome = request.tools.invoke("model3d", {"operation": "build", "content": json.dumps({"subject": subject, "description": description})})
+    if not outcome.ok:
+        return TaskResult.failure(request.task, request.own_name, f"I couldn't build that in 3D: {outcome.error}")
+    made = json.loads(outcome.output)
+    report = made["report"]
+    parts = ", ".join(f"{p['name']} ({p['shape']})" for p in made["parts"]) or made["generator"]
+    return TaskResult.success(
+        request.task, request.own_name,
+        (
+            f"Artifact created: id={made['artifact_id']} type=model3d title={made['title']!r} glb=artifact/{made['artifact_id']}.glb - "
+            f"a real glTF 2.0 mesh: {report['meshes']} part(s), {report['triangles']} triangles, "
+            f"{report['extent'][0]:g} x {report['extent'][1]:g} x {report['extent'][2]:g} units. Parts: {parts}. "
+            "Open the 3D diagram workspace to turn it around."
+        ),
+        payload={"handled_by": "create_3d_model", "artifact_id": made["artifact_id"], "planner": planner,
+                 "genuinely_3d": report["genuinely_3d"], "triangles": report["triangles"]},
+    )
+
+
+CREATE_3D_MODEL = ManagerCapability(
+    name="create_3d_model",
+    capabilities=frozenset({"create_3d_model"}),
+    handle=create_3d_model,
+    description=(
+        "Builds genuine 3D content for any subject - a glTF 2.0 mesh checked to be three-dimensional - from parts "
+        "the person describes, or parts a reasoning model works out."
+    ),
+    claims=create_3d_model_intent,
+    scoreable=False,
+)
+
+
+# ---------------------------------------------------------------------------
+# Campaign 2: moving between workspaces - "Alfred, go to the research
+# workspace", "which workspace are you in?". Any workspace the owner created
+# and gave this agent; the names come from the owner's definitions, never
+# from here.
+# ---------------------------------------------------------------------------
+
+_WORKSPACE_NAME = r"(?P<name>[\w][\w '&-]{0,48}?)"
+_WORKSPACE_MOVE = (
+    re.compile(
+        r"\b(?:go|move|switch|head|hop|jump|change|come|get)\s+(?:back\s+|over\s+)?(?:to|into|in)\s+"
+        r"(?:the\s+|your\s+|my\s+|our\s+)?" + _WORKSPACE_NAME + r"\s+workspace\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:open|enter|take\s+(?:me|us)\s+to|work\s+in|use)\s+(?:the\s+|your\s+|my\s+|our\s+)?"
+        + _WORKSPACE_NAME + r"\s+workspace\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:go|move|switch|head|change|take\s+(?:me|us))\s+(?:back\s+|over\s+)?(?:to|into)\s+(?:the\s+|a\s+)?"
+        r"workspace\s+(?:called|named)\s+" + r"(?P<name>[\w][\w '&-]{0,48})",
+        re.IGNORECASE,
+    ),
+)
+_WORKSPACE_QUESTION = re.compile(
+    r"\b(?:which|what)\s+workspace\s+(?:are|am|is)\s+\w+\s+(?:in|working\s+in)\b"
+    r"|\b(?:which|what)\s+workspaces\s+(?:do|have|are|can|does)\b"
+    r"|\b(?:list|show)\s+(?:me\s+)?(?:your|my|the|all|his|her|their)\s+(?:\w+\s+)?workspaces\b",
+    re.IGNORECASE,
+)
+
+
+def _workspace_move_target(text: str) -> "str | None":
+    for pattern in _WORKSPACE_MOVE:
+        match = pattern.search(str(text or ""))
+        if match is not None:
+            name = " ".join(match.group("name").strip(" .!?,'").split())
+            if name and name.lower() not in ("a", "the", "that", "this", "another", "other", "new"):
+                return name
+    return None
+
+
+def workspace_navigation_intent(task: Task, participants: Sequence[str] = ()) -> bool:
+    text = str(task.description or "")
+    return _workspace_move_target(text) is not None or bool(_WORKSPACE_QUESTION.search(text))
+
+
+def _profile_words(workspace: dict) -> str:
+    caps = workspace.get("capabilities") or []
+    return f"set up for {', '.join(caps)}" if caps else "open to any kind of work"
+
+
+def workspace_navigation_reply(task: Task, agent_name: str, invoke: "Callable[[dict], Any]") -> "TaskResult | None":
+    """Move ``agent_name`` into the workspace a request names, or say which it
+    is in and which it has - through the governed ``workspace`` tool. None when
+    the request is not about moving between workspaces. Generic to any agent:
+    the Manager's own capability and a specialist's turn both come here."""
+    text = str(task.description or "")
+    target = _workspace_move_target(text)
+    if target is None and not _WORKSPACE_QUESTION.search(text):
+        return None
+    operation = "enter" if target is not None else "list"
+    outcome = invoke({"operation": operation, "content": json.dumps({"agent": agent_name, "workspace": target or ""})})
+    payload = {"handled_by": "workspace_navigation", "operation": operation}
+    if not outcome.ok:
+        reason = re.sub(r"^\w+Error:\s*", "", str(outcome.error or ""))
+        opening = "I can't go there" if target is not None else "I can't see my workspaces right now"
+        return TaskResult.failure(task, agent_name, f"{opening}: {reason}.")
+    state = json.loads(outcome.output)
+    mine = state.get("workspaces") or []
+    active = next((w for w in mine if w["id"] == state.get("active")), None)
+    others = ", ".join(w["label"] for w in mine if active is None or w["id"] != active["id"]) or "no others"
+    if target is not None:
+        entered = state["entered"]
+        reply = f"I'm in the {entered['label']} workspace now - {_profile_words(entered)}."
+        payload.update(workspace=entered["id"])
+    elif active is None:
+        reply = "I don't have any workspaces yet - the owner gives them to me in the Control Center."
+    else:
+        reply = f"I'm in the {active['label']} workspace - {_profile_words(active)}. My other workspaces: {others}."
+        payload.update(workspace=active["id"])
+    return TaskResult.success(task, agent_name, reply, payload={**payload, "workspaces": [w["id"] for w in mine]})
+
+
+def workspace_navigation(request: CapabilityRequest) -> TaskResult:
+    if not request.tools.permits("workspace"):
+        return TaskResult.failure(request.task, request.own_name, "Workspaces aren't available to me right now.")
+    result = workspace_navigation_reply(
+        request.task, request.own_name, lambda arguments: request.tools.invoke("workspace", arguments),
+    )
+    if result is None:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "Which workspace? Name one of mine - or ask which workspace I'm in.",
+        )
+    return result
+
+
+WORKSPACE_NAVIGATION = ManagerCapability(
+    name="workspace_navigation",
+    anywhere=True,
+    capabilities=frozenset({"workspace", "workspaces"}),
+    handle=workspace_navigation,
+    description=(
+        "Moves this agent between the workspaces the owner created and gave it, and says which it is in - "
+        "each with its own capability profile."
+    ),
+    claims=workspace_navigation_intent,
+    scoreable=False,
+)
+
+
+TRANSLATE_MEDIA = ManagerCapability(
+    name="translate_media",
+    capabilities=frozenset({"translate_media", "subtitles"}),
+    handle=translate_media,
+    description=(
+        "Translates the speech in shared video or audio into any language the installed engine translates, and routes "
+        "it to outputs: subtitle files, a video with a subtitle track, translated speech, the live display."
+    ),
+    claims=translate_media_intent,
     scoreable=False,
 )
 
@@ -8457,6 +8954,12 @@ def select_voice_intent(task: Task, participants: Sequence[str] = ()) -> bool:
     handles them.
     """
     if is_reselect_request(task.description) or is_release_autonomy_request(task.description):
+        return True
+    # "Speak Italian", "English with an Italian accent", "sound like someone
+    # from Liverpool", "speak slower" - how the agent sounds, configured.
+    from src.services.identity.voice_configuration import parse_voice_configuration
+
+    if not parse_voice_configuration(task.description).is_empty():
         return True
     if not _marker_present(task.description, _VOICE_MARKERS):
         return False
@@ -8548,6 +9051,61 @@ def _apply_voice_selection(
     )
 
 
+def configure_voice(request: CapabilityRequest, configuration: "Any") -> TaskResult:
+    """Spoken language, accent and pace for this agent, planned against what
+    the speech provider actually speaking for it can do - stored as this
+    agent's own settings, or honestly refused. A question ("can you speak
+    German?") is answered and changes nothing."""
+    from src.services.identity.voice_configuration import current_option, plan_voice, set_voice_setting, voice_setting_for
+    from src.services.identity.voice_preference import effective_voice_for, set_voice_preference
+
+    payload = {"handled_by": "select_voice", "action": "configure"}
+    if request.voice_facts is None:
+        return TaskResult.failure(request.task, request.own_name, "I can't see which voice provider is speaking for me right now.")
+    facts = request.voice_facts()
+    agent_key = request.own_name
+    declared = getattr(request.identity, "voice", None)
+    current = current_option(facts, effective_voice_for(
+        request.identity, recall=request.recall, discover_voices=lambda: facts.voices,
+    )) if declared is not None else None
+    current_language = voice_setting_for(agent_key, "language", recall=request.recall) or "english"
+    gender = parse_voice_request(request.task.description).gender
+    plan = plan_voice(
+        facts, current=current, language=configuration.language, accent=configuration.accent,
+        gender=gender if configuration.accent or configuration.language else None,
+        pace=configuration.pace, current_language=current_language,
+    )
+    if configuration.question:
+        answer = f"Yes - I can: {plan.message}." if plan.ok else f"No. {plan.message}"
+        return TaskResult.success(request.task, request.own_name, answer, payload={**payload, "question": True, "possible": plan.ok})
+    if not plan.ok:
+        return TaskResult.failure(request.task, request.own_name, plan.message)
+    if request.recall is None or request.retain is None or request.forget is None:
+        return TaskResult.failure(request.task, request.own_name, "I don't have a way to change how I sound right now.")
+    if plan.voice is not None and (current is None or plan.voice.voice_id != current.voice_id):
+        set_voice_preference(
+            agent_key, plan.voice.name, available=tuple(v.name for v in facts.voices),
+            recall=request.recall, remember=request.retain, forget=request.forget,
+        )
+    if plan.language:
+        set_voice_setting(agent_key, "language", plan.language, recall=request.recall, remember=request.retain, forget=request.forget)
+    if configuration.accent or (plan.voice is not None and (current is None or plan.voice.voice_id != current.voice_id)):
+        # The accent asked for travels to other providers; a voice changed for
+        # any other reason leaves no stale accent behind.
+        set_voice_setting(agent_key, "accent", configuration.accent or "", recall=request.recall,
+                          remember=request.retain, forget=request.forget)
+    if plan.pace:
+        set_voice_setting(
+            agent_key, "pace", "" if plan.pace == "normal" else plan.pace,
+            recall=request.recall, remember=request.retain, forget=request.forget,
+        )
+    return TaskResult.success(
+        request.task, request.own_name, f"Done - from now on I'm {plan.message} ({facts.provider}).",
+        payload={**payload, "voice": plan.voice.name if plan.voice else None, "language": plan.language, "pace": plan.pace,
+                 "provider": facts.provider},
+    )
+
+
 def select_voice(request: CapabilityRequest) -> TaskResult:
     """Governed voice autonomy - a real backend decision path generic to
     any agent built on ``ManagerSkills`` (Alfred, Arthur's own
@@ -8590,6 +9148,12 @@ def select_voice(request: CapabilityRequest) -> TaskResult:
     """
     agent_key = request.own_name
     text = request.task.description
+
+    from src.services.identity.voice_configuration import parse_voice_configuration
+
+    configuration = parse_voice_configuration(text)
+    if not configuration.is_empty():
+        return configure_voice(request, configuration)
 
     if is_release_autonomy_request(text):
         if request.recall is None or request.forget is None:
@@ -8783,6 +9347,12 @@ def personal_context_intent(task: Task, participants: Sequence[str] = ()) -> boo
     text = task.description
     if personal_context_query_intent(text):
         return not _personal_context_query_defers(task, participants)
+    from src.services.memory.guidance import parse_goal_link
+
+    # "my duolingo lessons are for my Portuguese goal" links two things the
+    # person already holds - personal guidance keeps it, resolved to both.
+    if parse_goal_link(text) is not None:
+        return False
     working = _personal_context_working_text(text)
     if _personal_context_shape_matches(working):
         return True
@@ -9663,6 +10233,10 @@ MANAGER_CAPABILITIES: dict[str, ManagerCapability] = {
     COACH.name: COACH,
     # Whole-ecosystem campaign: personal guidance across the person's own sources.
     PERSONAL_GUIDANCE.name: PERSONAL_GUIDANCE,
+    # Campaign 2: media translation routed to outputs.
+    TRANSLATE_MEDIA.name: TRANSLATE_MEDIA,
+    WORKSPACE_NAVIGATION.name: WORKSPACE_NAVIGATION,
+    CREATE_3D_MODEL.name: CREATE_3D_MODEL,
     # Pre-Stage-9 Campaign 9: translation, named and honest.
     TRANSLATE.name: TRANSLATE,
 }

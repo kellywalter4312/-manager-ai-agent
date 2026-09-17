@@ -68,6 +68,10 @@ from src.agents.tools.document_generation import DocumentGenerationTool  # noqa:
 from src.agents.tools.artifact_production import ArtifactProductionTool  # noqa: E402
 from src.agents.tools.code_assistant import CodeAssistantTool  # noqa: E402
 from src.agents.tools.image_intelligence import ImageIntelligenceTool  # noqa: E402
+from src.agents.tools.translation_output import TranslationOutputTool  # noqa: E402
+from src.agents.tools.workspace_navigation import WorkspaceNavigationTool  # noqa: E402
+from src.agents.tools.model3d_production import Model3DProductionTool  # noqa: E402
+from src.services.identity.voice_configuration import voice_facts  # noqa: E402
 from src.providers.media.image_techniques import bind_governed_values as bind_image_technique_values  # noqa: E402
 from src.services.artifacts.content import SHARED_FILE_PREFIX, artifact_ids_in, read_artifact_units  # noqa: E402
 from src.composition import reasoning_settings_fields, rebind_backends, rebind_reasoning  # noqa: E402
@@ -639,7 +643,9 @@ def _apply_backends_live(centre: "ControlCenter") -> str:
             centre.runtime, centre.manager, settings,
             accounts=load_credential_store(DEFAULT_ACCOUNTS_PATH),
             connection_adapter_version=config.get(CONNECTION_GMAIL_ADAPTER, DEFAULT_GMAIL_ADAPTER_VERSION),
-            tools=lambda live: manager_tools(live, settings, load_governed_config(DEFAULT_CONFIG_PATH)),
+            tools=lambda live: manager_tools(
+                live, settings, load_governed_config(DEFAULT_CONFIG_PATH), agent_names=lambda: _agent_names(centre.manager),
+            ),
             channel=centre.channel,
         )
     except Exception as exc:  # noqa: BLE001 - every construction failure is reported, nothing is half-applied
@@ -692,6 +698,104 @@ def _new_family_member(components, component_id: str):
     )
 
 
+def render_voice_providers(channel) -> str:
+    """Every speech provider this installation knows, which one is speaking,
+    and what the active one can do - voices, spoken languages, accents, paces."""
+    from src.providers.speech_factory import available_speech_providers
+
+    speech = getattr(channel, "speech", None)
+    active = getattr(speech, "name", "none")
+    lines = ["VOICE PROVIDERS"]
+    for name in available_speech_providers():
+        marker = "*" if name == active else " "
+        lines.append(f"  [{marker}] {name}")
+    if speech is not None:
+        facts = voice_facts(speech)
+        lines.append(f"  active: {facts.provider} ({speech.availability.state.value})")
+        lines.append(f"  voices: {len(facts.voices)}")
+        lines.append(f"  speaks: {', '.join(facts.spoken_languages) or 'nothing reported'}")
+        lines.append(f"  accents: {', '.join(facts.accents()) or 'none reported'}")
+        lines.append(
+            "  a voice can speak another language (keeping its accent): "
+            + ("yes" if facts.across_languages else "no - each voice speaks only its own language")
+        )
+        lines.append(f"  paces: {', '.join(facts.paces) or 'not adjustable'}")
+    lines.append("  switch with: provider speech_provider use <backend>   accounts: provider speech_provider add|select|revoke ...")
+    lines.append("  per agent: voice <agent> <voice> | language <name|clear> | accent <name> | pace <word> | test <words>")
+    return "\n".join(lines)
+
+
+def run_voice_configuration_command(centre, channel, agent_name: str, agent, memory, action: str, value: str) -> str:
+    """One agent's spoken language, accent or pace, planned against the provider
+    that actually speaks - or a real spoken sample saved as an artifact."""
+    from src.services.identity.voice_configuration import current_option, plan_voice, set_voice_setting, voice_setting_for
+    from src.services.identity.voice_preference import effective_voice_for, set_voice_preference
+
+    speech = getattr(channel, "speech", None)
+    if speech is None:
+        return f"the {channel.name} channel carries no speech engine"
+    facts = voice_facts(speech)
+    remember = memory.remember
+    if action == "test":
+        words = value or "This is how I sound right now."
+        profile = effective_voice_for(agent, recall=memory.recall, discover_voices=getattr(speech, "available_voices", None))
+        synthesize = getattr(speech, "synthesize", None)
+        if profile is None or not callable(synthesize):
+            return f"the {facts.provider} provider cannot produce a sample here"
+        text = words
+        if profile.language and hasattr(channel, "_in_spoken_language"):
+            text, profile = channel._in_spoken_language(words, profile)
+        try:
+            audio = synthesize(text, profile)
+        except Exception as exc:  # noqa: BLE001 - a provider failure is reported, never hidden
+            return f"FAILED: the {facts.provider} provider could not speak that: {exc}"
+        from src.services.artifacts.registration import register_new_artifact
+
+        artifact = register_new_artifact(
+            centre.runtime.artifacts, type="audio", owner_agent=agent_name,
+            title=f"Voice sample - {agent_name}", content_bytes=text.encode("utf-8"),
+            rendition_format="wav", rendition_bytes=audio,
+            metadata={"content_kind": "audio", "media_type": "audio/wav", "provider": facts.provider},
+        )
+        return (
+            f"Voice sample saved: artifact {artifact.artifact_id} ({len(audio)} bytes WAV, {facts.provider}) - "
+            f"said: {text!r}. Play it from artifact/{artifact.artifact_id}.wav"
+        )
+    current = current_option(
+        facts, effective_voice_for(agent, recall=memory.recall, discover_voices=getattr(speech, "available_voices", None)),
+    )
+    current_language = voice_setting_for(agent_name, "language", recall=memory.recall) or "english"
+    if action == "language" and value.lower() in ("clear", "default", "none"):
+        set_voice_setting(agent_name, "language", "", recall=memory.recall, remember=remember, forget=memory.forget)
+        return f"{agent_name} speaks the language replies are written in again."
+    plan = plan_voice(
+        facts, current=current, current_language=current_language,
+        language=value if action == "language" else None,
+        accent=value if action == "accent" else None,
+        pace=value.lower() if action == "pace" else None,
+    )
+    if not plan.ok:
+        return f"FAILED: {plan.message}"
+    if plan.voice is not None and (current is None or plan.voice.voice_id != current.voice_id):
+        set_voice_preference(
+            agent_name, plan.voice.name, available=tuple(v.name for v in facts.voices),
+            recall=memory.recall, remember=remember, forget=memory.forget,
+        )
+    if plan.language:
+        set_voice_setting(agent_name, "language", plan.language, recall=memory.recall, remember=remember, forget=memory.forget)
+    if action == "accent" or (plan.voice is not None and (current is None or plan.voice.voice_id != current.voice_id)):
+        # The accent asked for travels to other providers; a voice changed for
+        # any other reason leaves no stale accent behind.
+        set_voice_setting(agent_name, "accent", value.lower() if action == "accent" else "",
+                          recall=memory.recall, remember=remember, forget=memory.forget)
+    if plan.pace:
+        set_voice_setting(
+            agent_name, "pace", "" if plan.pace == "normal" else plan.pace,
+            recall=memory.recall, remember=remember, forget=memory.forget,
+        )
+    return f"{agent_name} is now {plan.message} ({facts.provider}). Live now - the next thing said uses it."
+
+
 def render_translation(interpreter) -> str:
     """The interpreter's real, current state, for a terminal or the served page."""
     if interpreter is None:
@@ -709,6 +813,11 @@ def render_translation(interpreter) -> str:
     if status["pairs"]:
         lines.append("")
         lines.append("  installed packs: " + ", ".join(status["pairs"]))
+    from src.services.translation.outputs import translation_outputs
+
+    lines.append("")
+    lines.append("  outputs: " + ", ".join(translation_outputs()))
+    lines.append("  e.g. 'translate this video into English subtitles', or the Translate panel for live speech")
     return "\n".join(lines)
 
 
@@ -752,6 +861,128 @@ def run_workspace_type_definition_command(rest: str) -> str:
         f"Defined the workspace type '{defined.workspace_id}' ({defined.label}: {', '.join(defined.panels)}). "
         f"Give it to an agent with 'workspace <agent> add {defined.workspace_id}'. Saved - the page shows it on its next refresh."
     )
+
+
+WORKSPACE_DEFINITION_ACTIONS = ("create", "rename", "describe", "profile", "panels", "archive", "restore", "remove")
+
+
+def run_workspace_definition_command(centre: "ControlCenter", action: str, rest: str) -> str:
+    """The owner's workspaces, managed from here - every one, the built-in rows
+    included:
+
+        workspace create <id> <label>|<panel>,<panel>[|<capability>,<capability>]
+        workspace rename <id> <new label>
+        workspace describe <id> <what it is for>
+        workspace profile <id> <capability>,<capability> | all
+        workspace panels <id> <panel>,<panel>
+        workspace archive <id>   /   workspace restore <id>
+        workspace remove <id>    (one the owner created; a built-in is archived instead)
+
+    A capability profile names Manager capabilities or specialist capability
+    words that really exist - checked against the live registry, never a list
+    kept here. Saved in the governed config; live at once."""
+    from src.control_center.workspace_catalog import (
+        DEFAULT_WORKSPACE_TYPES, PANEL_KINDS, WORKSPACE_TYPE_PREFIX, WorkspaceType, all_workspaces,
+    )
+    from dataclasses import replace as _replace
+
+    ident_raw, _sep, value = rest.strip().partition(" ")
+    ident = "_".join(ident_raw.strip().lower().split())
+    value = value.strip()
+    if not ident:
+        return "usage: workspace " + action + " <id> ..." + "  (actions: " + ", ".join(WORKSPACE_DEFINITION_ACTIONS) + ")"
+    config = load_governed_config(DEFAULT_CONFIG_PATH)
+    existing = {t.workspace_id: t for t in all_workspaces(config.values)}
+    key = WORKSPACE_TYPE_PREFIX + ident
+    built_in = ident in {t.workspace_id for t in DEFAULT_WORKSPACE_TYPES}
+
+    def known_capabilities() -> "set[str]":
+        names = set(MANAGER_CAPABILITIES)
+        for agent in centre.manager.registry.all_agents():
+            names |= {str(c).lower() for c in agent.spec.capabilities}
+        return names
+
+    def parse_profile(text: str) -> "tuple[tuple[str, ...], str | None]":
+        if text.strip().lower() in ("all", "any", "everything", ""):
+            return (), None
+        wanted = tuple(dict.fromkeys("_".join(c.strip().lower().split()) for c in text.split(",") if c.strip()))
+        unknown = [c for c in wanted if c not in known_capabilities()]
+        if unknown:
+            return wanted, (
+                f"FAILED: no capability called {', '.join(repr(u) for u in unknown)}. "
+                "See 'capabilities list' for the Manager's, and 'agents' for each specialist's."
+            )
+        return wanted, None
+
+    def save(defined: "WorkspaceType", message: str) -> str:
+        save_governed_config(config.with_value(key, defined.to_value()), DEFAULT_CONFIG_PATH)
+        reread = {t.workspace_id: t for t in all_workspaces(load_governed_config(DEFAULT_CONFIG_PATH).values)}.get(ident)
+        if reread != defined:
+            return f"FAILED: wrote the workspace '{ident}' but the independent re-read did not match"
+        return message + " Saved - live now, and every start uses it."
+
+    if action == "create":
+        if ident in existing:
+            return f"a workspace '{ident}' already exists ({existing[ident].label}) - rename or profile it instead."
+        label, bar, remainder = value.partition("|")
+        panels, _bar2, profile_text = remainder.partition("|")
+        if not bar:
+            return "give the panels after '|', e.g. 'workspace create research Research lab|tasks,produced|translate_media'"
+        profile, problem = parse_profile(profile_text)
+        if problem:
+            return problem
+        try:
+            defined = WorkspaceType(ident, label.strip() or ident, "Created by the owner.", tuple(panels.split(",")), profile)
+        except ValueError as exc:
+            return f"FAILED: {exc}. Panels the page renders: {', '.join(PANEL_KINDS)} (artifacts:<type>)."
+        from src.control_center.workspace_catalog import workspaces_for
+
+        created = save(defined, f"Created the workspace '{defined.workspace_id}' ({defined.label}; panels {', '.join(defined.panels)}; "
+                                f"{'capabilities ' + ', '.join(defined.capabilities) if defined.capabilities else 'any work'}).")
+        if created.startswith("FAILED"):
+            return created
+        values = load_governed_config(DEFAULT_CONFIG_PATH).values
+        names = _agent_names(centre.manager)
+        having = [n for n in names if ident in {t.workspace_id for t in workspaces_for(n, values)}]
+        narrowed = [n for n in names if n not in having]
+        return created + (
+            f" Agents who have it: {', '.join(having) or 'none'}."
+            + (f" Agents with a chosen list get it with: workspace <agent> add {ident} ({', '.join(narrowed)})." if narrowed else "")
+        )
+    current = existing.get(ident)
+    if current is None:
+        return f"no workspace '{ident}'. Workspaces: {', '.join(existing)}"
+    if action == "rename":
+        if not value:
+            return "usage: workspace rename <id> <new label>"
+        return save(_replace(current, label=value), f"Renamed '{ident}' from {current.label} to {' '.join(value.split())} - same workspace, same id.")
+    if action == "describe":
+        return save(_replace(current, description=value), f"Described '{ident}': {value or '(no description)'}.")
+    if action == "profile":
+        profile, problem = parse_profile(value)
+        if problem:
+            return problem
+        return save(_replace(current, capabilities=profile),
+                    f"The {current.label} workspace is now " + (f"set up for {', '.join(profile)}." if profile else "open to any work."))
+    if action == "panels":
+        try:
+            defined = _replace(current, panels=tuple(value.split(",")))
+        except ValueError as exc:
+            return f"FAILED: {exc}. Panels the page renders: {', '.join(PANEL_KINDS)} (artifacts:<type>)."
+        return save(defined, f"The {current.label} workspace now shows {', '.join(defined.panels)}.")
+    if action in ("archive", "restore"):
+        archived = action == "archive"
+        if current.archived == archived:
+            return f"the {current.label} workspace is already {'archived' if archived else 'in use'}."
+        return save(_replace(current, archived=archived),
+                    f"{'Archived' if archived else 'Restored'} the {current.label} workspace" +
+                    (" - no agent works in it until it is restored; what was made there is kept." if archived else "."))
+    if action == "remove":
+        if built_in:
+            return f"'{ident}' is a built-in workspace - archive it instead: workspace archive {ident}"
+        save_governed_config(config.without_value(key), DEFAULT_CONFIG_PATH)
+        return f"Removed the workspace '{ident}' ({current.label}); what was made there is kept. Saved - live now."
+    return "actions: " + ", ".join(WORKSPACE_DEFINITION_ACTIONS)
 
 
 def run_workspace_types_command(centre: "ControlCenter", agent_name: str, action: str, type_id: str) -> str:
@@ -805,7 +1036,50 @@ def _governed_image_values():
     return load_governed_config(DEFAULT_CONFIG_PATH).values
 
 
-def manager_tools(runtime, settings: Settings, config) -> ToolSet:
+def _agent_names(manager) -> "tuple[str, ...]":
+    """Every agent really registered with this Manager, the Manager first."""
+    if manager is None:
+        return ()
+    names = [manager.own_skills.name] if manager.own_skills is not None else []
+    names += [a.name for a in manager.registry.all_agents() if a.name not in names]
+    return tuple(names)
+
+
+def _save_governed_value(key: str, value: str) -> None:
+    save_governed_config(load_governed_config(DEFAULT_CONFIG_PATH).with_value(key, value), DEFAULT_CONFIG_PATH)
+
+
+def workspace_tool(agent_names) -> WorkspaceNavigationTool:
+    """The workspace tool over the governed config this module reads and writes,
+    for the agents ``agent_names()`` reports as registered."""
+    return WorkspaceNavigationTool(
+        load_values=lambda: load_governed_config(DEFAULT_CONFIG_PATH).values,
+        save_value=_save_governed_value, agent_names=agent_names,
+    )
+
+
+def bind_workspaces(runtime, manager) -> None:
+    """Workspaces reach the running system: the scope every agent's work is
+    checked against, movement between workspaces for any agent, and each new
+    artifact recording the workspace its agent was in - all read per call from
+    the governed config, so a Control Center change is live at once."""
+    from src.control_center.workspace_catalog import workspace_artifact_metadata, workspace_refusal
+    from src.manager.capabilities import workspace_navigation_reply
+
+    def values():
+        return load_governed_config(DEFAULT_CONFIG_PATH).values
+
+    def navigate(agent_name, task):
+        tools = manager.own_skills.tools if manager.own_skills is not None else None
+        if tools is None or not tools.permits("workspace"):
+            return None
+        return workspace_navigation_reply(task, agent_name, lambda arguments: tools.invoke("workspace", arguments))
+
+    manager.bind_workspaces(scope=lambda agent, names: workspace_refusal(agent, values(), names), navigation=navigate)
+    runtime.artifacts.bind_creation_context(lambda owner: workspace_artifact_metadata(owner, values()))
+
+
+def manager_tools(runtime, settings: Settings, config, agent_names=None) -> ToolSet:
     """Everything the Manager is equipped with, built from ``runtime``'s current
     backends. One construction, used by ``build`` at start and by a live
     backend rebind (``_apply_backends_live``) - a backend the owner switches in
@@ -918,6 +1192,18 @@ def manager_tools(runtime, settings: Settings, config) -> ToolSet:
             ImageIntelligenceTool(
                 runtime.artifacts, owner_agent=runtime.identity.name, governed_values=_governed_image_values,
             ),
+            # Genuine 3D content: parts assembled into a checked glTF mesh.
+            Model3DProductionTool(runtime.artifacts, owner_agent=runtime.identity.name),
+            # Translation routed to outputs - subtitles, a subtitled video,
+            # translated speech, the live display - from shared media.
+            TranslationOutputTool(
+                interpreter=getattr(runtime, "translation", None), transcriber=runtime.media.transcriber,
+                artifacts=runtime.artifacts, owner_agent=runtime.identity.name,
+                display=getattr(runtime, "translation_display", None),
+            ),
+            # Moving between the workspaces the owner created - one saved fact
+            # the Control Center, the page and a restart all read.
+            workspace_tool(agent_names or (lambda: (runtime.identity.name,))),
             # Files/Documents completion: real visual reasoning reaches
             # Alfred through the Brain's own analyze_image question
             # (bound below via ManagerSkills, exactly like converse) -
@@ -959,6 +1245,9 @@ def build(settings: Settings):
     # Control Center ("provider llm_provider use <backend>") is the one every
     # start uses.
     settings = governed_backend_settings(governed_reasoning_settings(settings, config), config)
+    # The Manager the workspace tool names agents from - it exists only once
+    # built below, and the tool asks per call.
+    built_manager: list = []
     runtime = build_runtime(
         settings,
         accounts=accounts,
@@ -1011,7 +1300,7 @@ def build(settings: Settings):
         # actually resolved to - honestly UNAVAILABLE (NullCommunicationProvider)
         # unless a real provider is deliberately configured, the identical
         # opt-in default every other real capability here already follows.
-        tools=manager_tools(runtime, settings, config),
+        tools=manager_tools(runtime, settings, config, agent_names=lambda: _agent_names(built_manager[0] if built_manager else None)),
         # Control Center repair item #1: the one real enforcement point for
         # capability enable/disable. MANAGER_CAPABILITIES with every
         # genuinely-disabled entry removed, computed from the identical
@@ -1072,10 +1361,18 @@ def build(settings: Settings):
         _discover = getattr(runtime.speech, "available_voices", None)
         manager.own_skills.bind_discover_voices(_discover if _discover is not None else (lambda: ()))
 
+    built_manager.append(manager)
+    bind_workspaces(runtime, manager)
+
+    channel = build_channel(runtime, manager)
+    if manager.own_skills is not None:
+        # The provider that actually speaks - read through the channel, so a
+        # live provider switch is what the next voice request plans against.
+        manager.own_skills.bind_voice_facts(lambda: voice_facts(channel.speech))
     return (
         runtime,
         manager,
-        build_channel(runtime, manager),
+        channel,
         conversation,
     )
 
@@ -2715,6 +3012,11 @@ def classify_administrative_write(command: str) -> "tuple[bool, str]":
             return False, ""
         return True, f"execute the operation '{operation_name}' on the connected site '{parts[1]}'"
 
+    if (
+        verb == "workspace" and len(parts) >= 3 and parts[1].lower() in WORKSPACE_DEFINITION_ACTIONS
+        and not (len(parts) >= 4 and parts[2].lower() in ("add", "remove", "use"))
+    ):
+        return True, f"{parts[1].lower()} the workspace '{parts[2]}'"
     if verb == "workspace" and len(parts) >= 4 and parts[1].lower() == "type":
         return True, f"define or withdraw the workspace type '{parts[2]}'"
     if verb == "workspace" and len(parts) >= 4 and parts[2].lower() in ("add", "remove", "use"):
@@ -2937,6 +3239,13 @@ def run_command(
         # Post-Pre-Stage-9: which workspace *types* each agent has, and which
         # is open, is the owner's choice here - saved in the governed config.
         parts_rest = rest.split()
+        if (
+            len(parts_rest) >= 2 and parts_rest[0].lower() in WORKSPACE_DEFINITION_ACTIONS
+            and not (len(parts_rest) >= 3 and parts_rest[1].lower() in ("add", "remove", "use"))
+        ):
+            result = run_workspace_definition_command(centre, parts_rest[0].lower(), rest.split(None, 1)[1])
+            _record_if_administrative_write(command, result, action_log_path)
+            return result
         if len(parts_rest) >= 3 and parts_rest[0].lower() == "type":
             result = run_workspace_type_definition_command(rest.split(None, 1)[1])
             _record_if_administrative_write(command, result, action_log_path)
@@ -3316,6 +3625,8 @@ def run_command(
         agent_name, _, voice_name = rest.partition(" ")
         agent_name, voice_name = agent_name.strip(), voice_name.strip()
 
+        if agent_name.lower() == "providers":
+            return render_voice_providers(channel)
         if not agent_name:
             if speech is None:
                 return f"VOICE\n  the {channel.name} channel carries no speech engine"
@@ -3356,9 +3667,28 @@ def run_command(
         catalog_fn = getattr(speech, "installed_voice_names", None)
         available = tuple(catalog_fn()) if callable(catalog_fn) else None
 
+        sub_action, _, sub_value = voice_name.partition(" ")
+        if sub_action.lower() in ("language", "accent", "pace", "test") and agent is not None:
+            return run_voice_configuration_command(
+                centre, channel, view.name, agent, memory, sub_action.lower(), sub_value.strip(),
+            )
+
         if not voice_name:
             lines = [f"VOICE - {view.name}"]
             lines.append(f"  current preferred_voice: {current.preferred_voice if current else '(none declared)'}")
+            stored_choice = voice_preference_for(view.name, recall=memory.recall) if memory else None
+            if stored_choice:
+                lines.append(f"  chosen voice: {stored_choice}")
+            # The voice the active provider actually speaks with - resolved the
+            # way the channel resolves it, not only the declared name field.
+            if speech is not None and current is not None:
+                from src.services.identity.voice_configuration import current_option as _current_option
+
+                speaking_with = _current_option(voice_facts(speech), current)
+                lines.append(
+                    f"  speaking with ({speech.name}): "
+                    + (speaking_with.name if speaking_with is not None else "the provider's default - no installed voice is chosen")
+                )
             # Agent-autonomous voice selection checkpoint: which of the
             # three governed sources (explicit override, this agent's
             # own autonomous choice, the bare declared default) the
@@ -3382,7 +3712,10 @@ def run_command(
                 for name in available:
                     lines.append(f"    {name}")
             else:
-                lines.append("  choices: unknown for this engine - type the exact voice name it reports")
+                lines.append(
+                    "  choices: the discovered options below" if callable(discover_fn)
+                    else "  choices: unknown for this engine - type the exact voice name it reports"
+                )
             # Real, live-discovered options with language/accent/locale,
             # when this adapter's own available_voices() reports them -
             # never persisted, always asked fresh (see VoiceOption's own
@@ -3401,7 +3734,14 @@ def run_command(
                         if value
                     ) or "no language/accent/locale/gender reported"
                     lines.append(f"    {option.name} ({option.provider}): {facts}")
+            from src.services.identity.voice_configuration import voice_setting_for as _setting
+
+            lines.append(f"  spoken language: {_setting(view.name, 'language', recall=memory.recall) or 'the language replies are written in'}")
+            accent_setting = _setting(view.name, "accent", recall=memory.recall) or "the chosen voice's own"
+            lines.append(f"  accent: {accent_setting}")
+            lines.append(f"  pace: {_setting(view.name, 'pace', recall=memory.recall) or (current.pace if current and current.pace else 'provider default')}")
             lines.append(f"  choose with: voice {view.name} <name>")
+            lines.append(f"  configure: voice {view.name} language <name|clear> | accent <name> | pace <word> | test <words>")
             lines.append(
                 "  or ask in conversation, e.g. 'find me an Italian voice' - "
                 "select_voice will choose autonomously among the options above"

@@ -39,7 +39,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Mapping
+from typing import Callable, Mapping
 
 
 class ArtifactError(RuntimeError):
@@ -170,7 +170,14 @@ class ArtifactStore:
         self._root = Path(root)
         self._index_path = self._root / "artifacts.json"
         self._artifacts: dict[str, Artifact] = {}
+        self._creation_context = None
         self._load()
+
+    def bind_creation_context(self, context: "Callable[[str], Mapping[str, str]]") -> None:
+        """Facts every new artifact records about the moment it was made, by
+        owner - the workspace its agent was working in. An explicit metadata
+        value always wins; a context that cannot answer adds nothing."""
+        self._creation_context = context
 
     def artifact_dir(self, artifact_id: str) -> Path:
         """Where this artifact's real content/rendition files live -
@@ -205,6 +212,12 @@ class ArtifactStore:
         if not owner_agent.strip():
             raise ArtifactError("owner_agent must not be empty")
 
+        context: "dict[str, str]" = {}
+        if self._creation_context is not None:
+            try:
+                context = {str(k): str(v) for k, v in dict(self._creation_context(owner_agent)).items()}
+            except Exception:  # noqa: BLE001 - attribution never blocks making the artifact
+                context = {}
         version = ArtifactVersion(
             version=1,
             title=title,
@@ -212,7 +225,7 @@ class ArtifactStore:
             created_at=_now(),
             content_path=content_path,
             renditions=dict(renditions),
-            metadata=dict(metadata),
+            metadata={**context, **dict(metadata)},
             error=error,
             related_artifact_ids=related_artifact_ids,
         )

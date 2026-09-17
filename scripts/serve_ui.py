@@ -102,6 +102,10 @@ Seven routes:
                          document, image, audio, video), registered as a
                          supplied_file artifact; shared from the
                          conversation, also recorded in the room.
+    POST /workspace/select {"agent": "...", "workspace": "<id>"} -> moves that
+                         agent into one of its workspaces - the identical saved
+                         choice 'workspace <agent> use <id>' makes in the
+                         Control Center and the agent makes in conversation.
     POST /workspace/enter {"agent": "..."} -> the one real acknowledgement
                          a served page calls once a person has genuinely
                          entered an agent's own 3D Workspace, through
@@ -323,7 +327,44 @@ def route(path: str, system: LiveSystem) -> tuple[int, bytes, str]:
         return 200, (VENDOR_DIR / filename).read_bytes(), content_type
     if path.startswith("/artifact/"):
         return _route_artifact_file(path, system)
+    if path.startswith("/surface/"):
+        return route_surface(path, system)
     return 404, b"not found", "text/plain; charset=utf-8"
+
+
+def route_surface(path: str, system: LiveSystem) -> tuple[int, bytes, str]:
+    """`GET /surface/<agent>/<kind>.json` - what one agent's screen shows now.
+
+    Generic over agents and kinds: the agent must be registered, must declare
+    the surface implemented (``describe_interface``, governed evolution
+    applied), and must answer it through its own ``surface_view``. Fetched only
+    when the page opens that screen - never on the snapshot poll - so a real
+    mailbox is not read every few seconds."""
+    from urllib.parse import unquote
+
+    def answer(status: int, data: dict) -> tuple[int, bytes, str]:
+        return status, json.dumps(data, default=str).encode("utf-8"), "application/json; charset=utf-8"
+
+    parts = path[len("/surface/"):].split("?", 1)[0].split("/")
+    if len(parts) != 2 or not parts[1].endswith(".json"):
+        return answer(400, {"error": "use /surface/<agent>/<kind>.json"})
+    agent_name, kind = unquote(parts[0]), unquote(parts[1][: -len(".json")]).lower()
+    manager_name = system.manager.own_skills.name if system.manager.own_skills else None
+    agent = system.manager.own_skills if agent_name == manager_name else system.manager.registry.get(agent_name)
+    if agent is None:
+        return answer(404, {"error": f"no such agent: {agent_name!r}"})
+    if not describe_interface(agent, governed=system.centre.governed_values()).can_render(kind):
+        return answer(404, {"error": f"{agent_name} has no '{kind}' screen"})
+    view = getattr(agent, "surface_view", None)
+    if not callable(view):
+        return answer(404, {"error": f"{agent_name} declares '{kind}' but has nothing to show for it"})
+    try:
+        data = view(kind)
+    except Exception as exc:  # noqa: BLE001 - a mailbox that cannot be read is reported, never hidden
+        return answer(502, {"error": f"{agent_name} could not read it: {type(exc).__name__}: {exc}"})
+    if data is None:
+        return answer(404, {"error": f"{agent_name} has nothing to show for '{kind}'"})
+    return answer(200, data)
 
 
 # Every rendition format an artifact could plausibly have produced so
@@ -334,6 +375,8 @@ def route(path: str, system: LiveSystem) -> tuple[int, bytes, str]:
 _RENDITION_CONTENT_TYPES = {
     "pdf": "application/pdf", "png": "image/png", "jpg": "image/jpeg",
     "mp4": "video/mp4", "wav": "audio/wav", "txt": "text/plain; charset=utf-8",
+    # Campaign 2: genuine 3D content and translated subtitles.
+    "glb": "model/gltf-binary", "vtt": "text/vtt; charset=utf-8", "srt": "text/plain; charset=utf-8",
     # Real Audio Recording/Capture checkpoint: every real MediaRecorder
     # container this project's own frontend may produce (see
     # _RECORDING_EXTENSIONS above) - "m4a" rather than "mp4" for a
@@ -770,6 +813,27 @@ def route_workspace_enter(agent: object, system: LiveSystem) -> tuple[int, bytes
     )
 
 
+def route_workspace_select(agent: object, workspace: object, system: LiveSystem) -> tuple[int, bytes, str]:
+    """Decide what to answer for `POST /workspace/select`. No socket involved.
+
+    The page's workspace switcher: one agent moved into one of the workspaces
+    the owner gave it, through the Manager's own ``workspace`` tool - the same
+    write conversation makes - so the page, the Control Center and the running
+    agent read one saved fact. A workspace the agent does not have, an
+    archived one or an unknown agent is refused with the reason."""
+    if not isinstance(agent, str) or not agent.strip() or not isinstance(workspace, str) or not workspace.strip():
+        return 400, json.dumps({"error": "agent and workspace must not be empty"}).encode("utf-8"), "application/json; charset=utf-8"
+    tools = system.manager.own_skills.tools if system.manager.own_skills is not None else None
+    if tools is None or not tools.permits("workspace"):
+        return 409, json.dumps({"error": "workspaces are not available in this session"}).encode("utf-8"), "application/json; charset=utf-8"
+    with system.lock:
+        outcome = tools.invoke("workspace", {"operation": "enter", "content": json.dumps({"agent": agent, "workspace": workspace})})
+    if not outcome.ok:
+        reason = str(outcome.error or "").split(": ", 1)[-1]
+        return 400, json.dumps({"error": reason}).encode("utf-8"), "application/json; charset=utf-8"
+    return 200, outcome.output.encode("utf-8"), "application/json; charset=utf-8"
+
+
 # Real Audio Recording/Capture: four small routes for the one thing only a
 # browser can actually do - capture microphone bytes and hand them over.
 # None of these touch a capability, a claims= predicate or the Brain:
@@ -979,6 +1043,7 @@ def route_translate_text(
 
 def route_translate_speech(
     audio_base64: object, target: object, pair: object, speak: object, system: LiveSystem,
+    outputs: object = None,
 ) -> tuple[int, bytes, str]:
     """Decide what to answer for `POST /translate/speech` - one utterance heard,
     translated towards the other person of a language pair (or into ``target``),
@@ -1002,7 +1067,18 @@ def route_translate_speech(
         )
     except LookupError as exc:
         return _json_error(422 if interpreter.listens and interpreter.translates else 409, str(exc))
-    return 200, json.dumps(turn.to_dict()).encode("utf-8"), "application/json; charset=utf-8"
+    body = turn.to_dict()
+    # The same translated turn routed to further outputs - the live display
+    # (subtitles on the page, the Control Center, a connected screen).
+    if isinstance(outputs, list) and "display" in outputs:
+        display = getattr(system.runtime, "translation_display", None)
+        if display is not None:
+            from src.services.translation.outputs import TimedLine
+
+            display.publish([TimedLine(0.0, 0.0, turn.heard, turn.translation)], source=turn.source, target=turn.target,
+                            origin="speech")
+            body["routed_to"] = ["display"]
+    return 200, json.dumps(body).encode("utf-8"), "application/json; charset=utf-8"
 
 
 # REPAIR-01/02: where a supplied file may come from over HTTP. Two doors,
@@ -1380,6 +1456,7 @@ class SnapshotHandler(BaseHTTPRequestHandler):
             "/command",
             "/experience",
             "/workspace/enter",
+            "/workspace/select",
             "/recording/started",
             "/recording/save",
             "/recording/cancel",
@@ -1429,6 +1506,10 @@ class SnapshotHandler(BaseHTTPRequestHandler):
         elif self.path == "/experience":
             record_id = payload.get("record_id") if isinstance(payload, dict) else None
             status, body, content_type = route_experience(record_id, self.server.system)
+        elif self.path == "/workspace/select":
+            agent = payload.get("agent") if isinstance(payload, dict) else None
+            workspace = payload.get("workspace") if isinstance(payload, dict) else None
+            status, body, content_type = route_workspace_select(agent, workspace, self.server.system)
         elif self.path == "/workspace/enter":
             agent = payload.get("agent") if isinstance(payload, dict) else None
             status, body, content_type = route_workspace_enter(agent, self.server.system)
@@ -1464,6 +1545,7 @@ class SnapshotHandler(BaseHTTPRequestHandler):
             get = payload.get if isinstance(payload, dict) else (lambda _key: None)
             status, body, content_type = route_translate_speech(
                 get("audio_base64"), get("target"), get("pair"), get("speak"), self.server.system,
+                outputs=get("outputs"),
             )
         elif self.path == "/upload":
             get = payload.get if isinstance(payload, dict) else (lambda _key: None)

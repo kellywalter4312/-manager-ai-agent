@@ -229,6 +229,8 @@ class TestHandlersAreSelectedThroughTheRegistry:
             # versioned document artifact ("handout") - deterministic given
             # already-structured content, Brain-assisted when organizing an
             # objective into that structure instead.
+            # Campaign 2: genuine 3D content (a checked glTF mesh) for any subject.
+            "create_3d_model",
             "create_artifact",
             # Multimodal workspace/artifact checkpoint, image/diagram half:
             # a real, persistent, versioned image artifact - a diagram, a
@@ -319,7 +321,12 @@ class TestHandlersAreSelectedThroughTheRegistry:
             "transcribe_media",
             # Pre-Stage-9 Campaign 9: translation, named and honest.
             "translate",
+            # Campaign 2: shared media translated and routed to outputs
+            # (subtitles, a captioned video, speech, the live display).
+            "translate_media",
             "update_task",
+            # Campaign 2: moving between the workspaces the owner created.
+            "workspace_navigation",
         ]
 
     def test_selection_scores_words_against_handlers(self):
