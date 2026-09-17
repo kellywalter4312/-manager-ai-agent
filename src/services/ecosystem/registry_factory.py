@@ -56,9 +56,24 @@ from src.services.ecosystem.contracts import EcosystemRegistry, GenericCategoryA
 _VALIDATION_ACCOUNT_ID = "ecosystem-validate"
 
 
-def _credentialed_account(provider: str, credential: "str | None") -> "ProviderAccount | None":
+def _credentialed_account(
+    provider: str, credential: "str | ProviderAccount | None"
+) -> "ProviderAccount | None":
+    """The throwaway account one ``build_*()`` call consumes - or the
+    caller's own real account, passed straight through.
+
+    ``validate`` only ever has a bare credential string, which is all
+    construction needs. A live authorization check (closure campaign 3,
+    2026-09-17) has the real stored ``ProviderAccount`` instead, and that
+    carries more than the secret: an account may pin its own ``model``.
+    Wrapping it in a synthetic account here would silently build against the
+    default model and check something other than what the account describes,
+    so a real account is used as given.
+    """
     if credential is None:
         return None
+    if isinstance(credential, ProviderAccount):
+        return credential
     return ProviderAccount(provider=provider, account_id=_VALIDATION_ACCOUNT_ID, credential=credential)
 
 

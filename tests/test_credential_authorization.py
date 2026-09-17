@@ -21,6 +21,8 @@ import scripts.control_center as cc
 from src.config.settings import Settings
 from src.providers.base import Completion, LLMProvider
 from src.services.credentials.account import ProviderAccount
+from src.services.ecosystem import registry_factory
+from src.services.ecosystem.contracts import CategoryAdapter
 from src.services.credentials.authorization import (
     AuthorizationCheck,
     check_authorization,
@@ -155,16 +157,37 @@ class TestItIsReachableFromTheControlCenter:
         out = cc.run_command(centre, "provider llm_provider check anthropic", 100, channel, conversation)
         assert "no active account" in out and "add anthropic" in out
 
-    def test_a_category_with_no_completion_call_is_told_so(self, stores):
-        """Closure campaign (2026-09-16): 'speech_provider' moved to the
-        checkable set (ElevenLabs got a real probe), so this now exercises a
-        category that genuinely still has none - video generation."""
+    def test_a_backend_with_no_live_probe_is_told_so_by_the_mechanism(self, stores, monkeypatch):
+        """Closure campaign 3 (2026-09-17): the refusal no longer comes from a
+        hardcoded tuple of checkable categories - the backend is really built
+        and asked, and a backend with no ``probe_authorization`` is refused on
+        that evidence. Video generation is still the genuine example: its
+        vendors hold credentials but no verified probe exists for them here."""
         runtime, manager, channel, conversation = cc.build(self._settings(stores))
         centre = cc.ControlCenter(runtime, manager)
-        out = cc.run_command(
-            centre, "provider video_generation_provider check pollinations", 100, channel, conversation
+        cc.run_command(
+            centre, "provider video_generation_provider add runway owner fake-key-not-real",
+            100, channel, conversation,
         )
-        assert "only applies to 'llm_provider', 'speech_provider'" in out
+        monkeypatch.setattr(
+            registry_factory, "build_media", lambda settings, **kwargs: _SpeechNoProbe()
+        )
+        out = cc.run_command(
+            centre, "provider video_generation_provider check runway", 100, channel, conversation
+        )
+        assert out.startswith("NOT AUTHORIZED: runway/owner")
+        assert "no live authorization probe" in out
+
+    def test_a_category_with_no_construction_path_is_refused_before_anything_is_built(self, stores):
+        """The other honest refusal: a category the registry cannot construct
+        at all has nothing to ask, and says so instead of pretending."""
+        runtime, manager, channel, conversation = cc.build(self._settings(stores))
+        centre = cc.ControlCenter(runtime, manager)
+        adapter, _ = cc._require_category(
+            cc.build_ecosystem_registry(centre.runtime.settings), "llm_provider"
+        )
+        with pytest.raises(NotImplementedError):
+            CategoryAdapter.construct(adapter, "anything")
 
     def test_the_answer_is_recorded_by_whether_the_vendor_was_reached(self):
         assert cc._administrative_write_succeeded(
@@ -189,7 +212,9 @@ class TestItIsReachableFromTheControlCenter:
             built["account"] = account.account_id if isinstance(account, ProviderAccount) else None
             return _Answers("ok")
 
-        monkeypatch.setattr(cc, "build_provider", fake_build)
+        # Patched where the registry's own build closure reads it - the seam
+        # the Control Center now goes through for every category alike.
+        monkeypatch.setattr(registry_factory, "build_provider", fake_build)
         out = cc.run_command(centre, "provider llm_provider check anthropic", 100, channel, conversation)
         assert built == {"backend": "anthropic", "account": "owner"}
         assert out.startswith("AUTHORIZED: anthropic/owner")
@@ -212,7 +237,7 @@ class TestItIsReachableFromTheControlCenter:
             built["account"] = account.account_id if isinstance(account, ProviderAccount) else None
             return _SpeechProbeWorks()
 
-        monkeypatch.setattr(cc, "build_speech", fake_build_speech)
+        monkeypatch.setattr(registry_factory, "build_speech", fake_build_speech)
         out = cc.run_command(centre, "provider speech_provider check elevenlabs", 100, channel, conversation)
         assert built == {"backend": "elevenlabs", "account": "owner"}
         assert out.startswith("AUTHORIZED: elevenlabs/owner")

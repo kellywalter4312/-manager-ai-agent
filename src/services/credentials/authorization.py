@@ -98,6 +98,55 @@ def check_authorization(provider: LLMProvider) -> AuthorizationCheck:
     )
 
 
+def check_vendor_authorization(adapter: object, *, unit: str = "result") -> AuthorizationCheck:
+    """The category-agnostic live authorization check: ask whatever backend
+    was built whether its credential actually works.
+
+    Closure campaign (2026-09-17). ``check_speech_authorization`` below was
+    already vendor-neutral over any adapter carrying ``probe_authorization``,
+    but its *caller* was not: the Control Center gated the whole action on a
+    hardcoded tuple of checkable categories, so a video or image backend that
+    grew a real probe would still have been refused until someone edited that
+    tuple. That is exactly the fixed-list shape this project refuses
+    everywhere else (see CON-05: "never a fixed list needing new code per
+    service"), so the question moved to where the answer actually lives - the
+    adapter itself.
+
+    An adapter with a real ``probe_authorization()`` is asked. One without it
+    is reported honestly as having nothing to check, which is the truthful
+    answer for both a local/free engine (Windows SAPI, Kokoro - no credential
+    exists) and a credentialed vendor whose probe has not been built yet
+    (Runway, Veo - their real endpoint shapes are undocumented here and this
+    project records that rather than guessing). The day such a probe lands,
+    verified against a funded account, it becomes checkable with no change to
+    this function or its caller.
+    """
+    probe = getattr(adapter, "probe_authorization", None)
+    name = getattr(adapter, "name", type(adapter).__name__)
+    if probe is None:
+        return AuthorizationCheck(
+            authorized=False,
+            reached_vendor=False,
+            reason=(
+                f"'{name}' has no live authorization probe to ask - either it needs no "
+                "credential at all, or its vendor exchange has never been verified here"
+            ),
+        )
+    try:
+        count = probe()
+    except Exception as exc:  # noqa: BLE001 - deliberate boundary catch, mirrors check_authorization
+        return AuthorizationCheck(
+            authorized=False,
+            reached_vendor=False,
+            reason=f"{type(exc).__name__}: {exc}",
+        )
+    return AuthorizationCheck(
+        authorized=True,
+        reached_vendor=True,
+        reason=f"the vendor returned {count} real {unit}(s)",
+    )
+
+
 def check_speech_authorization(adapter: object) -> AuthorizationCheck:
     """The speech-provider analogue of ``check_authorization`` above -
     closure campaign, 2026-09-16. Found live (not by reading code): the
@@ -114,24 +163,15 @@ def check_speech_authorization(adapter: object) -> AuthorizationCheck:
     does not (a local/free engine - Windows SAPI, Kokoro, none of these -
     has no credential to check in the first place).
     """
-    probe = getattr(adapter, "probe_authorization", None)
     name = getattr(adapter, "name", type(adapter).__name__)
-    if probe is None:
+    if getattr(adapter, "probe_authorization", None) is None:
+        # Kept distinct from the general wording above: on the speech axis the
+        # engines without a probe (Windows SAPI, Kokoro, none) genuinely have
+        # no credential at all, which is a stronger and more useful statement
+        # than the general "nothing to ask".
         return AuthorizationCheck(
             authorized=False,
             reached_vendor=False,
             reason=f"'{name}' is not a credentialed vendor - it has no authorization to check",
         )
-    try:
-        count = probe()
-    except Exception as exc:  # noqa: BLE001 - deliberate boundary catch, mirrors check_authorization
-        return AuthorizationCheck(
-            authorized=False,
-            reached_vendor=False,
-            reason=f"{type(exc).__name__}: {exc}",
-        )
-    return AuthorizationCheck(
-        authorized=True,
-        reached_vendor=True,
-        reason=f"the vendor returned {count} real voice(s)",
-    )
+    return check_vendor_authorization(adapter, unit="voice")

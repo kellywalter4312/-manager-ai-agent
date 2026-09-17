@@ -107,6 +107,7 @@ from src.control_center.render import (  # noqa: E402
 )
 from src.control_center.views import VoiceView  # noqa: E402
 from src.conversation.conversation import Conversation  # noqa: E402
+from src.providers.base import LLMProvider  # noqa: E402
 from src.providers.connection import AuthorizationState, Connection  # noqa: E402
 from src.providers.connection_resolver import ConnectionResolver  # noqa: E402
 from src.providers.connection_factory import build_connection  # noqa: E402
@@ -125,6 +126,7 @@ from src.services.credentials.account import ProviderAccount  # noqa: E402
 from src.services.credentials.authorization import (  # noqa: E402
     check_authorization,
     check_speech_authorization,
+    check_vendor_authorization,
 )
 from src.services.credentials.account_store_file import (  # noqa: E402
     DEFAULT_ACCOUNTS_PATH,
@@ -1902,17 +1904,18 @@ def run_provider_command(centre: "ControlCenter", rest: str) -> str:
         # except 'llm_provider' outright ("no completion call to prove one
         # with"), which was true for most categories but not 'speech_provider' -
         # ElevenLabsSpeechAdapter already had a real, live, vendor-backed call
-        # (probe_authorization) sitting unused for exactly this purpose. Video
-        # generation/understanding vendors genuinely have no such call yet, so
-        # they still get the honest refusal below.
-        _CHECKABLE_CATEGORIES = (LLM_CATEGORY, "speech_provider")
-        if category not in _CHECKABLE_CATEGORIES:
-            checkable = "', '".join(_CHECKABLE_CATEGORIES)
-            return (
-                f"'check' asks a vendor whether a credential works, which only applies to "
-                f"'{checkable}' today - '{category}' has no completion call to prove one with. "
-                f"Use 'provider {category} validate <backend>' for real construction instead."
-            )
+        # (probe_authorization) sitting unused for exactly this purpose.
+        #
+        # Closure campaign 3 (2026-09-17): the tuple that replaced it was the
+        # same mistake one size smaller - a hardcoded list of checkable
+        # categories, which would have gone on refusing a video or image
+        # backend the day it grew a real probe until someone remembered to edit
+        # this line. The category no longer decides. The adapter is asked to
+        # construct its backend (the same construction 'validate' already
+        # performs, handed back instead of discarded) and the built backend is
+        # asked whether it can prove its own credential. A category with no
+        # construction path, or a backend with no probe, is refused honestly
+        # by the mechanism itself rather than by a list kept here.
         if not action_args:
             return f"usage: provider {category} check <backend> [account-id]"
         backend = action_args[0]
@@ -1931,22 +1934,31 @@ def run_provider_command(centre: "ControlCenter", rest: str) -> str:
                 f"to check (registered: {known}). Add one with "
                 f"'provider {category} add {backend} <account-id> <credential>'."
             )
-        if category == LLM_CATEGORY:
-            try:
-                provider = build_provider(
-                    replace(centre.runtime.settings, provider=backend), account=account
-                )
-            except (ProviderConfigurationError, ValueError) as exc:
-                return f"FAILED: could not build '{backend}' from that account: {exc}. Nothing was sent."
-            outcome = check_authorization(provider)
+        try:
+            # The stored account itself, not just its secret: an account may
+            # pin its own model, and the check must exercise what the account
+            # actually describes.
+            built = adapter.construct(backend, credential=account)
+        except NotImplementedError:
+            return (
+                f"'check' asks a vendor whether a credential works, which needs a real "
+                f"backend to ask - '{category}' has no construction path to build one from. "
+                f"Use 'provider {category} validate <backend>' instead."
+            )
+        except Exception as exc:  # noqa: BLE001 - boundary catch, mirrors CategoryAdapter.validate
+            return (
+                f"FAILED: could not build '{backend}' from that account: "
+                f"{type(exc).__name__}: {exc}. Nothing was sent."
+            )
+        # An LLM proves its credential by completing; anything else by its own
+        # probe. Both are the backend's real vendor call, never a hand-rolled
+        # HTTP request invented here.
+        if isinstance(built, LLMProvider):
+            outcome = check_authorization(built)
+        elif category == "speech_provider":
+            outcome = check_speech_authorization(built)
         else:
-            try:
-                speech_adapter = build_speech(
-                    replace(centre.runtime.settings, speech=backend), account=account
-                )
-            except (SpeechConfigurationError, ValueError) as exc:
-                return f"FAILED: could not build '{backend}' from that account: {exc}. Nothing was sent."
-            outcome = check_speech_authorization(speech_adapter)
+            outcome = check_vendor_authorization(built)
         where = "the vendor answered" if outcome.reached_vendor else "the vendor was never reached"
         return (
             f"{'AUTHORIZED' if outcome.authorized else 'NOT AUTHORIZED'}: "

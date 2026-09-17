@@ -192,6 +192,24 @@ class CategoryAdapter(ABC):
         silently reports success for something never attempted."""
         return ValidationOutcome.failure(f"'{self.category}' does not support validation")
 
+    def construct(self, key: str, *, credential: object = None) -> object:
+        """Build ``key``'s real backend instance and return it - the same
+        construction ``validate`` performs, handed back instead of thrown
+        away.
+
+        ``validate`` answers "can this be built?" and discards the result,
+        which is all that question needs. A live authorization check needs
+        the built object itself, because only the backend can make the real
+        vendor call that proves a credential works. Exposing it here keeps
+        that caller category-agnostic: it asks whichever adapter it was
+        given, never a list of which categories are checkable.
+
+        Raises ``NotImplementedError`` when the category has no construction
+        path - an honest refusal to hand back something never built, never a
+        ``None`` the caller might mistake for a backend.
+        """
+        raise NotImplementedError(f"'{self.category}' has no real construction path")
+
     def dependents(self) -> tuple[str, ...]:
         """What - in plain language - depends on this category being
         configured, so a caller can be warned before disabling or
@@ -295,6 +313,20 @@ class GenericCategoryAdapter(CategoryAdapter):
         except Exception as exc:  # noqa: BLE001 - deliberate boundary catch, mirrors ToolSet.invoke
             return ValidationOutcome.failure(f"{type(exc).__name__}: {exc}")
         return ValidationOutcome.success(f"'{key}' constructed successfully")
+
+    def construct(self, key: str, *, credential: object = None) -> object:
+        """The same ``self._build`` ``validate`` runs, returning the built
+        backend rather than discarding it. Construction errors propagate
+        here - the caller asking for a real object needs to see why it could
+        not be made, where ``validate``'s job is to report that as an
+        outcome instead.
+
+        ``credential`` is whatever this category's own ``build`` closure
+        accepts: a bare secret, as ``validate`` passes, or a caller's real
+        account object when it has one (see ``registry_factory``)."""
+        if self._build is None:
+            raise NotImplementedError(f"'{self._category}' has no real construction path")
+        return self._build(key, credential)
 
     def dependents(self) -> tuple[str, ...]:
         return self._dependents

@@ -4,7 +4,11 @@
 what exists, this file wins — and where this file and the *code* disagree, the
 code wins and this file is wrong and must be corrected.
 
-Last synchronised against: closure campaign 2 of 2026-09-17 (§52.50 - the
+Last synchronised against: closure campaign 3 of 2026-09-17 (§52.51 - the live
+authorization check no longer asks which category, and CON-03's real
+provenance: no out-of-band edit ever happened; **8015 tests passing, both
+fixed-order and randomised-order**), which followed
+closure campaign 2 of the same day (§52.50 - the
 configurable voice system, translation outputs, Control-Center-created
 workspaces with capability profiles, agent screens, instruction-based image
 editing, evidence-carrying goal links, genuine 3D content; `8a1f670`;
@@ -10248,3 +10252,89 @@ decomposition, generative image styles, model-suggested goal links, vendor
 voices), Gmail sending (owner authorisation of a send scope) and Gmail
 re-authorisation, and the physical legs - hearing speech on a speaker or
 earbuds, a television reading the display surface.
+
+### 52.51 Closure campaign 3 - the check stopped asking which category, and CON-03's real provenance
+
+Two items, both taken from `REQUIREMENT_LEDGER.md`'s own open lists rather than
+from the code: the one requirement still marked "genuinely open, software-only",
+and the one still marked "decision needed".
+
+**The live authorization check (S-01, S-02).** `provider <category> check
+<backend>` makes the single real vendor request that proves a credential works -
+the question construction deliberately cannot answer. It was gated on a
+hardcoded tuple, `_CHECKABLE_CATEGORIES = (LLM_CATEGORY, "speech_provider")`,
+with a two-branch builder beneath it. The mechanism behind that tuple was
+already vendor-neutral over any backend carrying `probe_authorization`, so the
+tuple was the only thing standing between a video or image backend and a real
+check - a fixed list needing new code per category, which is the exact shape
+§CON-05 records this project as refusing everywhere else. The ledger had
+described this as "the mechanism now exists twice; a third and fourth
+implementation is feasible", which mistook the symptom for the gap: nothing
+needed implementing a third time.
+
+The category no longer decides. `CategoryAdapter.construct` hands back the same
+backend `validate` already builds and throws away, and the built backend is
+asked whether it can prove its own credential. Two honest refusals replace the
+list: a category with no construction path has nothing to build, and a backend
+with no probe has nothing to ask - which is the truthful answer both for a local
+engine that holds no credential (Windows SAPI, Kokoro) and for a credentialed
+vendor whose probe has not been verified here (Runway, Veo). This is proven the
+only way that means anything: a category invented inside the test is registered
+at runtime and checked through the unmodified Control Center command, AUTHORIZED
+with its probe and refused honestly without one, with zero change to
+`scripts/control_center.py`.
+
+One regression the repair could have introduced was caught before it shipped.
+Routing the check through `construct` would have passed only the bare
+credential, and `_credentialed_account` would have wrapped it in a throwaway
+`ProviderAccount` - silently dropping the account's pinned `model` and checking
+something other than what the account describes. A real account now passes
+through untouched, and a bare string is still wrapped for `validate`.
+
+**What did not get written.** No `probe_authorization` was added to Runway, Veo
+or the image vendors. None can be written honestly without a funded account to
+confirm the real endpoint, header and response shape, and
+`src/providers/media/video_generation.py` already records that boundary at
+length rather than guessing at it. Writing one anyway would have produced code
+that looks finished and has never been true. The boundary is external, and the
+mechanism is now ready for it.
+
+**CON-03, and a correction.** The row asked the owner to confirm an apparent
+out-of-band edit to `data/connections/*.json`. The owner confirmed they had made
+no such edit - which turned a request for confirmation into a real
+investigation, and the investigation found there was no edit to confirm.
+
+§52.49's round had reasoned from one fact: the files' mtime,
+`2026-09-15 06:56:15`, is six days *after* the audit trail's last entry,
+`2026-09-09T23:05:32+00:00`. It concluded "a direct, out-of-band file operation,
+never a governed Alfred action". The mtime is real; the inference was not.
+Recovered from the session transcript (`b857600f:199,207,211`): a sandbox sweep
+harness, `cc_sweep2.py`, ran at `2026-09-15T05:56:11Z` with `os.chdir(ROOT)` and
+executed `sites demo declare` -> `sites` -> `sites demo forget` -> `services demo
+declare` -> `services` -> `services demo forget`. It redirected the Control
+Centre's accounts, config, ledger, staging, backups **and action-log** paths into
+its scratchpad - but not `DEFAULT_SERVICES_PATH` and `DEFAULT_SITES_PATH`, which
+are *relative* (`Path("data") / "connections" / ...`) and so resolved against the
+real repository root.
+
+That explains every anomaly at once, and in the right order: the writes landed on
+production (mtimes 67ms apart, `sites` before `services`, matching the command
+sequence exactly), and no audit entry exists because the audit path *was*
+redirected. Nothing was lost - the declare/forget pair restored byte-identical
+empty content, and the harness's own guard over `data/connections` recorded
+`isolation.production_data_changed = []`. A same-bytes rewrite moves the mtime
+and nothing else. The fixtures were therefore already gone before 2026-09-15,
+and no ungoverned destructive write to production data ever occurred.
+
+The lesson is recorded, not coded around: a sandbox that redirects the Control
+Center's five `DEFAULT_*` paths is still not isolated unless it also redirects
+the two relative registry paths, or runs from a working directory that is not the
+repository root. No helper was added, because no caller in the repository needs
+one and `test_no_module_is_left_prepared_but_unwired` correctly forbids shipping
+a module with no user.
+
+**Suites.** `tests/test_campaign_3_generic_authorization_check.py` (15 new), plus
+three tests in `test_credential_authorization.py` repointed to the seam that is
+now real (`registry_factory.build_provider`/`build_speech` rather than the
+Control Center's own names) and one rewritten to prove the refusal comes from the
+mechanism instead of the deleted tuple.
