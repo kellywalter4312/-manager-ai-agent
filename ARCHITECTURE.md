@@ -4,9 +4,14 @@
 what exists, this file wins — and where this file and the *code* disagree, the
 code wins and this file is wrong and must be corrected.
 
-Last synchronised against: the whole-ecosystem campaign of 2026-09-17
+Last synchronised against: closure campaign 2 of 2026-09-17 (§52.50 - the
+configurable voice system, translation outputs, Control-Center-created
+workspaces with capability profiles, agent screens, instruction-based image
+editing, evidence-carrying goal links, genuine 3D content; `8a1f670`;
+**7999 tests passing, both fixed-order and randomised-order**), which
+followed the whole-ecosystem campaign of the same day
 (§52.49 - Control Center changes live, memory history, image intelligence,
-the weekly coach, personal guidance; 7877 tests passing, reachability 255/0/0),
+the weekly coach, personal guidance; reachability 255/0/0),
 on top of `HEAD = 0bca94a` (2026-09-15), which carries
 everything the previous synchronisation line named (Phase 1 through
 Stage 11.2, §1–§47) plus the full Pre-Stage-9 closure campaign: REPAIR-01
@@ -10128,3 +10133,118 @@ recorded expiry 2026-08-18; `python scripts/authorize_gmail.py`), funded
 video-generation vendors, and every physical device leg - hearing a speaker or
 headphones, a human voice on a microphone, a phone's camera and audio. Each has
 its software path verified above.
+
+### 52.50 Closure campaign 2 - voice, translation outputs, workspaces, screens, editing, goals, 3D
+
+The owner's brief: close every remaining software requirement as one campaign -
+inspect, repair, integrate, test, verify at runtime, regression-check, update
+the ledger, commit - without a second architecture and without hardcoding the
+examples it named (languages, accents, 3D subjects, edit instructions, goals,
+workspaces). `REQUIREMENT_LEDGER.md` section R holds the per-item record
+(previous status, repair, tests, runtime evidence, boundary, final status). The
+same discipline as §52.49: every runtime check ran against real, isolated
+systems (`build_live_system`, the served routes, real local models) from a
+scratch working directory; production `data/` was hashed before and after.
+
+**Voice (R-04, R-08).** How an agent sounds is four separate facts - the voice
+(one of the provider's real voices), the spoken language, the accent (the
+language/region the chosen voice was trained on) and the pace - planned against
+what the active provider reports live (`voice_configuration.VoiceFacts`: its
+voices with language/accent/locale/gender, the languages it can speak, whether a
+voice can speak another language, its pace words). "Speak Italian" picks a native
+voice; "speak English with an Italian accent" is an Italian voice speaking
+English; a combination the provider cannot produce is refused with what it can
+do. Language, accent and pace are the agent's own governed settings, applied in
+`effective_voice_for`, so a request made under one provider carries to another
+whose voices have different names (a British accent chosen on Windows becomes a
+British Kokoro voice after the switch). Kokoro's facts come from its published
+voice-family convention; nothing unconventional is guessed. The channel speaks
+translated text when the configured language differs from the written reply.
+Control Center: `voice providers`, `voice <agent> language|accent|pace|test`
+(a real WAV sample saved as an artifact).
+
+**Translation outputs (R-09, R-10).** A translated result is timed lines, and
+every output renders the same lines: WebVTT/SRT subtitles, the source video with
+a real `mov_text` subtitle track (FFmpeg remux), translated speech, and a live
+display surface the page (and any connected screen polling the snapshot) shows
+as a subtitle bar. Outputs are an open registry (`register_translation_output`);
+earbuds and televisions are endpoints of one path, not features. "Translate this
+video into English subtitles" / "add captions to this video" reach
+`translate_media`; live speech can be routed to the display.
+
+**Workspaces (R-11 to R-14).** A workspace is data - label, description, panels,
+capability profile, archived - created and changed from the Control Center, the
+built-in rows included (they are seeds). A capability profile names real
+capability names (the Manager's registry and specialists' words, checked live);
+one gate enforces it for the Manager (after selection in `ManagerSkills.execute`)
+and every specialist (`ManagerAgent.take_action`), while capabilities marked
+`anywhere` (conversation, self-description, memory, movement) answer in any
+workspace. Agents move by conversation (`workspace_navigation` + the `workspace`
+tool), by the page (`POST /workspace/select`) or by the Control Center - one saved
+fact. Artifacts record the workspace they were made in. A workspace holds no
+agent state; any registered agent can be given one; unregistered names are
+refused.
+
+**Screens (R-07).** A declared, implemented agent surface is served generically
+(`GET /surface/<agent>/<kind>.json` -> the agent's own `surface_view`) and
+rendered from a generic item shape, fetched only when shown. Arthur's mailbox and
+opportunities screens are the first; both are read-only. Gmail sending (R-06) was
+resolved from history as an owner-authorisation boundary, not a missing feature.
+
+**Image editing (R-02).** An instruction becomes an ordered plan over a
+parametric operation vocabulary plus every image technique; each step is applied
+and measured before the next; clauses no operation reads are reported, restated
+by a Brain in the vocabulary when one is configured, or refused - never half an
+instruction.
+
+**Goals (R-03).** Links between goals and what serves them carry their evidence:
+what the person said (kept and superseded like any personal fact), shared words,
+or a Brain's suggestion validated against exact names and never stored. With no
+model, what the words cannot show is asked about.
+
+**3D content (R-01).** A subject described as parts becomes a glTF 2.0 binary
+mesh; `inspect_glb` reads the bytes back and decides whether it is genuinely 3D
+(valid structure, triangle meshes with normals, real extent on all three axes).
+Shapes and placements are geometry, never subjects. A Brain can restate a bare
+subject in the same grammar; another generator can register and passes the same
+gate. The page reads glTF with a small generic reader and renders it in the 3D
+workspace.
+
+**Local model measurements.** Qwen2.5-1.5B-Instruct (the installed local model)
+was measured on this campaign's reasoning tasks before choosing the design: 7 of
+18 goal/commitment link judgements correct, and part decompositions for 3D
+subjects that were not buildable or not recognisable; the local embeddings
+separated related from unrelated pairs 10 of 18 (similarities clustered at
+0.93-0.96). It is therefore not used for these tasks; the deterministic paths
+above are complete on their own, and the model-dependent extensions name a funded
+vendor or an owner-authorised stronger local model as the boundary.
+
+**Runtime verification (final code).**
+
+| Audit | Result | Evidence |
+|---|---|---|
+| Voice | 17/17 | Kokoro and Windows audio heard back by local Whisper: Italian speech recognised as Italian; English with an Italian-accented voice recognised as English; Liverpool accent refused with the provider's real accents; pace changed the real duration; Alfred and Arthur configured independently; provider switch live with the same conversation, memory and identity; settings and a carried accent survived restart |
+| Translation outputs | 7/7 | a Spanish Kokoro video -> English WebVTT with timings and an MP4 with a subtitle stream; the display surface; same-language captions; Italian audio output recognised as Italian; live French speech -> Portuguese on the display |
+| Workspaces | 30/30 | created with a profile; bad capability/panel refused; Alfred moved by conversation and scoped; conversation and memory still answered; rename/profile live; page route and Control Center agree; archive/restore; Arthur moved and scoped; a runtime-registered specialist; phantom refused; restart |
+| Image editing | 11/11 | a real JPEG rotated/cropped/bordered (direction proven from pixels), darkened + sepia, text + resize, mirror + crop; unreadable and half-readable instructions refused with nothing created; original byte-identical |
+| Goal links | 13/13 | shared words, told and negated links, task links, unknown goal asked, priorities, restart, supersession |
+| 3D content | 11/11 | fresh subjects (rocket, mushroom, water tower, signpost) as served, genuinely-3D GLBs with placement read back from the bytes; bare subject, unreadable part and flat result refused |
+| Voice provider accounts | 11/11 | add/list/select/revoke/restart for a vendor voice account with every outward connection blocked in-process: zero attempts, secret never shown |
+
+A real browser (headless Chromium over CDP) showed the subtitle bar with a live
+translation, the workspace switcher persisting through the server and surviving
+a reload while the Control Center agreed, Arthur's inbox (6) and opportunities
+(3) screens with no overflow at phone width, and a lighthouse glTF rendered as a
+turning WebGL mesh - no console errors.
+
+**Suites.** Six campaign files (115 tests). Full suite: **7999 passed** in both
+fixed and randomised order against the committed tree (`8a1f670`), zero
+failures, production `data/` byte-identical across all 90 files. Every module
+this campaign added is wired into production, which
+`test_no_module_is_left_prepared_but_unwired` covers.
+
+**What remains outside software.** Funded vendor models (bare-subject 3D
+decomposition, generative image styles, model-suggested goal links, vendor
+voices), Gmail sending (owner authorisation of a send scope) and Gmail
+re-authorisation, and the physical legs - hearing speech on a speaker or
+earbuds, a television reading the display surface.

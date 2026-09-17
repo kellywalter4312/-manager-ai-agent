@@ -46,12 +46,15 @@ does not re-derive file:line citations already verified in that section
 — it points at them rather than duplicating them, to avoid the two
 documents drifting apart.
 
-**Last reconciled:** 2026-09-17, whole-ecosystem campaign (ARCHITECTURE.md
-§52.49) - every row below re-checked at runtime against real isolated
-systems; 7877 tests passing fixed-order; reachability 255 production / 0
-test-only / 0 unreachable; production `data/` byte-identical. Section Q holds
-this campaign's rows; rows elsewhere whose status changed are marked
-"(2026-09-17)". Previous reconciliation: 2026-09-16 against `0bca94a`.
+**Last reconciled:** 2026-09-17, closure campaign 2 (ARCHITECTURE.md §52.50,
+`8a1f670`) - 7999 tests passing in both fixed and randomised order; production
+`data/` byte-identical across all 90 files. Section R holds this campaign's
+rows. Previous reconciliation: 2026-09-17, whole-ecosystem campaign
+(ARCHITECTURE.md §52.49) - every row below re-checked at runtime against real
+isolated systems; 7877 tests passing fixed-order; reachability 255 production /
+0 test-only / 0 unreachable. Section Q holds that campaign's rows; rows
+elsewhere whose status changed are marked "(2026-09-17)". Before that:
+2026-09-16 against `0bca94a`.
 
 ---
 
@@ -321,6 +324,44 @@ Found at runtime and repaired, or built, in this campaign - ARCHITECTURE.md
 | Q-SITE-01 | Several websites by name, generalised | VERIFIED WORKING | salon + a second local site declared with no code, read through Chromium; natural request by name | Outward/real accounts EXTERNAL |
 | Q-GMAIL-01 | Gmail status honest about its token | VERIFIED WORKING | shows the token's recorded expiry (2026-08-18), locally | Re-authorization EXTERNAL ACTION REQUIRED |
 
+## R. Closure campaign 2 - voice, translation outputs, workspaces, screens, editing, goals, 3D (2026-09-17)
+
+One coordinated closure campaign against the committed campaign-1 tree
+(`df5e778`). ARCHITECTURE.md §52.50 has the narrative. Every row was built or
+repaired, unit/integration tested, then run through the real served system in an
+isolated sandbox (real local models: Kokoro, Whisper, Argos, FFmpeg, headless
+Chromium); production `data/` was never the working directory and stayed
+byte-identical. Commit: `8a1f670`.
+
+Regression protection: `tests/test_campaign_2_voice_translation_outputs.py` (31),
+`tests/test_campaign_2_workspaces.py` (19), `tests/test_campaign_2_agent_screens.py` (8),
+`tests/test_campaign_2_image_editing.py` (26), `tests/test_campaign_2_goal_links.py` (13),
+`tests/test_campaign_2_model3d.py` (18), plus honest updates to pinned lists in
+`test_manager_capabilities.py`/`test_identity_resolution.py` and to two tests whose
+subject changed (Arthur's mailbox is no longer planned - see R-07).
+
+Full suite against the committed tree: **7999 passed** in both fixed and
+randomised order, zero failures.
+
+| ID | Requirement | Previous | Repair / build | Tests | Runtime verification | External / hardware boundary | Final status |
+|---|---|---|---|---|---|---|---|
+| R-01 | Arbitrary subject -> genuine 3D content, no subject branches, no 2D stand-in, provider-replaceable | VERIFIED PARTIAL (3D workspace diagram of tasks only; no 3D content for a named subject) | `src/providers/media/model3d.py`: open shape registry (box, sphere, cylinder, cone, torus), geometric placement grammar ("on top of", "around", "at the corners of", ...), glTF 2.0 GLB writer, and `inspect_glb` - an independent reader deciding "genuinely 3D" (valid GLB structure, triangle meshes with normals, real extent on all three axes, thinnest >= 2% of widest). `Model3DProductionTool` + `create_3d_model` capability; a Brain restates a bare subject in the same grammar; `register_model3d_generator` for a vendor/local text-to-3D engine, gated by the same check. Page: generic glTF reader + `model3d` workspace panel; `.glb` served as `model/gltf-binary` | 18 | Audit M 11/11 with subjects not used while building (rocket, mushroom, water tower, signpost): served GLBs genuinely 3D, parts and placement read back from the bytes; bare subject with no model refused naming the grammar; unreadable part and flat result refused, nothing saved. Browser: lighthouse rendered as a turning WebGL mesh (red/white pixels, frames differ), no console errors | Decomposing an *unnamed-parts* subject needs a reasoning model: the local Qwen2.5-1.5B measured unreliable at it (see §52.50); a funded vendor or an owner-authorised stronger local model - EXTERNAL. Fidelity follows the description | VERIFIED WORKING (described parts, any subject); bare-subject decomposition EXTERNAL ACTION REQUIRED |
+| R-02 | Instruction-based image editing from a person's own words | VERIFIED PARTIAL (single named techniques by phrase) | `src/providers/media/image_edits.py`: parametric operation vocabulary (rotate, flip, crop, resize, adjust brightness/contrast/saturation, temperature, sepia/invert/posterize/pixelate/blur, border, quoted text) + every image technique as a step; deterministic clause parser reporting what it could not read; each step applied then *measured* (dimensions, mirror equality, luminance/contrast/saturation direction, warmth, border colour, text drawn); `register_edit_operation`. `image_transform` plans, asks a Brain to restate unread clauses in the vocabulary (re-parsed, validated), otherwise refuses naming the gap - never half an instruction | 26 | Audit I 11/11 on a real JPEG: rotate->square crop->crimson border (clockwise direction proven by pixel content), 30% darker + sepia, quoted text + resize, mirror + crop third, named technique unchanged, unreadable and half-readable instructions refused with nothing created, a question not treated as an edit, original byte-identical | A generative "make it look like an oil painting" edit needs an image model - EXTERNAL; scripted Brain verifies the restatement axis | VERIFIED WORKING (deterministic vocabulary); generative styles EXTERNAL ACTION REQUIRED |
+| R-03 | Goal <-> commitment/task reasoning without a model | VERIFIED PARTIAL (shared words only) | Links carry evidence: *told* ("my duolingo lessons are for my Portuguese goal", negations too - a governed personal-context fact, superseded), *shared words*, *suggested* (Brain, exact names only, validated, never stored). Unlinked items asked about with a phrasing the parser itself reads; priorities use told links; link facts never counted as goals; stemmer handles doubled consonants ("swimming") | 13 | Audit G 13/13: shared-word links labelled, told/negative/task links resolved to the real commitment and goal, unknown goal asked, priorities, restart, supersession | A link neither the words nor the person state needs a model to *suggest* (local model measured 7/18) - EXTERNAL; nothing is guessed | VERIFIED WORKING |
+| R-04 | Voice selection/configuration through the Control Center | NOT VERIFIED | `voice providers`; `voice <agent> language|accent|pace|test`; per-agent spoken language, accent and pace as governed settings separate from the voice; accent re-resolved on another provider; listing shows the voice actually speaking | 31 (incl. a Control Center command test) | Audit V 17/17 with real Kokoro/Windows audio heard back by Whisper: Italian spoken, English with an Italian accent recognised as English, Liverpool refused with real accents, German question answered without change, pace changes real duration, per-agent independence, provider switch live, continuity of conversation/memory/identity, restart persistence incl. British accent carried from Windows to Kokoro | Hearing it on a speaker - HARDWARE | VERIFIED WORKING |
+| R-05 | Video-clipping false positive | VERIFIED BROKEN | `clip_video_intent` requires a clip marker or a request cue; ranges followed by non-time units excluded | 8 (in 31) | Statements with ranges not clipped; real requests (incl. "pull out 2:10-2:45 ... for me") still clipped | - | VERIFIED WORKING |
+| R-06 | Gmail sending | NOT FOUND | Resolved from history, not built: the owner's standing instruction is that Gmail stays read-only and a send/modify permission is added only when explicitly authorised (`be7ca6a7:1390` 2026-08-21 "Do NOT ... enable sending/replying/deleting/modifying Gmail"; `6aa63c6f:5877` 2026-08-28 "must NOT silently become Gmail send/delete/modify unless explicitly governed and authorized"; `0c651e7f:13822` 2026-09-05 "do NOT attempt to add Gmail send capability (gmail.send OAuth scope) without explicit user authorization"). The 2026-09-05 audit checklist (`0c651e7f:17035`) listed "Gmail send" as a state to inspect, not a requirement. `test_architecture_audit` keeps write scopes out | existing | Read path and token status unchanged (Q-GMAIL-01); the new inbox screen adds no write path (tested) | Owner authorisation of a `gmail.send` scope + the owner's own Google sign-in - EXTERNAL / OWNER DECISION | NOT A CURRENT REQUIREMENT - owner authorisation required (was misclassified NOT FOUND) |
+| R-07 | Arthur inbox screen | NOT FOUND (declared "planned") | `EmailAgent.surface_view` answers `mailbox` and `opportunities` (read-only); `GET /surface/<agent>/<kind>.json` serves any agent's declared, implemented screen; page renders the generic item shape on demand (not on the poll). `test_declared_but_unbuilt_surfaces_are_shown_as_planned` now proves the rule with a genuinely unbuilt surface; the governance lifecycle test withdraws and restores the now-real mailbox | 8 | Browser: Arthur's inbox (6 messages) and opportunities (3 ranked, scores) rendered, phone width no overflow, no console errors; unknown agent/undeclared screen 404; unreadable mailbox reported 502 | Real Gmail content needs re-authorisation (CON-02) - EXTERNAL; sandbox used the sample inbox | VERIFIED WORKING |
+| R-08 | Universal configurable voice system (provider-replaceable, per-agent profile independent of identity/memory) | VERIFIED PARTIAL | `voice_configuration.py` (`VoiceFacts` read live from any adapter; `plan_voice` honest refusals); Kokoro voice-family facts from its published convention; Windows rates; ElevenLabs synthesize; `VoiceProfile.language`; channel speaks translated text in the configured language | as R-04 | as R-04 | Vendor voices need funded accounts - EXTERNAL | VERIFIED WORKING |
+| R-09 | Universal voice translation (no language special-cased; AirPods only an endpoint) | VERIFIED WORKING (TRN-02) | Unknown-but-named languages still reach the translator and are refused with the installed packs | 31 | Audit T: Spanish video, Italian audio, French speech; an uninstalled language refused honestly | Offline packs installed: en/es/fr/de/it/pt/zh; physical earbuds - HARDWARE | VERIFIED WORKING |
+| R-10 | Translated subtitle/display output (not TV-specific) | NOT FOUND | `services/translation/outputs.py`: timed lines -> open output registry (WebVTT/SRT subtitles, a video with a mov_text subtitle track, translated speech, the live display surface); `translation_output` tool; `translate_media` capability; `POST /translate/speech` routes to outputs; snapshot `translation.display`; page subtitle bar | 31 | Audit T 7/7: Spanish Kokoro video -> English WebVTT with timings, MP4 with a real subtitle stream (ffprobe), display surface; same-language captions; Italian audio heard as Italian by Whisper; live French speech -> Portuguese on the display; browser subtitle bar shown | A physical TV/earpiece reading the display - HARDWARE | VERIFIED WORKING |
+| R-11 | Control Center-created arbitrary workspaces (create, name, persist, select, profile, open, rename, archive/remove, survives restart, runtime agrees) | VERIFIED PARTIAL (types via config; page selection in localStorage only) | `workspace create|rename|describe|profile|panels|archive|restore|remove`; built-in rows are editable seeds; confirmed/audited writes; `POST /workspace/select`; page reads the server's active workspace; artifacts record the workspace they were made in (`produced` panel) | 19 | Audit W 30/30: create with profile, unknown capability and unrenderable panel refused, rename/profile live, archive/restore, built-in removal refused, restart; browser: switcher click persisted through the server, survived reload, Control Center agreed | - | VERIFIED WORKING |
+| R-12 | Alfred moves between workspaces | NOT FOUND | `workspace_navigation` capability + `workspace` tool ("go to the X workspace", "which workspace are you in?") | in 19 | Audit W: moves by conversation, scope enforced in the new workspace, visible to snapshot and Control Center | - | VERIFIED WORKING |
+| R-13 | Capability-driven workspace profiles, no hardcoded workspace types | NOT FOUND | Profile = real capability names (Manager registry + specialist words, validated live); one gate for the Manager (`ManagerSkills.execute`) and every specialist (`ManagerAgent.take_action`); `ManagerCapability.anywhere` keeps conversation, self-description, memory and movement available everywhere | in 19 | Out-of-profile work refused naming where it belongs; conversation and memory still answered; profile change live | - | VERIFIED WORKING |
+| R-14 | Future specialist <-> workspace compatibility, Workspace != Agent, no fake agents | VERIFIED PARTIAL | Workspaces hold no agent state (tested); any registered agent can be given/moved/scoped; unregistered names refused by tool and Control Center | in 19 | A specialist registered at runtime: its capability accepted in a profile only after registration, moved in by conversation with no code change; a phantom refused; Arthur moved and scoped independently of Alfred | - | VERIFIED WORKING |
+| R-15 | Provider/account/credential management through the Control Center (voice) | VERIFIED WORKING (LLM axis), NOT VERIFIED for voice | (existing generic path) verified for `speech_provider` | existing + audit | Audit P 11/11 with every outward connection blocked in-process: add (secret never echoed), list with active marker, persisted, select, revoke, restart; running voice unaffected; an outward credential check is a separate confirmed action; zero outward attempts | Checking a real vendor key leaves the machine - owner-confirmed, EXTERNAL | VERIFIED WORKING |
+| R-16 | User-facing runtime reachability of every capability touched | - | New modules wired into production (`test_no_module_is_left_prepared_but_unwired`); every capability reachable by conversation; screens/panels reachable in the served page | full suites | Served-system audits above; browser checks of subtitles, workspace switcher, Arthur's screens and the 3D model | - | VERIFIED WORKING |
+
 ## O. Explicit Scope Boundaries (non-requirements, preserve these)
 
 | ID | Statement | Source | Status |
@@ -352,6 +393,16 @@ Found at runtime and repaired, or built, in this campaign - ARCHITECTURE.md
 
 **Closed 2026-09-17 (whole-ecosystem campaign):** PRV-10 (live rebinding
 beyond the provider axis), IMG-04 (reconstruction), and every Q-row above.
+
+**Closed 2026-09-17 (closure campaign 2, `8a1f670`):** every R-row above -
+voice configuration through the Control Center (R-04/R-08), translation outputs
+including subtitles and the display surface (R-09/R-10), Control-Center-created
+workspaces with capability profiles and agent movement (R-11 to R-14), Arthur's
+inbox and opportunity screens (R-07), instruction-based image editing (R-02),
+goal/commitment links without a model (R-03), genuine 3D content for described
+subjects (R-01), the video-clipping false positive (R-05) and voice
+provider/account management (R-15). Gmail sending (R-06) is not a current
+requirement: it needs the owner's explicit authorisation of a send scope.
 
 **Closed this session (2026-09-16), not open anymore:**
 - N-05 (ARCHITECTURE.md §0 front matter refreshed, and a stale docstring
