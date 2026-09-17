@@ -243,6 +243,23 @@ _BUILDERS: dict[
 }
 
 
+def register_provider(
+    name: str,
+    builder: "Callable[[Settings, Mapping[str, str] | None, ProviderAccount | None], LLMProvider]",
+) -> None:
+    """Add a reasoning backend by name - a new vendor, a new local runtime -
+    with no change to this module or anything that selects one: it appears in
+    ``available_providers()``, is chosen with ``provider llm_provider use
+    <name>``, and is governed and switched live like every built-in one. An
+    existing name is never silently replaced."""
+    key = str(name or "").strip().lower()
+    if not key:
+        raise ValueError("a provider needs a name")
+    if key in _BUILDERS:
+        raise ValueError(f"a provider called {key!r} is already registered")
+    _BUILDERS[key] = builder
+
+
 def available_providers() -> list[str]:
     """Every provider name that can currently be configured."""
     return sorted(_BUILDERS)

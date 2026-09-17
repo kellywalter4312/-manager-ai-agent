@@ -59,6 +59,8 @@ class LanguagePack:
         self.source = str(meta["from_code"]).lower()
         self.target = str(meta["to_code"]).lower()
         self.target_prefix = str(meta.get("target_prefix") or "")
+        self.source_name = str(meta.get("from_name") or "")
+        self.target_name = str(meta.get("to_name") or "")
         if (path / "sentencepiece.model").exists():
             self.kind = "sentencepiece"
         elif (path / "bpe.model").exists():
@@ -142,6 +144,12 @@ class OfflineTranslator:
             except (OSError, ValueError, KeyError, TranslationError):
                 continue
             packs[(pack.source, pack.target)] = pack
+            # Every language a pack covers becomes nameable - "translate this
+            # into Russian" works the moment a Russian pack is installed.
+            from src.services.translation.languages import register_language
+
+            register_language(pack.source, pack.source_name)
+            register_language(pack.target, pack.target_name)
         self._packs = packs
 
     @classmethod

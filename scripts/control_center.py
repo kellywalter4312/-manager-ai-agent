@@ -67,8 +67,10 @@ from src.agents.tools.web_search import WebSearchTool  # noqa: E402
 from src.agents.tools.document_generation import DocumentGenerationTool  # noqa: E402
 from src.agents.tools.artifact_production import ArtifactProductionTool  # noqa: E402
 from src.agents.tools.code_assistant import CodeAssistantTool  # noqa: E402
+from src.agents.tools.image_intelligence import ImageIntelligenceTool  # noqa: E402
+from src.providers.media.image_techniques import bind_governed_values as bind_image_technique_values  # noqa: E402
 from src.services.artifacts.content import SHARED_FILE_PREFIX, artifact_ids_in, read_artifact_units  # noqa: E402
-from src.composition import reasoning_settings_fields, rebind_reasoning  # noqa: E402
+from src.composition import reasoning_settings_fields, rebind_backends, rebind_reasoning  # noqa: E402
 from src.services.artifacts.delivery import available_delivery_methods  # noqa: E402
 from src.services.artifacts.ingestion import IngestionError, ingest_supplied_file  # noqa: E402
 from src.agents.tools.media_production import MediaProductionTool  # noqa: E402
@@ -219,6 +221,15 @@ HELP = """
   workspace                every agent with a declared 3D Workspace: real
                            visit history and its current task board - the
                            same backend state the live page reads
+  workspace <agent> add|remove|use <type>
+                           give an agent a workspace type, take one away,
+                           or choose which one opens
+  workspace type <id> <label>|<panel>,<panel>
+                           define a brand-new kind of workspace from panels
+                           the page already renders (tasks, diagram3d,
+                           artifacts:<type>) - no code change
+  workspace type <id> remove
+                           withdraw an owner-defined workspace type
   recordings                one agent's real, saved audio recordings and
                            its current live recording session - starting/
                            stopping/cancelling stays conversational
@@ -616,6 +627,51 @@ def _apply_reasoning_live(centre: "ControlCenter", store) -> str:
     )
 
 
+def _apply_backends_live(centre: "ControlCenter") -> str:
+    """Rebind the running session's non-reasoning backends in place from what
+    the owner has governed (backend choices, accounts, connection adapter) -
+    the same Manager, conversation, memory, sessions and identity continue.
+    Built all-or-nothing: a failure changes nothing and says so."""
+    config = load_governed_config(DEFAULT_CONFIG_PATH)
+    settings = governed_backend_settings(centre.runtime.settings, config)
+    try:
+        runtime = rebind_backends(
+            centre.runtime, centre.manager, settings,
+            accounts=load_credential_store(DEFAULT_ACCOUNTS_PATH),
+            connection_adapter_version=config.get(CONNECTION_GMAIL_ADAPTER, DEFAULT_GMAIL_ADAPTER_VERSION),
+            tools=lambda live: manager_tools(live, settings, load_governed_config(DEFAULT_CONFIG_PATH)),
+            channel=centre.channel,
+        )
+    except Exception as exc:  # noqa: BLE001 - every construction failure is reported, nothing is half-applied
+        return (
+            f" Saved, but not applied to this running session: {type(exc).__name__}: {exc}. "
+            "The running session is unchanged."
+        )
+    centre.rebind_runtime(runtime)
+    return " Applied live: this running session uses it now - the same conversation, memory and identity continue."
+
+
+def _apply_evolution_live(centre: "ControlCenter", component_id: str) -> str:
+    """Make an applied (or rolled-back) evolution live in this running session.
+
+    The LLM category's account model is reasoning; a capability's governed
+    configuration is read by the running session on every turn; an identity
+    document is re-read by every new session (said plainly, never claimed
+    live); every other governed value - a tool's configuration, a connection's
+    adapter, a backend account's model, a newly registered category - is
+    rebound through the same live backend path a fresh start would use."""
+    if component_id == f"provider.{LLM_CATEGORY}":
+        return _apply_reasoning_live(centre, load_credential_store(DEFAULT_ACCOUNTS_PATH))
+    if component_id.startswith("capability.") or component_id.startswith("image_technique."):
+        return " Live now: the running session reads this governed value on every turn."
+    if component_id == "alfred" or component_id.startswith("specialist."):
+        return (
+            " The identity document is re-read by every new session - restart (or 'reload') to hear "
+            "the evolved identity; this conversation keeps the one it started with."
+        )
+    return _apply_backends_live(centre)
+
+
 def _new_family_member(components, component_id: str):
     """A component the inventory does not list yet that can genuinely begin
     from nothing - its handler supplies a starting version - and joins a family
@@ -654,6 +710,48 @@ def render_translation(interpreter) -> str:
         lines.append("")
         lines.append("  installed packs: " + ", ".join(status["pairs"]))
     return "\n".join(lines)
+
+
+def run_workspace_type_definition_command(rest: str) -> str:
+    """Define a brand-new workspace type, or withdraw one the owner defined -
+    ``workspace type <id> <label>|<panel>,<panel>`` / ``workspace type <id> remove``.
+
+    A type is data (``workspace_catalog``): a label and panels the page already
+    renders generically (``tasks``, ``diagram3d``, ``artifacts:<type>``), so an
+    open-ended new kind of workspace needs no code. Refused honestly when a
+    panel cannot be rendered; the built-in types cannot be withdrawn here."""
+    from src.control_center.workspace_catalog import (
+        DEFAULT_WORKSPACE_TYPES, PANEL_KINDS, WORKSPACE_TYPE_PREFIX, WorkspaceType,
+    )
+
+    type_id, _sep, spec = rest.strip().partition(" ")
+    ident = "_".join(type_id.strip().lower().split())
+    if not ident or not spec.strip():
+        return (
+            "usage: workspace type <id> <label>|<panel>,<panel>  (panels: tasks, diagram3d, artifacts:<type>)"
+            "  or  workspace type <id> remove"
+        )
+    config = load_governed_config(DEFAULT_CONFIG_PATH)
+    key = WORKSPACE_TYPE_PREFIX + ident
+    if spec.strip().lower() == "remove":
+        if ident in {t.workspace_id for t in DEFAULT_WORKSPACE_TYPES}:
+            return f"'{ident}' is a built-in workspace type and stays - remove it from an agent instead."
+        if config.get(key) is None:
+            return f"no owner-defined workspace type '{ident}'."
+        save_governed_config(config.without_value(key), DEFAULT_CONFIG_PATH)
+        return f"Removed the workspace type '{ident}'. Saved - the page shows it on its next refresh."
+    label, bar, panels = spec.partition("|")
+    if not bar:
+        return "give the panels after '|', e.g. 'workspace type research Research|tasks,artifacts:document'"
+    try:
+        defined = WorkspaceType(ident, label.strip() or ident, "Added by the owner.", tuple(panels.split(",")))
+    except ValueError as exc:
+        return f"FAILED: {exc}. Panels the page renders: {', '.join(PANEL_KINDS)} (artifacts:<type>)."
+    save_governed_config(config.with_value(key, f"{defined.label}|{','.join(defined.panels)}"), DEFAULT_CONFIG_PATH)
+    return (
+        f"Defined the workspace type '{defined.workspace_id}' ({defined.label}: {', '.join(defined.panels)}). "
+        f"Give it to an agent with 'workspace <agent> add {defined.workspace_id}'. Saved - the page shows it on its next refresh."
+    )
 
 
 def run_workspace_types_command(centre: "ControlCenter", agent_name: str, action: str, type_id: str) -> str:
@@ -703,92 +801,18 @@ def _governed_control_center(runtime, manager) -> "ControlCenter":
     return centre
 
 
-def build(settings: Settings):
-    """Assemble the system exactly as the other entry points do.
+def _governed_image_values():
+    return load_governed_config(DEFAULT_CONFIG_PATH).values
 
-    Same composition root, same per-run documents. The Control Center observes
-    what everything else already builds rather than arranging its own version,
-    which is what keeps the screen describing the real program.
 
-    **Universal provider/connection management repair.** Before this,
-    ``build_runtime`` was called bare here - the persisted
-    ``CredentialStore`` (``data/credentials/accounts.json``, the very
-    file the ``provider <category> add/select/revoke`` command writes)
-    was never consulted by the actual running system, for any category.
-    An account added or selected through this Control Center genuinely
-    updated the file and nothing else. Fixed by loading that same store
-    once, here, and passing each category's currently-active account
-    into ``build_runtime`` exactly as ``test_phase_1_5_provider_accounts.py``
-    already exercises directly - the identical, pre-existing seam, now
-    actually reached from the real production entry point rather than
-    only from a test.
-
-    **What this does not yet do.** This makes a selection made *before*
-    this process starts take effect *at* that start - restart, not live
-    reload. Changing an account while this Control Center is already
-    running still has no effect on it; the next command still only
-    writes the file. Live, in-session activation remains a separate,
-    unimplemented gap (see the ``provider`` command's own help text).
-    """
-    accounts = load_credential_store(DEFAULT_ACCOUNTS_PATH)
-    config = load_governed_config(DEFAULT_CONFIG_PATH)
-    # Pre-Stage-9 Campaign 4: the reasoning backend the owner chose in the
-    # Control Center ("provider llm_provider use <backend>") is the one every
-    # start uses.
-    settings = governed_backend_settings(governed_reasoning_settings(settings, config), config)
-    runtime = build_runtime(
-        settings,
-        accounts=accounts,
-        video_generation_account=accounts.active(settings.video_generation),
-        video_understanding_account=accounts.active(settings.video_understanding),
-        speech_account=accounts.active(settings.speech),
-        communication_account=accounts.active(settings.communication_provider),
-        # Full Alfred OS Ecosystem Evolution: the one real, governed
-        # connection-*adapter* axis this checkpoint added - genuinely
-        # distinct from the account/credential `accounts` above already
-        # governs. Defaults to "1" (this project's own prior, unchanged
-        # behaviour) unless a real evolution selected "2".
-        connection_adapter_version=config.get(CONNECTION_GMAIL_ADAPTER, DEFAULT_GMAIL_ADAPTER_VERSION),
-    )
-
-    try:
-        profile = load_profile(settings.profile_path)
-    except ProfileError:
-        # Degrades rather than stopping, as main.py does: a Control Center that
-        # refused to open because USER.md was missing would be useless exactly
-        # when someone needs to look at why.
-        profile = None
-
-    manager = build_manager(
-        runtime,
-        mailbox=build_mailbox(settings),
-        profile=profile,
-        schedule=load_schedule(settings.schedule_path),
-        # Stage 14: the one real tool Alfred is equipped with on this,
-        # the actual production conversation path (this function is also
-        # what scripts/serve_ui.py builds through). Backed by whatever
-        # runtime.live_info resolved to - honestly empty (NullLiveInfoProvider)
-        # unless MANAGER_LIVE_INFO_PROVIDER was deliberately configured.
-        # Phase 3 (Knowledge, Research & Live Information): "web_search" is
-        # no longer unfilled - WebSearchTool wraps this same runtime.live_info
-        # provider under the tool name general_assistance's own "research"
-        # GeneralCapability already names, so a real, governed research path
-        # exists with no new backend and no change to that capability's own
-        # routing. "code_assistant" is filled post-Pre-Stage-9 by
-        # CodeAssistantTool below (it saves written code; it never writes it).
-        #
-        # Stage 15 granted only CommunicationReadTool here - deliberately,
-        # while send/call had no confirmation gate at all, so "a Brain
-        # producing text" could never by itself become "a message actually
-        # sent." Phase 4 (Real-World Communication) built that gate
-        # (PendingConfirmation, see src/manager/guided_interaction.py) and
-        # grants Send/Call here now: every attempt still describes itself
-        # and waits for an explicit yes/no before anything with a real
-        # external effect happens, backed by whatever runtime.communication
-        # actually resolved to - honestly UNAVAILABLE (NullCommunicationProvider)
-        # unless a real provider is deliberately configured, the identical
-        # opt-in default every other real capability here already follows.
-        tools=ToolSet([
+def manager_tools(runtime, settings: Settings, config) -> ToolSet:
+    """Everything the Manager is equipped with, built from ``runtime``'s current
+    backends. One construction, used by ``build`` at start and by a live
+    backend rebind (``_apply_backends_live``) - a backend the owner switches in
+    the Control Center reaches the running Manager through the identical tools
+    a fresh start would give him, never a second assembly."""
+    bind_image_technique_values(_governed_image_values)
+    return ToolSet([
             LiveInformationTool(runtime.live_info),
             WebSearchTool(runtime.live_info),
             CommunicationReadTool(runtime.communication),
@@ -887,12 +911,107 @@ def build(settings: Settings):
             # written code saved as a versioned artifact in the coding
             # workspace. Never writes or runs code itself.
             CodeAssistantTool(runtime.artifacts, owner_agent=runtime.identity.name),
+            # Whole-ecosystem campaign: image transformation, enhancement,
+            # reconstruction and comparison - an open technique registry read
+            # from the governed config on every call, so a technique evolved in
+            # this Control Center is live at once.
+            ImageIntelligenceTool(
+                runtime.artifacts, owner_agent=runtime.identity.name, governed_values=_governed_image_values,
+            ),
             # Files/Documents completion: real visual reasoning reaches
             # Alfred through the Brain's own analyze_image question
             # (bound below via ManagerSkills, exactly like converse) -
             # never a Tool, since a Tool must never hold an LLMProvider
             # directly. Nothing to grant here.
-        ]),
+    ])
+
+
+def build(settings: Settings):
+    """Assemble the system exactly as the other entry points do.
+
+    Same composition root, same per-run documents. The Control Center observes
+    what everything else already builds rather than arranging its own version,
+    which is what keeps the screen describing the real program.
+
+    **Universal provider/connection management repair.** Before this,
+    ``build_runtime`` was called bare here - the persisted
+    ``CredentialStore`` (``data/credentials/accounts.json``, the very
+    file the ``provider <category> add/select/revoke`` command writes)
+    was never consulted by the actual running system, for any category.
+    An account added or selected through this Control Center genuinely
+    updated the file and nothing else. Fixed by loading that same store
+    once, here, and passing each category's currently-active account
+    into ``build_runtime`` exactly as ``test_phase_1_5_provider_accounts.py``
+    already exercises directly - the identical, pre-existing seam, now
+    actually reached from the real production entry point rather than
+    only from a test.
+
+    **What this does not yet do.** This makes a selection made *before*
+    this process starts take effect *at* that start - restart, not live
+    reload. Changing an account while this Control Center is already
+    running still has no effect on it; the next command still only
+    writes the file. Live, in-session activation remains a separate,
+    unimplemented gap (see the ``provider`` command's own help text).
+    """
+    accounts = load_credential_store(DEFAULT_ACCOUNTS_PATH)
+    config = load_governed_config(DEFAULT_CONFIG_PATH)
+    # Pre-Stage-9 Campaign 4: the reasoning backend the owner chose in the
+    # Control Center ("provider llm_provider use <backend>") is the one every
+    # start uses.
+    settings = governed_backend_settings(governed_reasoning_settings(settings, config), config)
+    runtime = build_runtime(
+        settings,
+        accounts=accounts,
+        video_generation_account=accounts.active(settings.video_generation),
+        video_understanding_account=accounts.active(settings.video_understanding),
+        speech_account=accounts.active(settings.speech),
+        communication_account=accounts.active(settings.communication_provider),
+        # Full Alfred OS Ecosystem Evolution: the one real, governed
+        # connection-*adapter* axis this checkpoint added - genuinely
+        # distinct from the account/credential `accounts` above already
+        # governs. Defaults to "1" (this project's own prior, unchanged
+        # behaviour) unless a real evolution selected "2".
+        connection_adapter_version=config.get(CONNECTION_GMAIL_ADAPTER, DEFAULT_GMAIL_ADAPTER_VERSION),
+    )
+
+    try:
+        profile = load_profile(settings.profile_path)
+    except ProfileError:
+        # Degrades rather than stopping, as main.py does: a Control Center that
+        # refused to open because USER.md was missing would be useless exactly
+        # when someone needs to look at why.
+        profile = None
+
+    manager = build_manager(
+        runtime,
+        mailbox=build_mailbox(settings),
+        profile=profile,
+        schedule=load_schedule(settings.schedule_path),
+        # Stage 14: the one real tool Alfred is equipped with on this,
+        # the actual production conversation path (this function is also
+        # what scripts/serve_ui.py builds through). Backed by whatever
+        # runtime.live_info resolved to - honestly empty (NullLiveInfoProvider)
+        # unless MANAGER_LIVE_INFO_PROVIDER was deliberately configured.
+        # Phase 3 (Knowledge, Research & Live Information): "web_search" is
+        # no longer unfilled - WebSearchTool wraps this same runtime.live_info
+        # provider under the tool name general_assistance's own "research"
+        # GeneralCapability already names, so a real, governed research path
+        # exists with no new backend and no change to that capability's own
+        # routing. "code_assistant" is filled post-Pre-Stage-9 by
+        # CodeAssistantTool below (it saves written code; it never writes it).
+        #
+        # Stage 15 granted only CommunicationReadTool here - deliberately,
+        # while send/call had no confirmation gate at all, so "a Brain
+        # producing text" could never by itself become "a message actually
+        # sent." Phase 4 (Real-World Communication) built that gate
+        # (PendingConfirmation, see src/manager/guided_interaction.py) and
+        # grants Send/Call here now: every attempt still describes itself
+        # and waits for an explicit yes/no before anything with a real
+        # external effect happens, backed by whatever runtime.communication
+        # actually resolved to - honestly UNAVAILABLE (NullCommunicationProvider)
+        # unless a real provider is deliberately configured, the identical
+        # opt-in default every other real capability here already follows.
+        tools=manager_tools(runtime, settings, config),
         # Control Center repair item #1: the one real enforcement point for
         # capability enable/disable. MANAGER_CAPABILITIES with every
         # genuinely-disabled entry removed, computed from the identical
@@ -924,9 +1043,14 @@ def build(settings: Settings):
         # (capability.general_conversation) - falls back to this
         # module's own, unchanged CONVERSATION_HISTORY_LIMIT default
         # when nothing was ever evolved.
-        history_limit = int(config.get(CAPABILITY_GENERAL_CONVERSATION, DEFAULT_CONVERSATION_HISTORY_LIMIT))
+        # Read on every turn, so an evolution applied in the Control Center is
+        # live in this running session, not only in the next one.
+        def _history_limit() -> int:
+            governed = load_governed_config(DEFAULT_CONFIG_PATH)
+            return int(governed.get(CAPABILITY_GENERAL_CONVERSATION, DEFAULT_CONVERSATION_HISTORY_LIMIT))
+
         manager.own_skills.bind_conversation_history(
-            lambda: [f"{u.speaker}: {u.text}" for u in conversation.latest(history_limit)]
+            lambda: [f"{u.speaker}: {u.text}" for u in conversation.latest(_history_limit())]
             if len(conversation)
             else []
         )
@@ -1374,10 +1498,10 @@ def run_provider_command(centre: "ControlCenter", rest: str) -> str:
         save_credential_store(store, DEFAULT_ACCOUNTS_PATH)
         if category == LLM_CATEGORY and backend == centre.runtime.settings.provider:
             return f"added {account.describe()} (active) - no secret is ever echoed back." + _apply_reasoning_live(centre, store)
-        return (
-            f"added {account.describe()} (active) - no secret is ever echoed back. "
-            "Persisted only - not yet active on this running process. "
-            "Type 'reload' now to make it live in this session, or restart."
+        return f"added {account.describe()} (active) - no secret is ever echoed back." + (
+            _apply_backends_live(centre) if category != LLM_CATEGORY else
+            f" Persisted - it authorises '{backend}' when that backend is chosen with "
+            f"'provider {LLM_CATEGORY} use {backend}'."
         )
 
     if action == "select":
@@ -1394,10 +1518,10 @@ def run_provider_command(centre: "ControlCenter", rest: str) -> str:
         save_credential_store(store, DEFAULT_ACCOUNTS_PATH)
         if category == LLM_CATEGORY and backend == centre.runtime.settings.provider:
             return f"{backend}/{account_id} is now active." + _apply_reasoning_live(centre, store)
-        return (
-            f"{backend}/{account_id} is now active. "
-            "Persisted only - not yet active on this running process. "
-            "Type 'reload' now to make it live in this session, or restart."
+        return f"{backend}/{account_id} is now active." + (
+            _apply_backends_live(centre) if category != LLM_CATEGORY else
+            f" Persisted - it authorises '{backend}' when that backend is chosen with "
+            f"'provider {LLM_CATEGORY} use {backend}'."
         )
 
     if action == "revoke":
@@ -1411,7 +1535,7 @@ def run_provider_command(centre: "ControlCenter", rest: str) -> str:
         save_credential_store(store, DEFAULT_ACCOUNTS_PATH)
         if category == LLM_CATEGORY and backend == centre.runtime.settings.provider:
             return f"revoked {backend}/{account_id}." + _apply_reasoning_live(centre, store)
-        return f"revoked {backend}/{account_id}"
+        return f"revoked {backend}/{account_id}." + (_apply_backends_live(centre) if category != LLM_CATEGORY else "")
 
     if action == "use":
         # Pre-Stage-9 Campaign 4: switch which backend the running system
@@ -1438,11 +1562,7 @@ def run_provider_command(centre: "ControlCenter", rest: str) -> str:
                 )
             config = load_governed_config(DEFAULT_CONFIG_PATH)
             save_governed_config(config.with_value(f"provider.{category}", backend), DEFAULT_CONFIG_PATH)
-            return (
-                f"Saved: '{category}' now uses '{backend}' - the choice every start uses. It is bound "
-                f"into tools at startup, so restart (or 'reload {field_name}={backend}' for this session) "
-                "to make it live now."
-            )
+            return f"Saved: '{category}' now uses '{backend}' - the choice every start uses." + _apply_backends_live(centre)
         previous = centre.runtime.settings.provider
         governed = governed_reasoning_settings(centre.runtime.settings, load_governed_config(DEFAULT_CONFIG_PATH))
         candidate = replace(governed, provider=backend)
@@ -1591,8 +1711,38 @@ def _gmail_connection_status(settings: Settings) -> list[str]:
     ]
     if connection.authorization != AuthorizationState.AUTHORIZED:
         lines.append("  connect with : python scripts/authorize_gmail.py")
+    else:
+        # "Authorized" only means a token file exists. What the file itself
+        # says about its access token is read here, locally - whether Google
+        # still accepts its refresh can only be learned by using it, and that
+        # is said plainly rather than implied.
+        expiry = _gmail_token_expiry(settings.gmail_token_path)
+        if expiry is not None:
+            from datetime import datetime, timezone
+
+            state = "expired" if expiry < datetime.now(timezone.utc) else "valid until"
+            lines.append(
+                f"  access token : {state} {expiry:%Y-%m-%d %H:%M} UTC - refreshed on first use; if Google refuses "
+                "the refresh, re-authorize with: python scripts/authorize_gmail.py"
+            )
     lines.append(f"  disconnect by: deleting '{settings.gmail_token_path}'")
     return lines
+
+
+def _gmail_token_expiry(token_path) -> "object | None":
+    """The access-token expiry recorded in the token file, or None - a local
+    read only, never a network call and never a credential shown."""
+    import json as _json
+    from datetime import datetime, timezone
+
+    try:
+        raw = _json.loads(Path(token_path).read_text(encoding="utf-8")).get("expiry")
+        if not raw:
+            return None
+        moment = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+    except (OSError, ValueError, AttributeError):
+        return None
 
 
 def run_connections_command(centre: "ControlCenter", rest: str) -> str:
@@ -2377,18 +2527,8 @@ def run_ecosystem_command(centre: "ControlCenter", rest: str) -> str:
                 "\nPersisted and independently re-verified. Live now: surfaces are described "
                 "from the governed config on every read, so no reload is needed."
             )
-        elif result.success and component_id.startswith("provider."):
-            detail += (
-                "\nPersisted and independently re-verified. This running process still "
-                "holds the previous object - type 'reload' to make it live in this "
-                "session, or restart."
-            )
         elif result.success:
-            detail += (
-                "\nPersisted and independently re-verified. This running process still "
-                "holds the previous state - build a fresh session (or 'reload') to make "
-                "it live."
-            )
+            detail += "\nPersisted and independently re-verified." + _apply_evolution_live(centre, component_id)
         return detail
 
     if action == "rollback":
@@ -2406,6 +2546,8 @@ def run_ecosystem_command(centre: "ControlCenter", rest: str) -> str:
         if result.success and component_id.startswith("brain."):
             # A rolled-back reasoning mode is live in this session too.
             detail += "\n" + _apply_reasoning_live(centre, load_credential_store(DEFAULT_ACCOUNTS_PATH)).lstrip()
+        elif result.success and not component_id.startswith("surface."):
+            detail += "\n" + _apply_evolution_live(centre, component_id).lstrip()
         return detail
 
     return f"unknown ecosystem action '{action}'. Try: propose, propose-content, run, rollback"
@@ -2511,7 +2653,8 @@ def classify_administrative_write(command: str) -> "tuple[bool, str]":
     if verb == "provider" and len(parts) >= 3 and parts[2].lower() in ("add", "select", "revoke", "use"):
         category, action = parts[1], parts[2].lower()
         if action == "use" and len(parts) >= 4:
-            return True, f"switch the live reasoning provider for '{category}' to '{parts[3]}'"
+            what = "the live reasoning provider" if category.lower() == LLM_CATEGORY else f"'{category}'"
+            return True, f"switch {what} to '{parts[3]}' in the running system and for every future start"
         if action == "add" and len(parts) >= 5:
             return True, (
                 f"add a new '{parts[3]}' account '{parts[4]}' to '{category}' "
@@ -2572,6 +2715,8 @@ def classify_administrative_write(command: str) -> "tuple[bool, str]":
             return False, ""
         return True, f"execute the operation '{operation_name}' on the connected site '{parts[1]}'"
 
+    if verb == "workspace" and len(parts) >= 4 and parts[1].lower() == "type":
+        return True, f"define or withdraw the workspace type '{parts[2]}'"
     if verb == "workspace" and len(parts) >= 4 and parts[2].lower() in ("add", "remove", "use"):
         return True, f"{parts[2].lower()} the '{parts[3]}' workspace for '{parts[1]}'"
 
@@ -2703,6 +2848,9 @@ def run_command(
     command = command.strip()
     if not command:
         return ""
+    # The composed door, held by the view so a backend switched below (a
+    # speech engine) reaches the channel that actually speaks.
+    centre.bind_channel(channel)
 
     verb, _, rest = command.partition(" ")
     verb, rest = verb.lower(), rest.strip()
@@ -2789,6 +2937,10 @@ def run_command(
         # Post-Pre-Stage-9: which workspace *types* each agent has, and which
         # is open, is the owner's choice here - saved in the governed config.
         parts_rest = rest.split()
+        if len(parts_rest) >= 3 and parts_rest[0].lower() == "type":
+            result = run_workspace_type_definition_command(rest.split(None, 1)[1])
+            _record_if_administrative_write(command, result, action_log_path)
+            return result
         if len(parts_rest) >= 3 and parts_rest[1].lower() in ("add", "remove", "use"):
             result = run_workspace_types_command(centre, parts_rest[0], parts_rest[1].lower(), parts_rest[2])
             # Confirmed over HTTP like every other administrative write

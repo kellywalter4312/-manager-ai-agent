@@ -41,7 +41,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 
 from src.providers.local_assistant import build_local_assistant
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from src.agents.brain_factory import (
     build_opportunity_interpreter,
@@ -722,6 +722,79 @@ def rebind_reasoning(
         runtime, settings=settings, provider=provider, router=router,
         manager_brain=manager_brain, interpreter=interpreter, specialists=specialists,
     )
+
+
+def rebind_backends(
+    runtime: Runtime,
+    manager: ManagerAgent,
+    settings: Settings,
+    *,
+    accounts: "CredentialStore | None" = None,
+    connection_adapter_version: str = "1",
+    tools: "Callable[[Runtime], ToolSet] | None" = None,
+    channel: "Channel | None" = None,
+) -> Runtime:
+    """Swap every non-reasoning backend under a running system - speech,
+    media (narration/image/video/clipping/transcription), live information,
+    communication, knowledge, celebration, calendar events, connections,
+    avatar and environment providers, document rendering, translation and the
+    local assistant - and keep everything else: the same Manager, memory,
+    conversation, sessions, recordings, presence, artifacts and identity.
+
+    The sibling of ``rebind_reasoning``, with the same **all or nothing** rule:
+    every replacement is built first through the identical factories
+    ``build_runtime`` uses, so an unknown backend or a missing credential
+    raises before one live reference is touched. Only then are the Manager's
+    own bound collaborators rebound - his tools (rebuilt by ``tools`` from the
+    new runtime, the same construction a fresh start uses), the local
+    assistant, offline translation, celebration, connections and voice
+    discovery - and the channel's speech engine. Returns the replacement
+    ``Runtime`` for whoever holds one."""
+    from dataclasses import replace as _replace
+
+    from src.providers.translation.factory import build_interpreter
+
+    def active(backend: str) -> "ProviderAccount | None":
+        return accounts.active(backend) if accounts is not None else None
+
+    media = build_media(
+        settings,
+        video_generation_account=active(settings.video_generation),
+        video_understanding_account=active(settings.video_understanding),
+    )
+    replacement = _replace(
+        runtime,
+        settings=settings,
+        speech=build_speech(settings, account=active(settings.speech)),
+        live_info=build_live_info_provider(settings),
+        media=media,
+        communication=build_communication_provider(settings, account=active(settings.communication_provider)),
+        knowledge=build_knowledge_provider(settings),
+        celebration=build_celebration_provider(settings),
+        calendar_events=build_calendar_event_provider(settings),
+        connections=build_all_connections(settings, adapter_version=connection_adapter_version),
+        avatar_provider=build_avatar_provider(settings),
+        environment_provider=build_environment_provider(settings),
+        document_renderer=build_document_rendering(settings),
+    )
+    replacement = _replace(replacement, translation=build_interpreter(settings, transcriber=media.transcriber))
+    assist = build_local_assistant(settings)
+    new_tools = tools(replacement) if tools is not None else None
+
+    skills = manager.own_skills
+    if skills is not None:
+        if new_tools is not None:
+            skills._tools = new_tools
+        skills._assist = assist
+        skills._translate = translate_for(replacement)
+        skills._celebration_provider = replacement.celebration
+        skills._connections = replacement.connections
+        discover = getattr(replacement.speech, "available_voices", None)
+        skills.bind_discover_voices(discover if discover is not None else (lambda: ()))
+    if channel is not None and hasattr(channel, "_speech"):
+        channel._speech = replacement.speech
+    logger.info("backends rebound live: %s", replacement.describe())
+    return replacement
 
 
 def build_manager(

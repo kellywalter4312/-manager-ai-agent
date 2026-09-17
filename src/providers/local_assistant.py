@@ -51,7 +51,14 @@ class LocalAssistant:
     def answer(self, question: str, *, context: "tuple[str, ...]" = ()) -> "str | None":
         notes = "\n".join(f"- {line}" for line in context if str(line).strip())
         prompt = (f"Context you may use:\n{notes}\n\n" if notes else "") + f"Question: {question.strip()}\nAnswer:"
-        return self._ask(prompt)
+        said = self._ask(prompt)
+        # A small model sometimes answers by repeating the question. That is
+        # no answer at all, and presenting it as one (found live: a clipping
+        # request echoed back, attributed, as the "answer") is worse than the
+        # honest absence the caller already reports.
+        if said is not None and _same_words(said, question):
+            return None
+        return said
 
     def summarise(self, text: str, *, focus: str = "") -> "str | None":
         body = text.strip()[:6000]
@@ -80,6 +87,14 @@ class LocalAssistant:
             return None
         text = (getattr(completion, "text", "") or "").strip()
         return text or None
+
+
+def _same_words(answer: str, question: str) -> bool:
+    def words(text: str) -> "list[str]":
+        return [w for w in "".join(ch.lower() if ch.isalnum() else " " for ch in str(text)).split()]
+
+    said, asked = words(answer), words(question)
+    return bool(asked) and (said == asked or (len(said) <= len(asked) + 2 and set(said) <= set(asked)))
 
 
 def available_local_assist_backends() -> "list[str]":

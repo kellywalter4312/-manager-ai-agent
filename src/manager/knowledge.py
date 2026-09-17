@@ -262,18 +262,39 @@ def resolve_shared_media(
     kind, when ``kinds`` is empty; otherwise the newest of those kinds).
     Returns the description even for a file with no readable text, so the
     caller can answer honestly about *that* file."""
+    found = resolve_shared_media_all(
+        query, tools=tools, history=history, shared_files=shared_files, kinds=kinds, limit=1,
+    )
+    return found[0] if found else None
+
+
+def resolve_shared_media_all(
+    query: str,
+    *,
+    tools: ToolSet,
+    history: "Callable[[], Sequence[str]] | None" = None,
+    shared_files: "Callable[[], Sequence[str]] | None" = None,
+    kinds: "Sequence[str]" = (),
+    limit: int = 2,
+) -> "list[dict]":
+    """Up to ``limit`` files a request points at, described, most relevant
+    first - the same order ``resolve_shared_media`` uses, for a request about
+    more than one ("compare these two photos")."""
     candidates: list[str] = []
     for artifact_id in artifact_ids_in([query]) + artifact_ids_in(_history_lines(history)) + _shared_ids(shared_files):
         if artifact_id not in candidates:
             candidates.append(artifact_id)
     wanted = {str(kind).lower() for kind in kinds}
+    found: "list[dict]" = []
     for artifact_id in candidates:
+        if len(found) >= limit:
+            break
         described = describe_artifact(tools, artifact_id)
         if described is None:
             continue
         if not wanted or str(described.get("content_kind", "")).lower() in wanted or str(described.get("type", "")).lower() in wanted:
-            return described
-    return None
+            found.append(described)
+    return found
 
 
 def read_artifact_content(tools: ToolSet, artifact_id: str) -> "tuple[dict, tuple[ContentUnit, ...]] | None":

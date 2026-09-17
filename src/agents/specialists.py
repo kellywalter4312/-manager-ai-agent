@@ -309,7 +309,7 @@ def build_email_specialist(context: SpecialistContext) -> BaseAgent:
         # in force for anyone who does not care.
         options["fetch_limit"] = context.fetch_limit
 
-    return EmailAgent(
+    agent = EmailAgent(
         context.mailbox,
         analyzers=[
             JobOpportunityAnalyzer(
@@ -340,6 +340,10 @@ def build_email_specialist(context: SpecialistContext) -> BaseAgent:
         celebration=context.celebration,
         **options,
     )
+    # The canonical view of the person, granted read-only - the same one
+    # Alfred reads, so a specialist asked about the person answers from it.
+    agent.bind_user_knowledge(context.user_knowledge)
+    return agent
 
 
 # Every specialist this project ships, keyed by its stable technical key.

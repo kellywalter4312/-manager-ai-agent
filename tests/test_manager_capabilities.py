@@ -256,6 +256,10 @@ class TestHandlersAreSelectedThroughTheRegistry:
             # capability for every subject - a kind of knowing, not a topic.
             # What the user is studying is personal context (Pre-Stage-9
             # Campaign 1), so there is no separate learning capability.
+            # Whole-ecosystem campaign: an image transformed, enhanced or
+            # reconstructed by a governed technique, and two images compared.
+            "image_comparison",
+            "image_transform",
             "knowledge",
             # Real Audio Recording/Capture checkpoint: lists saved
             # recordings, or answers whether one matching a topic exists -
@@ -274,6 +278,8 @@ class TestHandlersAreSelectedThroughTheRegistry:
             # statement about the same topic correctly supersedes an
             # earlier one.
             "personal_context",
+            # Whole-ecosystem campaign: personal guidance across the person's own sources.
+            "personal_guidance",
             "personal_recurring_events",
             # Pre-Stage-9 Campaign 7: reads back kept notes, schedule and
             # tasks in full, from the stores that already own them.
@@ -461,7 +467,9 @@ class TestDeclaringACapabilityDoesNotCreateOne:
         result = manager.handle_task(Task(description="plan my week"))
         assert result.status is TaskStatus.FAILED
         assert result.agent_name == "Alfred"
-        assert "reason about that" in result.error
+        # Whole-ecosystem campaign: "plan my week" is personal guidance now; with
+        # nothing to plan from it still fails honestly and invents nothing.
+        assert "nothing to plan with" in result.error
 
     def test_bare_report_and_reporting_are_no_longer_claimed_by_the_roster(self):
         """Closure campaign (2026-09-16): the identical failure mode as

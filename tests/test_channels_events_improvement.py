@@ -1006,6 +1006,9 @@ class TestTheNewLayersOwnNothing:
         allowed = {
             "__future__", "abc", "ast", "dataclasses", "datetime", "enum",
             "pathlib", "typing", "uuid", "src",
+            # channel.py writes a reply to the console safely (sys.stdout's
+            # own encoding) - standard library, like the rest.
+            "sys",
         }
         for package in NEW_PACKAGES:
             for path in sorted((REPO_ROOT / package).rglob("*.py")):

@@ -218,6 +218,17 @@ def exchange(
         # request for anybody to answer.
         speaking_to = conversation.participant(inferred) if inferred else None
         to_agent = inferred if speaking_to is not None and speaking_to.kind.is_agent else None
+        if to_agent is None and inferred is None:
+            # "Arthur, who are you?" names a registered agent who has not
+            # joined the room yet. The words address him exactly as the
+            # page's agent selector would - so he is joined and asked, never
+            # answered for by someone else. The Manager addressed by name is
+            # already in the room and needs nothing here.
+            named = _opening_agent_name(channel, request)
+            if named is not None:
+                to_agent = named
+                if not conversation.has(to_agent):
+                    conversation.join(Participant(to_agent, ParticipantKind.AGENT))
 
     conversation.say(
         Utterance(speaker=person, text=request, addressed=to_agent or inferred)
@@ -300,6 +311,31 @@ def exchange(
         )
 
     return turn
+
+
+# "Arthur, ...", "hey Arthur: ...", "OK Research Agent, ..." - a name opening
+# the utterance, followed by a comma or colon. Which names are agents is the
+# registry's answer, never a list here.
+_OPENING_ADDRESS = re.compile(
+    r"^\s*(?:(?:hey|hi|hello|ok(?:ay)?|yo)\s*,?\s+)?(?P<name>[A-Za-z][\w'\-]*(?:\s+[A-Za-z][\w'\-]*){0,2}?)\s*[,:]\s*\S"
+)
+
+
+def _opening_agent_name(channel: Channel, request: str) -> "str | None":
+    """The registered specialist an utterance opens by addressing, or None.
+    The Manager himself is excluded - he answers every unaddressed request
+    already."""
+    match = _OPENING_ADDRESS.match(str(request or ""))
+    if match is None:
+        return None
+    wanted = " ".join(match.group("name").split()).lower()
+    manager_self = getattr(channel.manager, "own_skills", None)
+    for agent in channel.manager.registry.all_agents():
+        if agent is manager_self:
+            continue
+        if str(getattr(agent, "name", "")).lower() == wanted:
+            return agent.name
+    return None
 
 
 # A request that continues past the note ("... and tell me what you think")

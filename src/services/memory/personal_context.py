@@ -490,21 +490,40 @@ def extract_possessive_declaration(text: str) -> "PersonalContextCandidate | Non
         return None
     if extract_declared_facts(working) or relational_birthday_intent(working):
         return None
+    working = _ANOTHER_OF_MINE.sub(lambda match: f"my other {match.group('noun')} is", working, count=1)
     match = _POSSESSIVE_DECLARATION.search(working)
     if match is None:
         return None
     topic = _reject_if_stopword(match.group("topic"))
     if topic is None:
         return None
+    # "My OTHER goal is X", "also, my goal is X", "my goal is ALSO X" add a
+    # second one beside the first rather than replacing it. The added
+    # statement gets its own topic (the kind plus what it is), so neither
+    # supersedes the other - grammar, never a list of things people have
+    # several of.
+    additive = bool(
+        _ADDITIVE_TOPIC.match(topic) or re.match(r"^\s*(?:and\s+)?also\b", str(text or ""), re.IGNORECASE)
+        or re.search(r"\b(?:is|are)\s+also\b", working, re.IGNORECASE)
+    )
+    if additive:
+        topic = _ADDITIVE_TOPIC.sub("", topic).strip() or topic
     value = strip_trailing_filler(_clean_topic(match.group("value")))
     value = re.sub(r"^(?:now|currently|actually|really|in\s+fact)\s+", "", value, flags=re.IGNORECASE).strip()
     if not value or len(value) > 200:
         return None
+    value = re.sub(r"^also\s+", "", value, flags=re.IGNORECASE).strip()
     verb = (match.group("verb") or "is").lower()
     linking = "are" if verb.startswith("are") or verb.startswith("have") else "is"
     if "changed" in verb or verb.endswith("now"):
         linking = f"{linking} now"
-    topic = _bounded(topic)
+    base_topic = _bounded(topic)
+    topic = _bounded(f"{topic}: {value}") if additive else base_topic
+    if additive:
+        return PersonalContextCandidate(
+            topic=topic, content=f"The user's {base_topic} {linking} also {_third_person(value)}.",
+            category="context", status=STATUS_CURRENT, value=value, broad=True,
+        )
     return PersonalContextCandidate(
         topic=topic,
         content=f"The user's {topic} {linking} {_third_person(value)}.",
@@ -513,6 +532,16 @@ def extract_possessive_declaration(text: str) -> "PersonalContextCandidate | Non
         value=value,
         broad=True,
     )
+
+
+_ADDITIVE_TOPIC = re.compile(r"^(?:other|another|second|third|next|extra|additional)\s+", re.IGNORECASE)
+# "Another goal of mine is X", "one more goal is X" - the same additive
+# statement, said without "my".
+_ANOTHER_OF_MINE = re.compile(
+    r"^(?:(?:and|also)\s*,?\s*)?(?:another|one\s+more|a\s+second)\s+(?P<noun>[a-z][\w'\-]*(?:\s+[a-z][\w'\-]*){0,2}?)"
+    r"(?:\s+of\s+mine)?\s+is\b",
+    re.IGNORECASE,
+)
 
 
 def extract_discontinued(text: str) -> "PersonalContextCandidate | None":
@@ -661,6 +690,36 @@ def _third_person_verb(verb: str) -> str:
 _IRREGULAR_THIRD_PERSON = {"have": "has", "be": "is", "go": "goes", "do": "does"}
 
 
+# A full stop that ends an abbreviation, an initial or sits inside a number is
+# not the end of a sentence. Every shape above stops at the first "." - so "I
+# work as a nurse at St. Mary's hospital" was learned as "a nurse at St." and
+# "my GPA is 3.8" as "3". The words are grammar (titles, street and company
+# abbreviations, Latin shorthand) - never a subject - and the stop is only
+# hidden while a shape is matched, then put back exactly as said.
+_ABBREVIATION_STOP = re.compile(
+    r"\b(?:Mr|Mrs|Ms|Mx|Dr|Prof|Rev|Hon|Gen|Col|Capt|Lt|Sgt|Cpl|Fr|Sr|Jr|St|Mt|Ft|Ave|Rd|Blvd|Ln|Hwy|"
+    r"Co|Corp|Inc|Ltd|Dept|Univ|No|Nos|vs|etc|approx|est|e\.g|i\.e|a\.m|p\.m)\.(?=\s*\S)"
+    r"|\b[A-Z]\.(?=\s*[A-Z])"
+    r"|(?<=\d)\.(?=\d)",
+)
+_HIDDEN_STOP = "\ue000"
+
+
+def _hide_non_final_stops(text: str) -> str:
+    return _ABBREVIATION_STOP.sub(lambda match: match.group(0)[:-1] + _HIDDEN_STOP, str(text or ""))
+
+
+def _restore_stops(candidate: "PersonalContextCandidate") -> "PersonalContextCandidate":
+    def put_back(value: str) -> str:
+        return str(value).replace(_HIDDEN_STOP, ".")
+
+    return PersonalContextCandidate(
+        topic=put_back(candidate.topic), content=put_back(candidate.content), category=candidate.category,
+        status=candidate.status, value=put_back(candidate.value), activity=put_back(candidate.activity),
+        broad=candidate.broad,
+    )
+
+
 def extract_personal_context_candidate(text: str) -> "PersonalContextCandidate | None":
     """Every deterministic shape this module recognises, tried in order:
     discontinuation first (a "no longer/changed" statement should never be
@@ -676,9 +735,9 @@ def extract_personal_context_candidate(text: str) -> "PersonalContextCandidate |
         # is the general case they are special cases of.
         extract_habitual_statement,
     ):
-        candidate = extractor(text)
+        candidate = extractor(_hide_non_final_stops(text))
         if candidate is not None:
-            return candidate
+            return _restore_stops(candidate)
     return None
 
 
@@ -765,6 +824,44 @@ def _legacy_learning_record(raw: MemoryRecord) -> "PersonalContextRecord | None"
     )
 
 
+# "(remember that) my passport expires in March 2028" - a note about one of
+# the person's own things. The thing is its topic, so a later note about the
+# same thing supersedes it and a question naming it finds it. The verb is any
+# verb-shaped word after a short noun phrase; nothing here knows what a
+# passport is.
+_OWNED_THING = re.compile(
+    _LEAD_IN
+    + r"my\s+(?P<topic>[a-z0-9][\w'\-]*(?:\s+[a-z0-9][\w'\-]*){0,3}?)\s+"
+    r"(?P<verb>is|are|was|were|will|has|have|had|can|must|should|[a-z]+(?:s|ed))\s+(?P<rest>[^!?]+)",
+    re.IGNORECASE,
+)
+
+
+def extract_remembered_note(text: str) -> "PersonalContextCandidate | None":
+    """A free note the person asked to be kept, as one canonical statement:
+    about one of their own things when it names one ("my passport expires in
+    March 2028" -> topic "passport"), otherwise under its own words, so it is
+    recalled, superseded and forgotten exactly like every other fact."""
+    working = _hide_non_final_stops(strip_vocative_address(str(text or "")).strip().rstrip(" .!"))
+    if not working:
+        return None
+    match = _OWNED_THING.match(working)
+    if match is not None and _reject_if_stopword(match.group("topic")):
+        topic = _bounded(_clean_topic(match.group("topic")))
+        rest = _clean_topic(match.group("rest"))
+        candidate = PersonalContextCandidate(
+            topic=topic, content=f"The user's {topic} {match.group('verb').lower()} {_third_person(rest)}.",
+            category="note", status=STATUS_CURRENT,
+        )
+    else:
+        candidate = PersonalContextCandidate(
+            topic=_bounded(_clean_topic(working)),
+            content=f"The user asked me to remember: {_third_person(_clean_topic(working))}.",
+            category="note", status=STATUS_CURRENT,
+        )
+    return _restore_stops(candidate)
+
+
 def _legacy_user_context_record(raw: MemoryRecord) -> "PersonalContextRecord | None":
     ctx = raw.context or {}
     fact_type = str(ctx.get("fact_type") or "")
@@ -776,7 +873,12 @@ def _legacy_user_context_record(raw: MemoryRecord) -> "PersonalContextRecord | N
         )
     if fact_type:
         return None
-    candidate = extract_possessive_declaration(raw.content) or extract_learning_activity(raw.content)
+    candidate = (
+        extract_possessive_declaration(raw.content) or extract_learning_activity(raw.content)
+        # Every other note the person asked to be kept is still their own
+        # material - found, recalled and forgotten through this one view.
+        or extract_remembered_note(raw.content)
+    )
     if candidate is None:
         return None
     return PersonalContextRecord(
@@ -975,6 +1077,7 @@ def describe_for_user(record: PersonalContextRecord) -> str:
         (r"^The user has\b", "You've"),
         (r"^The user was\b", "You were"),
         (r"^The user attends\b", "You attend"),
+        (r"^The user asked me to remember:", "You asked me to remember:"),
         # A habitual statement is stored in the third person ("The user goes
         # to the gym"), and the person is addressed in the second ("you go").
         # Without the agreement, the answer read "you goes to the gym".
@@ -986,5 +1089,10 @@ def describe_for_user(record: PersonalContextRecord) -> str:
     )
     for pattern, replacement in replacements:
         text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+    if getattr(record, "category", "") in ("situation", "note"):
+        # The person's own words, stored about them ("they must move"), said
+        # back to them: "you must move".
+        text = re.sub(r"\bthey\b", "you", text)
+        text = re.sub(r"\bthemselves\b", "yourself", text)
     text = text[:1].upper() + text[1:]
     return text if text.endswith((".", "!", "?")) else text + "."

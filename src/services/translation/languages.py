@@ -82,6 +82,32 @@ LANGUAGES: tuple[Language, ...] = (
 
 _BY_CODE = {language.code: language for language in LANGUAGES}
 _BY_NAME = {name: language for language in LANGUAGES for name in (language.code, *language.names)}
+# Languages learned from what is actually installed (a translation pack's own
+# metadata names its languages) - so installing a pack for a language this
+# table has never heard of makes it nameable and translatable with no code.
+_DISCOVERED: "list[Language]" = []
+
+
+def register_language(code: object, name: object = "") -> "Language | None":
+    """Make a language known by its code and name, when nothing knows it yet.
+    The table above only adds richer data (other names, a locale, local voices,
+    common words); it is never the list of what can be translated."""
+    key = str(code or "").strip().lower()
+    if not key:
+        return None
+    if key in _BY_CODE:
+        return _BY_CODE[key]
+    label = " ".join(str(name or "").split()) or key
+    language = Language(key, label, (label.lower(), key), key)
+    _DISCOVERED.append(language)
+    _BY_CODE[key] = language
+    for spoken in language.names:
+        _BY_NAME.setdefault(spoken, language)
+    return language
+
+
+def all_languages() -> "tuple[Language, ...]":
+    return LANGUAGES + tuple(_DISCOVERED)
 
 _HAN = re.compile(r"[一-鿿]")
 _KANA = re.compile(r"[぀-ヿ]")

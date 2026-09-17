@@ -431,10 +431,22 @@ class TestReadingAndVoice:
         turn = _say(system, "Read this PDF to me")
         assert not turn.succeeded and "don't have a document" in turn.outcome
 
-    def test_half_brain_reasoning_refuses_but_offers_to_read(self, tmp_path):
+    def test_half_brain_reads_the_words_rather_than_refusing(self, tmp_path):
+        # Whole-ecosystem campaign: Half Brain must be genuinely useful. With
+        # nothing to reason with, "what does this PDF say" is answered with the
+        # document's own words, said to be exactly that - never a refusal while
+        # the answer is sitting in the file.
         system = _system(tmp_path)
         _upload(system, TIMETABLE)
         turn = _say(system, "What does this PDF say?")
+        assert turn.succeeded, turn.outcome
+        assert "here are its own words" in turn.outcome
+        assert "Physics lab in Lab 3" in turn.outcome
+
+    def test_half_brain_still_refuses_to_interpret(self, tmp_path):
+        system = _system(tmp_path)
+        _upload(system, TIMETABLE)
+        turn = _say(system, "Why is this PDF important?")
         assert not turn.succeeded
         assert "read it to you word for word" in turn.outcome
 

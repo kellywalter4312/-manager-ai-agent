@@ -30,7 +30,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
-from src.services.translation.languages import LANGUAGES, Language, guess_language, language_by_code, language_named
+from src.services.translation.languages import LANGUAGES, Language, all_languages, guess_language, language_by_code, language_named
 
 ENABLE_TRANSLATION = "in the Control Center: provider translation_provider use argos"
 ENABLE_LISTENING = "in the Control Center: provider video_understanding_provider use local_whisper"
@@ -116,7 +116,7 @@ class Interpreter:
                     "translatable": language.code in codes,
                     "speakable": bool(self._voice is not None and self._voice.can_speak(language)),
                 }
-                for language in LANGUAGES
+                for language in all_languages()
             ],
         }
 
@@ -129,7 +129,7 @@ class Interpreter:
         return language
 
     def _installed_names(self) -> str:
-        names = sorted(language.name for language in LANGUAGES if language.code in self._translatable_codes())
+        names = sorted(language.name for language in all_languages() if language.code in self._translatable_codes())
         return ", ".join(names) or "none"
 
     def _require(self, source: Language, target: Language) -> None:

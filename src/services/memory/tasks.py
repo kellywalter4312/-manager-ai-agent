@@ -425,10 +425,45 @@ def match_tasks_by_topic(
     exact = tuple(r for r in candidates if r.content.strip().lower() == topic_lower)
     if exact:
         return exact
-    return tuple(
+    contained = tuple(
         r for r in candidates
         if topic_lower in r.content.lower() or r.content.lower() in topic_lower
     )
+    if contained:
+        return contained
+    # "I finished renewing my car insurance" names "renew my car insurance"
+    # in another form of the same words. Every word of one, compared by stem,
+    # must be in the other - never a shared word or two - so "water the
+    # plants" and "write the report" still never match each other.
+    wanted = _task_stems(topic_lower)
+    if not wanted:
+        return ()
+    return tuple(
+        r for r in candidates
+        if (have := _task_stems(r.content)) and (wanted <= have or have <= wanted)
+    )
+
+
+_TASK_FILLER = frozenset({
+    "a", "an", "the", "my", "to", "of", "for", "and", "on", "in", "at", "with", "up", "it", "this", "that", "task",
+})
+
+
+def _task_stems(text: str) -> "frozenset[str]":
+    """Content words of a task title, reduced to a shared stem - "renewing"
+    and "renew", "reports" and "report", "studies" and "study"."""
+    stems = set()
+    for word in re.findall(r"[a-z0-9']+", str(text or "").lower()):
+        if word in _TASK_FILLER:
+            continue
+        for suffix, keep in (("ies", "y"), ("ing", ""), ("ed", ""), ("es", ""), ("s", "")):
+            if word.endswith(suffix) and len(word) - len(suffix) >= 3:
+                word = word[: -len(suffix)] + keep
+                break
+        if len(word) > 3 and word[-1] == "e":
+            word = word[:-1]
+        stems.add(word)
+    return frozenset(stems)
 
 
 def describe_task(record: MemoryRecord) -> str:

@@ -130,8 +130,16 @@ class TestCorrectionProductionPath:
         assert turn.succeeded
         assert "corrected" in turn.outcome.lower()
 
-        after = manager.memory.recall("favorite color", limit=10)
-        assert len(after) == 1, "must replace, never accumulate a contradictory second record"
+        # One current truth - and the corrected statement kept as history
+        # (whole-ecosystem campaign: "replace old information while preserving
+        # history"), never two contradictory *current* statements.
+        from src.services.memory.personal_context import all_current_personal_context, personal_context_history
+
+        current = [item for item in all_current_personal_context(recall=manager.memory.recall) if "color" in item.topic]
+        assert len(current) == 1 and "green" in current[0].content and "blue" not in current[0].content
+        history = personal_context_history(current[0].topic, recall=manager.memory.recall)
+        assert any("blue" in item.content for item in history), "the corrected statement is kept as history"
+        after = [current[0]]
         assert "green" in after[0].content
         assert "blue" not in after[0].content
 
@@ -145,9 +153,11 @@ class TestCorrectionProductionPath:
         )
         assert turn.succeeded
 
-        everything = manager.memory.recall(limit=20)
+        from src.services.memory.personal_context import all_current_personal_context
+
+        everything = all_current_personal_context(recall=manager.memory.recall)
         contents = [r.content for r in everything]
-        assert len(everything) == 2, "the old color record must be gone, not merely superseded alongside it"
+        assert len(everything) == 2, "one current statement per topic: the old color is history, not current"
         assert any("purple" in c for c in contents)
         assert not any("blue" in c for c in contents)
         assert any("pizza" in c for c in contents), "an unrelated memory must survive untouched"

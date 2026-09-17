@@ -159,13 +159,17 @@ from src.services.memory.personal_context import (
     STATUS_CURRENT,
     STATUS_DISCONTINUED,
     all_current_personal_context,
+    _meaningful_stems,
     build_personal_context_record,
+    current_personal_context_for,
     describe_for_user,
     extract_personal_context_candidate,
     extract_personal_context_query,
+    extract_remembered_note,
     is_question_or_request as _is_question_or_request_statement,
     match_personal_context,
     normalize_topic_key,
+    personal_context_history,
     personal_context_query_intent,
 )
 from src.services.memory.query import STOPWORDS as _QUERY_STOPWORDS
@@ -1639,8 +1643,69 @@ def _reordered_subject(text: str, *, nouns: tuple[str, ...]) -> "str | None":
     return subject or None
 
 
+# "Forget my passport expiry", "please forget about my old address", "stop
+# remembering my gym times", "delete what you know about my ex", "erase my
+# dentist from your memory". Anchored at the start, so "I always forget my
+# keys" and "don't forget to call mum" (a reminder) are never a request to
+# forget anything.
+_FORGET_REQUEST = re.compile(
+    r"^(?:(?:ok(?:ay)?|and|also|actually|now)\s*,?\s*)?(?:please\s+|can\s+you\s+|could\s+you\s+)?"
+    r"(?:forget|stop\s+remembering|delete|erase|remove)\s+"
+    r"(?:(?:about|what\s+(?:you\s+know|i\s+(?:said|told\s+you))\s+about|everything\s+about)\s+)?"
+    r"(?P<subject>(?:my|the|that|this)\b[^?!]*?)"
+    r"(?:\s+from\s+(?:your\s+)?memory)?\s*[.!]*$",
+    re.IGNORECASE,
+)
+_FORGET_NOT_MEMORY = re.compile(r"\b(?:task|reminder|file|document|artifact|recording|appointment|calendar|message|email)s?\b", re.IGNORECASE)
+
+
+def _forget_subject(text: str) -> str:
+    working = _strip_vocative(text).strip()
+    match = _FORGET_REQUEST.match(working)
+    if match is None or _FORGET_NOT_MEMORY.search(match.group("subject")):
+        return ""
+    return match.group("subject").strip()
+
+
 def forget_intent(task: Task, participants: Sequence[str] = ()) -> bool:
-    return _marker_present(task.description, FORGET_MARKERS)
+    return _marker_present(task.description, FORGET_MARKERS) or bool(_forget_subject(task.description))
+
+
+def _forget_canonical_topic(request: CapabilityRequest, subject: str) -> "TaskResult | None":
+    try:
+        items = [item for item in all_current_personal_context(recall=request.recall, limit=200)]
+    except Exception as exc:  # noqa: BLE001 - an unreadable store falls back to the plain path
+        logger.warning("could not read personal context to forget: %s", exc)
+        return None
+    wanted = _meaningful_stems(subject)
+    if not wanted or not items:
+        return None
+    scored = sorted(
+        ((len(wanted & _meaningful_stems(f"{item.topic} {item.content}")), item) for item in items),
+        key=lambda pair: -pair[0],
+    )
+    best = scored[0][0]
+    if best == 0:
+        return None
+    # Every topic the words name best - never one that merely shares a
+    # weaker overlap - forgotten with its whole history.
+    top = [item for score, item in scored if score == best][:5]
+    ids: "list[str]" = []
+    for item in top:
+        for record in (*personal_context_history(item.topic, recall=request.recall), item):
+            if record.record_id not in ids:
+                ids.append(record.record_id)
+    removed = sum(1 for record_id in ids if request.forget(record_id))
+    if removed < len(ids):
+        return TaskResult.failure(
+            request.task, request.own_name, f"Only {removed} of {len(ids)} record(s) could be forgotten.",
+        )
+    said = "; ".join(describe_for_user(item).rstrip(".") for item in top)
+    return TaskResult.success(
+        request.task, request.own_name,
+        f"Forgotten ({removed} record(s)): {said}.",
+        payload={"forgotten": removed},
+    )
 
 
 def recall_memory_intent(task: Task, participants: Sequence[str] = ()) -> bool:
@@ -1658,12 +1723,20 @@ def forget_this(request: CapabilityRequest) -> TaskResult:
             "I don't have a way to forget things right now.",
         )
 
-    topic = _after_marker(request.task.description, FORGET_MARKERS)
+    topic = _after_marker(request.task.description, FORGET_MARKERS) or _forget_subject(request.task.description)
     if not topic:
         return TaskResult.failure(
             request.task, request.own_name,
             "Forget what, exactly? Try 'forget that ...'.",
         )
+
+    # The canonical view first: the one topic the words name best is
+    # forgotten entirely - its current statement and its history - and
+    # nothing that merely shares a common word with it. Two equally good
+    # matches are asked about, never guessed between.
+    canonical = _forget_canonical_topic(request, topic)
+    if canonical is not None:
+        return canonical
 
     matches = request.recall(topic, limit=5)
     if not matches:
@@ -1870,10 +1943,10 @@ def _canonical_for_topic(items: "Sequence[Any]", topic: str) -> "Any | None":
 def _replace_canonical(
     request: CapabilityRequest, existing: "Any", candidate: PersonalContextCandidate, *, reply: str, payload: dict,
 ) -> TaskResult:
-    """Write the corrected statement under the existing topic's own key, then
-    remove only the statement that was wrong - retain first, so a refused
-    replacement never destroys what it was meant to replace. Earlier history
-    for the topic (a schedule that genuinely changed before) is untouched."""
+    """Write the corrected statement under the existing topic's own key. The
+    statement that was wrong is kept as history, never deleted: the newest
+    statement for a key is the current truth, and the old one stays
+    answerable as what was said before (marked by ``corrects``)."""
     corrected = PersonalContextCandidate(
         topic=existing.topic, content=candidate.content, category=candidate.category or existing.category,
         status=candidate.status, value=candidate.value, activity=candidate.activity,
@@ -1886,7 +1959,6 @@ def _replace_canonical(
     verdict = request.retain(record)
     if not verdict.allowed:
         return TaskResult.failure(request.task, request.own_name, f"I couldn't update that: {verdict.reason}")
-    request.forget(existing.record_id)
     return TaskResult.success(request.task, request.own_name, reply, payload=payload)
 
 
@@ -2025,6 +2097,21 @@ def _like_for_like_correction(content: str, replacement: str) -> "str | None":
     return None
 
 
+def _swap_named_value(content: str, old_value: str, replacement: str) -> str:
+    """``content`` with the named wrong value replaced by the new one, once.
+    When the replacement opens with a word already standing before the old
+    value ("on Thursdays" for "... on Tuesdays"), only the rest is swapped in."""
+    body = str(content or "")
+    old = " ".join(str(old_value or "").split())
+    new = " ".join(str(replacement or "").split()).strip(" .!?")
+    if not body or not old or not new:
+        return body
+    lead, _sep, rest = new.partition(" ")
+    if rest and re.search(rf"\b{re.escape(lead)}\s+{re.escape(old)}\b", body, re.IGNORECASE):
+        new = rest
+    return re.sub(rf"\b{re.escape(old)}\b", lambda _m: new, body, count=1, flags=re.IGNORECASE)
+
+
 def _narrowed_topic(topic: str, replacement: str) -> "str | None":
     """The stored topic with the same like-for-like swap applied, so the topic
     key follows the statement rather than drifting from it."""
@@ -2063,6 +2150,40 @@ def _apply_to_option(
             payload={**payload, "action": "corrected"},
         )
 
+    # "Actually, it's on Thursdays, not Tuesdays": the wrong value was named,
+    # and it is in the stored statement - so exactly that value is swapped and
+    # everything else said stays ("learning Spanish on Tuesdays" becomes
+    # "learning Spanish on Thursdays", never "learning on Thursdays"). A
+    # leading word the replacement shares with the statement ("on") is not
+    # doubled.
+    # A free note ("remember that I am working on Project Beacon") corrected
+    # stays a note under the same topic - the replacement as said, or the
+    # named wrong value swapped - never "the user's <whole sentence> is ...".
+    if getattr(source, "category", "") == "note":
+        if statement.old_value and _mentions(source.content, statement.old_value):
+            content = _swap_named_value(source.content, statement.old_value, replacement)
+        else:
+            restated = extract_remembered_note(replacement)
+            content = restated.content if restated is not None else replacement
+        corrected = PersonalContextCandidate(topic=source.topic, content=content, category="note")
+        return _replace_canonical(
+            request, source, corrected, reply=f"Got it - I've corrected that. {describe_for_user(corrected)}",
+            payload={**payload, "action": "corrected"},
+        )
+
+    if statement.old_value and _mentions(source.content, statement.old_value):
+        swapped = _swap_named_value(source.content, statement.old_value, replacement)
+        if swapped != source.content:
+            corrected = PersonalContextCandidate(
+                topic=source.topic, content=swapped, category=source.category,
+                value=_swap_named_value(source.value, statement.old_value, replacement) if source.value else "",
+                activity=source.activity,
+            )
+            return _replace_canonical(
+                request, source, corrected, reply=f"Got it - I've corrected that. {describe_for_user(corrected)}",
+                payload={**payload, "action": "corrected"},
+            )
+
     if source.value:
         corrected = PersonalContextCandidate(
             topic=source.topic, content=f"The user's {source.topic} is {replacement}.",
@@ -2084,9 +2205,10 @@ def _apply_to_option(
     # guess about the subject.
     narrowed = _like_for_like_correction(source.content, replacement)
     if narrowed is not None:
+        # The topic key stays the statement's own, so the corrected statement
+        # supersedes the wrong one and the wrong one is kept as history.
         corrected = PersonalContextCandidate(
-            topic=_narrowed_topic(source.topic, replacement) or source.topic,
-            content=narrowed, category=source.category, activity=source.activity,
+            topic=source.topic, content=narrowed, category=source.category, activity=source.activity,
         )
         record = build_personal_context_record(corrected, agent_name=request.own_name)
         record = MemoryRecord(
@@ -2096,7 +2218,6 @@ def _apply_to_option(
         verdict = request.retain(record)
         if not verdict.allowed:
             return TaskResult.failure(request.task, request.own_name, f"I couldn't update that: {verdict.reason}")
-        request.forget(source.record_id)
         return TaskResult.success(
             request.task, request.own_name, f"Got it - I've corrected that. {describe_for_user(corrected)}",
             payload={**payload, "action": "corrected"},
@@ -3982,7 +4103,11 @@ _CLIP_VIDEO_MARKERS: tuple[str, ...] = (
 # evidence check in clip_video_intent itself is unchanged.
 _CLIP_VIDEO_VERB_NOUN_PATTERN = re.compile(
     r"\b(?:clip|cut|trim|extract)\b[\s\S]*\b(?:video|footage)\b"
-    r"|\b(?:video|footage)\b[\s\S]*\b(?:clip|cut|trim|extract)\b",
+    r"|\b(?:video|footage)\b[\s\S]*\b(?:clip|cut|trim|extract)\b"
+    # "Give me the part of the video between 2 and 6 seconds" - a piece of
+    # the video asked for by name; the time-range evidence check below still
+    # has to hold, so "the best part of the video was the ending" never is.
+    r"|\b(?:part|section|segment|bit|portion|excerpt|piece)\s+of\s+(?:this|that|the|my)\s+(?:video|footage)\b",
     re.IGNORECASE,
 )
 
@@ -6739,6 +6864,11 @@ def knowledge_intent(task: Task, participants: Sequence[str] = ()) -> bool:
     # question about what the document says.
     if revise_artifact_intent(task, participants) or document_conversion_intent(text):
         return False
+    # "Translate this document into French" asks for the document's words in
+    # another language - translate's own request shape (it resolves the
+    # document itself), never a question about what the document means.
+    if translate_intent(task, participants):
+        return False
     return True
 
 
@@ -6850,6 +6980,67 @@ def _knowledge_with_local_assist(request: CapabilityRequest, evidence: Knowledge
     )
 
 
+# "Summarize this", "give me the gist", "what are the key points", "outline it".
+_SUMMARY_SHAPE = re.compile(
+    r"\b(?:summar(?:y|ies|i[sz]e|i[sz]ing)|gist|key\s+points|main\s+points|outline|overview|tl;?dr|recap|highlights)\b",
+    re.IGNORECASE,
+)
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9\"'(])")
+_DOCUMENT_NOTE = re.compile(r"^From the document '(?P<title>[^']*)'[^:]*:\s*(?P<text>.*)$", re.DOTALL)
+
+
+def extractive_outline(text: str, *, limit: int = 5) -> "tuple[str, ...]":
+    """The sentences of ``text`` whose words recur most across it, in their
+    original order - an extract, never new prose. Deterministic: the same text
+    always gives the same sentences, so it is honest in Half Brain."""
+    sentences = [s.strip() for s in _SENTENCE_END.split(" ".join(str(text or "").split())) if len(s.strip()) > 12]
+    if len(sentences) <= limit:
+        return tuple(sentences)
+    frequency: "dict[str, int]" = {}
+    for sentence in sentences:
+        for word in tokenize(sentence) - _QUERY_STOPWORDS:
+            frequency[word] = frequency.get(word, 0) + 1
+    scored = []
+    for position, sentence in enumerate(sentences):
+        words = tokenize(sentence) - _QUERY_STOPWORDS
+        score = sum(frequency.get(word, 0) for word in words) / (len(words) ** 0.5 or 1.0)
+        scored.append((score, position))
+    chosen = sorted(position for _score, position in sorted(scored, reverse=True)[:limit])
+    return tuple(sentences[position] for position in chosen)
+
+
+def _extract_of_supplied_content(
+    request: CapabilityRequest, evidence: KnowledgeEvidence, why: str,
+) -> "TaskResult | None":
+    """"Summarize this document" with nothing to reason with: the document's
+    most central sentences, quoted in order and labelled as an extract - never
+    passed off as a summary somebody wrote."""
+    if "supplied_content" not in evidence.sources or not _SUMMARY_SHAPE.search(request.task.description):
+        return None
+    titles: "list[str]" = []
+    body: "list[str]" = []
+    for note in evidence.notes:
+        match = _DOCUMENT_NOTE.match(note)
+        if match is None:
+            continue
+        if match.group("title") not in titles:
+            titles.append(match.group("title"))
+        body.append(match.group("text"))
+    outline = extractive_outline(" ".join(body))
+    if not outline:
+        return None
+    named = ", ".join(f"'{title}'" for title in titles) or "the document"
+    lines = "\n".join(f"  - {sentence}" for sentence in outline)
+    return TaskResult.success(
+        request.task, request.own_name,
+        (
+            f"The central sentences of {named}, word for word and in order - an extract I picked by how "
+            f"often their words recur, not a summary written by a model ({why}):\n{lines}"
+        ),
+        payload={"handled_by": "knowledge_inquiry", "reasoning": "none - extractive outline", "sentences": len(outline)},
+    )
+
+
 def _knowledge_without_reasoning(
     request: CapabilityRequest, evidence: KnowledgeEvidence, why: str
 ) -> TaskResult:
@@ -6876,6 +7067,19 @@ def _knowledge_without_reasoning(
     quoted = quoted_from_own_material(request, evidence, why, handled_by="knowledge_inquiry")
     if quoted is not None:
         return quoted
+    extract = _extract_of_supplied_content(request, evidence, why)
+    if extract is not None:
+        return extract
+    # "What does this PDF say?" with nothing to reason with: the document's own
+    # words, read - never a refusal while the answer is sitting right there.
+    if "supplied_content" in evidence.sources and _WHAT_DOES_IT_SAY.search(request.task.description):
+        read = read_content(request)
+        if read.succeeded:
+            return TaskResult.success(
+                request.task, request.own_name,
+                f"No model can summarise it for me ({why}), so here are its own words.\n\n{read.output}",
+                payload={**dict(read.payload or {}), "handled_by": "knowledge_inquiry", "reasoning": "none - read verbatim"},
+            )
     # REPAIR-01: when the evidence includes a document the person pointed
     # at, the one thing Half Brain *can* do with it is read it word for
     # word - say so, rather than leaving only a refusal.
@@ -7086,6 +7290,18 @@ def read_content_intent(task: Task, participants: Sequence[str] = ()) -> bool:
         # dropped into open_conversation and told no model was configured.
         return _marker_present(text, _READ_ALOUD_MARKERS) or names_specific_content(text)
     return bool(_IMAGE_TEXT_READ.search(lowered))
+
+
+# "What does this file say?", "what's in this document?", "what is written in
+# the PDF?" - asking to hear the words themselves, with no question about
+# them. Deterministic reading answers it with or without a model.
+_WHAT_DOES_IT_SAY = re.compile(
+    r"^\s*(?:so\s*,?\s+|and\s+|ok(?:ay)?\s*,?\s+)?(?:what\s+(?:does|do)\s+(?:this|that|the|my|it)"
+    r"(?:\s+(?:file|document|pdf|doc|text|note|notes|letter|book|article|handout|page|attachment|upload))?\s+say"
+    r"|what(?:'s|\s+is)\s+(?:written\s+)?in\s+(?:this|that|the|my)\s+(?:file|document|pdf|doc|attachment|upload))"
+    r"\s*[?.!]*\s*$",
+    re.IGNORECASE,
+)
 
 
 def read_content(request: CapabilityRequest) -> TaskResult:
@@ -7326,8 +7542,13 @@ _RUTHLESS_WORDS = ("ruthless", "brutal", "tough", "strict", "harsh", "harder", "
 
 
 def coach_intent(task: Task, participants: Sequence[str] = ()) -> bool:
+    from src.services.memory.coaching import parse_non_negotiables, progress_report_shape, review_intent
+
     text = str(task.description or "")
-    return bool(_COACH_ASK.search(text) or _COACH_STYLE.search(text))
+    return bool(
+        _COACH_ASK.search(text) or _COACH_STYLE.search(text)
+        or parse_non_negotiables(text) or review_intent(text) or progress_report_shape(text)
+    )
 
 
 def _requested_style(text: str) -> "str | None":
@@ -7346,6 +7567,215 @@ def _days_open(record, today) -> int:
     except (AttributeError, TypeError):
         return 0
 
+# ---------------------------------------------------------------------------
+# Whole-ecosystem campaign: the coach's weekly loop - non-negotiables, what was
+# actually done, an honest graded review with the two lowest areas named, and
+# a recurring review reminder - all in the canonical personal-context store.
+# ---------------------------------------------------------------------------
+
+
+def _personal_records(request: CapabilityRequest) -> "tuple":
+    try:
+        return all_current_personal_context(recall=request.recall, limit=600)
+    except Exception as exc:  # noqa: BLE001 - an unreadable store coaches from nothing, honestly
+        logger.warning("could not read personal context for coaching: %s", exc)
+        return ()
+
+
+def _retain_candidate(request: CapabilityRequest, candidate: PersonalContextCandidate) -> bool:
+    if request.retain is None:
+        return False
+    return request.retain(build_personal_context_record(candidate, agent_name=request.own_name)).allowed
+
+
+def _pending_tasks(request: CapabilityRequest) -> "list":
+    try:
+        return list(request.recall(kind=MemoryCategory.TASK.value, tags={"task:pending"}, limit=300))
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _due_of(record) -> "datetime | None":
+    due = (record.context or {}).get("due_at")
+    if not due:
+        return None
+    try:
+        return datetime.fromisoformat(str(due))
+    except ValueError:
+        return None
+
+
+def _schedule_review_reminder(request: CapabilityRequest, now) -> "datetime | None":
+    """Keep exactly one pending weekly-review reminder ahead of now - completing
+    any that have come due - so the review recurs through the same proactive
+    reminder path every other reminder already reaches the person by."""
+    from src.services.memory.coaching import REVIEW_REMINDER_TITLE, next_review_moment
+
+    if request.retain is None or request.forget is None:
+        return None
+    upcoming = None
+    for record in _pending_tasks(request):
+        if record.content != REVIEW_REMINDER_TITLE:
+            continue
+        due = _due_of(record)
+        if due is not None and due > now:
+            upcoming = due if upcoming is None or due < upcoming else upcoming
+            continue
+        if request.forget(record.id):
+            request.retain(dataclass_replace(
+                record, tags={"task", "task:complete", "reminder"},
+                context={**(record.context or {}), "status": "complete"},
+            ))
+    if upcoming is not None:
+        return upcoming
+    moment = next_review_moment(now)
+    made = build_task_record("", agent_name=request.own_name, reminder=(REVIEW_REMINDER_TITLE, moment))
+    return moment if made is not None and request.retain(made).allowed else None
+
+
+def _set_non_negotiables(request: CapabilityRequest, commitments, now, style: str) -> TaskResult:
+    from src.services.memory.coaching import commitment_candidate
+
+    kept = [c for c in commitments if _retain_candidate(request, commitment_candidate(c))]
+    if not kept:
+        return TaskResult.failure(request.task, request.own_name, "I couldn't record those non-negotiables.")
+    review_at = _schedule_review_reminder(request, now)
+    listed = "; ".join(c.describe for c in kept)
+    when = f" I'll review your week every Sunday at 18:00 - the first on {review_at:%A %d %B}." if review_at else ""
+    hold = (
+        "No excuses accepted - report what you actually did, and I'll grade it." if style == "ruthless"
+        else "Tell me what you actually do as the week goes (\"this week I exercised twice\") and I'll grade it honestly."
+    )
+    return TaskResult.success(
+        request.task, request.own_name,
+        f"Your weekly non-negotiables: {listed}.{when} {hold}",
+        payload={"handled_by": "coach", "action": "non_negotiables", "count": len(kept)},
+    )
+
+
+def _record_progress(request: CapabilityRequest, commitments, today, style: str) -> "TaskResult | None":
+    from src.services.memory.coaching import AT_MOST, grade, parse_progress, progress_candidate, week_id
+
+    reported = parse_progress(request.task.description, commitments)
+    if not reported:
+        return None
+    week = week_id(today)
+    lines = []
+    for commitment in commitments:
+        if commitment.area not in reported:
+            continue
+        count = reported[commitment.area]
+        _retain_candidate(request, progress_candidate(week, commitment.area, count))
+        scored = grade(commitment, count)
+        if commitment.kind == AT_MOST:
+            state = "within the limit" if count <= commitment.target else f"{count - commitment.target} over your limit"
+        else:
+            state = "done" if count >= commitment.target else f"{commitment.target - count} still to do"
+        lines.append(f"- {commitment.area}: {count} ({state}, {scored.score:.0f}/10 so far)")
+    missing = [c.area for c in commitments if c.area not in reported]
+    if missing:
+        lines.append(
+            ("Nothing reported for: " if style != "ruthless" else "You said nothing about: ")
+            + ", ".join(missing) + (" - silence counts as zero." if style == "ruthless" else ".")
+        )
+    return TaskResult.success(
+        request.task, request.own_name, f"Logged for {week}:\n" + "\n".join(lines),
+        payload={"handled_by": "coach", "action": "progress", "areas": sorted(reported)},
+    )
+
+
+_CORRECTIVE = {
+    "ruthless": {
+        "short": "You committed to {target} and did {done}. That is {gap} you chose to skip. Book {gap} session(s) into next week's calendar tonight - specific day, specific time - or drop the commitment honestly.",
+        "over": "Your limit was {target}; you went to {done}. The decision happens before the moment - remove the option before temptation, don't negotiate with it.",
+        "silent": "You reported nothing. No report is no progress - report it or admit it didn't happen.",
+    },
+    "direct": {
+        "short": "{done} of {target}. Put {gap} session(s) on specific days next week and tell me when each is done.",
+        "over": "{done} against a limit of {target}. Decide in advance how you'll avoid it next time.",
+        "silent": "Nothing reported - tell me what actually happened so this can be graded.",
+    },
+    "gentle": {
+        "short": "{done} of {target} - a start. Could you pick {gap} specific time(s) next week for it?",
+        "over": "{done} against a limit of {target}. What made it hard, and what would make next week easier?",
+        "silent": "I haven't heard how this went - how did it actually go?",
+    },
+}
+
+
+def _weekly_review(request: CapabilityRequest, records, commitments, now, today, style: str) -> TaskResult:
+    from src.services.memory.coaching import (
+        AT_MOST, AreaGrade, grade, previous_scores, progress_for_week, review_candidate, week_id,
+    )
+
+    week = week_id(today)
+    done = progress_for_week(records, week)
+    grades = [grade(c, done.get(c.area)) for c in commitments]
+    pending = _pending_tasks(request)
+    missed = [r for r in pending if (_due_of(r) is not None and _due_of(r) < now and r.content != "weekly review with your coach")]
+    stale = [r for r in pending if not (r.context or {}).get("due_at") and _days_open(r, today) >= 7]
+    if missed or stale:
+        grades.append(AreaGrade(
+            "following through on tasks", max(0.0, 10.0 - 2.5 * (len(missed) + len(stale))),
+            f"{len(missed)} missed reminder(s), {len(stale)} task(s) open a week or more",
+        ))
+    if not grades:
+        return TaskResult.success(
+            request.task, request.own_name,
+            "There's nothing to review yet - set your weekly non-negotiables first "
+            "(\"my weekly non-negotiables are: exercise 4 times, read 3 times, no takeaway\").",
+            payload={"handled_by": "coach", "action": "review", "areas": 0},
+        )
+    previous = previous_scores(records, week)
+    lines = [f"Weekly review, {week} ({style}):"]
+    for scored in grades:
+        was = previous.get(scored.area)
+        trend = f"; last week {was:.1f}" if was is not None else ""
+        lines.append(f"- {scored.area}: {scored.score:.1f}/10 ({scored.letter}) - {scored.detail}{trend}")
+    average = sum(g.score for g in grades) / len(grades)
+    lines.append(f"Overall: {average:.1f}/10.")
+    lowest = sorted(grades, key=lambda g: g.score)[:2]
+    lines.append("Your two lowest areas: " + " and ".join(f"{g.area} ({g.score:.1f})" for g in lowest) + ".")
+    words = _CORRECTIVE.get(style, _CORRECTIVE["direct"])
+    by_area = {c.area: c for c in commitments}
+    for scored in lowest:
+        commitment = by_area.get(scored.area)
+        if commitment is None:
+            lines.append(f"- {scored.area}: clear the missed and stale items first - finish them or delete them honestly.")
+            continue
+        count = done.get(commitment.area)
+        if count is None:
+            advice = words["silent"]
+        elif commitment.kind == AT_MOST:
+            advice = words["over"]
+        else:
+            advice = words["short"]
+        lines.append("- " + commitment.area + ": " + advice.format(
+            target=commitment.target, done=count if count is not None else 0,
+            gap=max(0, commitment.target - (count or 0)),
+        ))
+    goals = [item for item in records if item.status == STATUS_CURRENT and item.category not in ("commitment", "progress", "review") and _GOAL_TOPIC.search(item.topic)]
+    from src.services.memory.coaching import stems as _coach_stems
+
+    tracked = set().union(*(_coach_stems(c.area) for c in commitments)) if commitments else set()
+    tracked |= set().union(*(_coach_stems(r.content) for r in pending)) if pending else set()
+    for goal in goals[:5]:
+        if not (_coach_stems(goal.value or goal.content) & tracked):
+            lines.append(f"Nothing you track this week visibly moves your goal: {describe_for_user(goal).rstrip('.')}.")
+    if style == "ruthless" and average < 7:
+        lines.append("That is not a good week. Don't explain it - fix the two lowest areas first.")
+    _retain_candidate(request, review_candidate(week, grades))
+    next_review = _schedule_review_reminder(request, now)
+    if next_review is not None:
+        lines.append(f"Next review: {next_review:%A %d %B, %H:%M}.")
+    return TaskResult.success(
+        request.task, request.own_name, "\n".join(lines),
+        payload={
+            "handled_by": "coach", "action": "review", "week": week, "average": round(average, 1),
+            "lowest": [g.area for g in lowest], "scores": {g.area: round(g.score, 1) for g in grades},
+        },
+    )
+
 
 def coach(request: CapabilityRequest) -> TaskResult:
     """Coach the person from the facts Alfred keeps, in their chosen style."""
@@ -7362,6 +7792,24 @@ def coach(request: CapabilityRequest) -> TaskResult:
     if style_record is not None:
         stored = f"{style_record.value} {style_record.content}".lower()
         style = "ruthless" if any(word in stored for word in _RUTHLESS_WORDS) else ("gentle" if "gentle" in stored else "direct")
+
+    from src.services.memory.coaching import commitments_from, parse_non_negotiables, progress_report_shape, review_intent
+
+    stated = parse_non_negotiables(text)
+    if stated:
+        return _set_non_negotiables(request, stated, now, style)
+    records = _personal_records(request)
+    commitments = commitments_from(records)
+    if progress_report_shape(text) and not review_intent(text):
+        logged = _record_progress(request, commitments, today, style) if commitments else None
+        if logged is not None:
+            return logged
+        if not (_COACH_ASK.search(text) or _COACH_STYLE.search(text)):
+            # An ordinary statement about the person's life, not a report
+            # against anything they committed to - learned as one.
+            return personal_context(request)
+    if review_intent(text):
+        return _weekly_review(request, records, commitments, now, today, style)
 
     requested = _requested_style(text)
     changed_style = ""
@@ -7580,6 +8028,346 @@ TRANSLATE = ManagerCapability(
         "honest when no language model is available."
     ),
     claims=translate_intent,
+    scoreable=False,
+)
+
+
+# ---------------------------------------------------------------------------
+# Whole-ecosystem campaign: image intelligence beyond describing - one image
+# transformed, enhanced or reconstructed by an open, governed set of
+# techniques, and two images compared by measurement. Both work in Half Brain.
+# ---------------------------------------------------------------------------
+
+_IMAGE_NOUN = re.compile(r"\b(?:image|images|photo|photos|photograph|picture|pictures|pic|pics|screenshot|selfie|scan)\b", re.IGNORECASE)
+# "an image of a cat", "a picture of the sea" names something to generate.
+_IMAGE_OF_SUBJECT = re.compile(r"\b(?:an?|some)\s+(?:new\s+)?(?:image|photo|picture|pic|drawing)\s+of\b", re.IGNORECASE)
+IMAGE_TOOL = "image_intelligence"
+
+
+def image_transform_intent(task: Task, participants: Sequence[str] = ()) -> bool:
+    from src.providers.media.image_techniques import current_techniques, technique_for_request
+
+    text = str(task.description or "")
+    if not _IMAGE_NOUN.search(text) or _IMAGE_OF_SUBJECT.search(text):
+        return False
+    return technique_for_request(text, current_techniques()) is not None
+
+
+def image_transform(request: CapabilityRequest) -> TaskResult:
+    """Run the technique the request names on the image it points at, saving
+    the result as a new image derived from it."""
+    if not request.tools.permits(IMAGE_TOOL):
+        return TaskResult.failure(request.task, request.own_name, "Image techniques are not installed for me right now.")
+    described, _path = _shared_media(request, ("image",))
+    if described is None:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "Which image? Share it in this conversation (or name it with 'artifact <id>') and I'll work on it.",
+        )
+    outcome = request.tools.invoke(
+        IMAGE_TOOL,
+        {"operation": "transform", "content": json.dumps({"artifact_id": described["artifact_id"], "request": request.task.description})},
+    )
+    if not outcome.ok:
+        return TaskResult.failure(request.task, request.own_name, f"I couldn't do that to the image: {outcome.error}")
+    made = json.loads(outcome.output)
+    return TaskResult.success(
+        request.task, request.own_name,
+        (
+            f"Artifact created: id={made['artifact_id']} type=image title={made['title']!r} png={made['rendition']} - "
+            f"{made['label']}: {made['detail']}. {made['width']}x{made['height']}. "
+            f"Your original (artifact {made['source_id']}) is unchanged."
+        ),
+        payload={"handled_by": "image_transform", "technique": made["technique"], "purpose": made["purpose"],
+                 "artifact_id": made["artifact_id"], "source_id": made["source_id"]},
+    )
+
+
+_COMPARE_ASK = re.compile(
+    r"\b(?:compare|comparison|difference|differences|differ|different|same|match|matches|identical|changed)\b",
+    re.IGNORECASE,
+)
+_TWO_IMAGES = re.compile(
+    r"\b(?:these|those|both|two|2)\b|\breference\b|\boriginal\b|\bprevious\b|\bother\b|\bthe\s+first\b",
+    re.IGNORECASE,
+)
+
+
+def image_comparison_intent(task: Task, participants: Sequence[str] = ()) -> bool:
+    text = str(task.description or "")
+    return bool(_IMAGE_NOUN.search(text) and _COMPARE_ASK.search(text) and _TWO_IMAGES.search(text))
+
+
+def image_comparison(request: CapabilityRequest) -> TaskResult:
+    """Compare the two images a request points at - the newest shared image
+    against the one before it, or against the one called the reference."""
+    from src.manager.knowledge import resolve_shared_media_all
+
+    if not request.tools.permits(IMAGE_TOOL):
+        return TaskResult.failure(request.task, request.own_name, "Image comparison is not installed for me right now.")
+    images = resolve_shared_media_all(
+        request.task.description, tools=request.tools, history=request.history,
+        shared_files=request.shared_files, kinds=("image",), limit=6,
+    )
+    if len(images) < 2:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "I need two images to compare - share both in this conversation (or name them with 'artifact <id>').",
+        )
+    newest = images[0]
+    if re.search(r"\breference\b", request.task.description, re.IGNORECASE):
+        other = next((image for image in images[1:] if "reference" in str(image.get("title", "")).lower()), images[1])
+    else:
+        other = images[1]
+    outcome = request.tools.invoke(
+        IMAGE_TOOL, {"operation": "compare", "content": json.dumps({"first": other["artifact_id"], "second": newest["artifact_id"]})},
+    )
+    if not outcome.ok:
+        return TaskResult.failure(request.task, request.own_name, f"I couldn't compare them: {outcome.error}")
+    compared = json.loads(outcome.output)
+    return TaskResult.success(
+        request.task, request.own_name, compared["text"],
+        payload={"handled_by": "image_comparison", "verdict": compared["verdict"], "hash_distance": compared["hash_distance"]},
+    )
+
+
+IMAGE_TRANSFORM = ManagerCapability(
+    name="image_transform",
+    capabilities=frozenset({"image_transform"}),
+    handle=image_transform,
+    description=(
+        "Transforms, enhances or reconstructs a real image (black and white, sharpen, denoise, enhance, upscale, "
+        "deblur by deconvolution, or any technique added through Ecosystem Evolution) into a new derived image - "
+        "the original untouched, nothing invented in the picture."
+    ),
+    claims=image_transform_intent,
+    scoreable=False,
+)
+
+IMAGE_COMPARISON = ManagerCapability(
+    name="image_comparison",
+    capabilities=frozenset({"image_comparison"}),
+    handle=image_comparison,
+    description=(
+        "Compares two real images - identical bytes, perceptual structure, pixel difference and where they "
+        "differ - including against a reference image, by measurement rather than a guess."
+    ),
+    claims=image_comparison_intent,
+    scoreable=False,
+)
+
+# ---------------------------------------------------------------------------
+# Whole-ecosystem campaign: personal guidance - life direction, something
+# bothering the person, organising the week, what to do first, how goals and
+# commitments connect - reasoned over the person's own canonical context, with
+# a deterministic floor in Half Brain and the Brain given every source in Full.
+# ---------------------------------------------------------------------------
+
+
+def personal_guidance_intent(task: Task, participants: Sequence[str] = ()) -> bool:
+    from src.services.memory.guidance import guidance_kind
+
+    return guidance_kind(task.description) is not None
+
+
+def _guidance_sources(request: CapabilityRequest, now, today) -> dict:
+    from src.services.memory.coaching import commitments_from, progress_for_week, week_id
+    from src.services.memory.guidance import SITUATION_CATEGORY, DatedItem, OpenTask
+
+    records = _personal_records(request)
+    goals = [
+        item for item in records
+        if item.status == STATUS_CURRENT and item.category not in ("commitment", "progress", "review") and _GOAL_TOPIC.search(item.topic)
+    ]
+    situation = next((item for item in records if item.category == SITUATION_CATEGORY and item.status == STATUS_CURRENT), None)
+    commitments = commitments_from(records)
+    done = progress_for_week(records, week_id(today))
+    tasks = []
+    for record in _pending_tasks(request):
+        if record.content == "weekly review with your coach":
+            continue
+        created = getattr(record, "created_at", None)
+        tasks.append(OpenTask(title=record.content, created=created, due=_due_of(record)))
+    items = []
+    try:
+        for item in all_current_calendar_items(recall=request.recall):
+            if getattr(item, "status", "") == CALENDAR_STATUS_CANCELLED:
+                continue
+            for day in next_calendar_occurrences(item, today=today, count=7, horizon_days=7):
+                when = item.start_time.strftime("%H:%M") + " " if item.start_time is not None else ""
+                items.append(DatedItem(day=day, label=f"{when}{item.title}"))
+    except Exception as exc:  # noqa: BLE001 - a calendar that cannot be read plans without it, and says so
+        logger.warning("could not read calendar items for guidance: %s", exc)
+    other = [
+        item for item in records
+        if item.status == STATUS_CURRENT and item not in goals and item is not situation
+        and item.category not in ("commitment", "progress", "review")
+    ]
+    return {
+        "records": records, "goals": goals, "situation": situation, "commitments": commitments, "done": done,
+        "tasks": tasks, "items": items, "other": other,
+    }
+
+
+def _guidance_notes(sources: dict) -> "tuple[str, ...]":
+    notes = []
+    if sources["situation"] is not None:
+        notes.append(f"What the person is dealing with: {sources['situation'].value or sources['situation'].content}")
+    notes.extend(f"Goal: {describe_for_user(goal)}" for goal in sources["goals"][:6])
+    notes.extend(f"Weekly non-negotiable: {c.describe} (done so far: {sources['done'].get(c.area, 0)})" for c in sources["commitments"])
+    notes.extend(f"Open task: {t.title}" + (f" (due {t.due:%a %d %b %H:%M})" if t.due else "") for t in sources["tasks"][:10])
+    notes.extend(f"Calendar: {i.day:%a %d %b} {i.label}" for i in sources["items"][:14])
+    notes.extend(f"Known about them: {describe_for_user(item)}" for item in sources["other"][:8])
+    return tuple(notes)
+
+
+def personal_guidance(request: CapabilityRequest) -> TaskResult:
+    from src.services.memory.guidance import (
+        CRISIS, CRISIS_REPLY, GOALS, LIFE, PLAN, PRIORITY, SITUATION, TALK,
+        extract_situation, guidance_kind, linked_goals, plan_week, priorities,
+    )
+
+    text = request.task.description
+    kind = guidance_kind(text)
+    calendar = request.calendar if request.calendar is not None else Calendar.utc()
+    now, today = calendar.now(), calendar.today()
+    payload = {"handled_by": "personal_guidance", "kind": kind}
+
+    if kind == CRISIS:
+        return TaskResult.success(request.task, request.own_name, CRISIS_REPLY, payload=payload)
+
+    if kind == SITUATION:
+        candidate = extract_situation(text)
+        if candidate is None or not _retain_candidate(request, candidate):
+            return TaskResult.failure(request.task, request.own_name, "I couldn't keep that just now.")
+        return TaskResult.success(
+            request.task, request.own_name,
+            f"I'll keep that in mind: {candidate.value}. When you want to work through it, say "
+            "\"guide me through this\" - or tell me what you're weighing up.",
+            payload={**payload, "stored": True},
+        )
+
+    sources = _guidance_sources(request, now, today)
+    goal_texts = [goal.value or goal.content for goal in sources["goals"]]
+
+    if kind in (PLAN, PRIORITY):
+        ranked = priorities(now=now, tasks=sources["tasks"], goals=goal_texts)
+        plan = plan_week(
+            today=today, now=now, items=sources["items"], tasks=sources["tasks"],
+            commitments=sources["commitments"], done=sources["done"], goals=goal_texts,
+        )
+        if not (ranked or sources["items"] or sources["commitments"]):
+            return TaskResult.failure(
+                request.task, request.own_name,
+                "I have nothing to plan with yet - no tasks, calendar items or weekly commitments. "
+                "Tell me what's on (\"I have yoga every Wednesday at 7am\", \"add a task to ...\") and I'll lay the week out.",
+            )
+        lines = []
+        if ranked:
+            first, why = ranked[0]
+            lines.append(f"Do first: {first} - {why}.")
+            if len(ranked) > 1 and kind == PRIORITY:
+                lines.extend(f"Then: {title} - {reason}." for title, reason in ranked[1:4])
+        if kind == PRIORITY and sources["items"]:
+            fixed = sorted(sources["items"], key=lambda item: item.day)[:4]
+            lines.append("Fixed in your calendar around that: " + "; ".join(f"{i.day:%a %d %b} {i.label}" for i in fixed) + ".")
+        if kind == PLAN or not ranked:
+            lines.append("Your week, from your calendar, reminders, tasks and non-negotiables:")
+            lines.extend(f"- {line}" for line in plan)
+        floor = "\n".join(lines)
+        return _with_brain_if_available(request, sources, floor, payload, instruction=(
+            "Help the person plan their week. Use only the listed sources. Keep the fixed times fixed; be specific "
+            "about days; say which goal each block serves."
+        ))
+
+    if kind == GOALS:
+        if not sources["goals"]:
+            return TaskResult.success(
+                request.task, request.own_name,
+                "You haven't told me a goal yet, so there's nothing to connect them to. "
+                "Say \"my goal this year is ...\".", payload={**payload, "goals": 0},
+            )
+        lines = []
+        for goal in sources["goals"][:6]:
+            serving = [c.describe for c in sources["commitments"] if linked_goals(c.area, [goal.value or goal.content])]
+            serving += [t.title for t in sources["tasks"] if linked_goals(t.title, [goal.value or goal.content])]
+            said = describe_for_user(goal).rstrip(".")
+            if serving:
+                lines.append(f"- {said}: served by {', '.join(serving)}.")
+            else:
+                lines.append(f"- {said}: nothing you track shares its words - no commitment or task visibly moves it.")
+        unlinked = [c.describe for c in sources["commitments"] if not linked_goals(c.area, goal_texts)]
+        if unlinked:
+            lines.append("Commitments not tied to any stated goal by their words: " + ", ".join(unlinked) + ".")
+        floor = "How your goals and commitments connect (matched by the words they share):\n" + "\n".join(lines)
+        return _with_brain_if_available(request, sources, floor, payload, instruction=(
+            "Explain how the person's weekly commitments and tasks serve their goals, where they do not, and one "
+            "concrete change for each unsupported goal."
+        ))
+
+    # LIFE or TALK - guided reflection grounded in what is known.
+    known = []
+    if sources["situation"] is not None:
+        known.append(f"what you're dealing with: {sources['situation'].value}")
+    known.extend(describe_for_user(goal).rstrip(".") for goal in sources["goals"][:3])
+    known.extend(describe_for_user(item).rstrip(".") for item in sources["other"][:3])
+    if kind == TALK:
+        opening = "I'm listening. Take your time - what's going on?"
+        questions = (
+            "What happened, in your own words?",
+            "What part of it is weighing on you most?",
+            "Is there a decision in it, or does it just need saying out loud?",
+        )
+    else:
+        opening = "Let's work through it together, one piece at a time."
+        questions = (
+            "What would you want to be true a year from now, if nothing stopped you?",
+            "What are you doing now that you'd keep, and what would you stop?",
+            "What is one small step you could take this week - and when exactly?",
+        )
+    lines = [opening]
+    if known:
+        lines.append("What I already know that might matter: " + "; ".join(known) + ".")
+    lines.append("A few questions to start with:")
+    lines.extend(f"- {q}" for q in questions)
+    lines.append("Answer any of them and I'll keep track - say \"remember what I'm dealing with: ...\" to keep the situation itself.")
+    floor = "\n".join(lines)
+    return _with_brain_if_available(request, sources, floor, payload, instruction=(
+        "Act as a thoughtful personal guide (not a therapist or medical professional). Listen, reflect back what the "
+        "person said, use what is known about their situation and goals, and ask at most three focused questions or "
+        "propose one concrete next step."
+    ))
+
+
+def _with_brain_if_available(request: CapabilityRequest, sources: dict, floor: str, payload: dict, *, instruction: str) -> TaskResult:
+    """The deterministic answer, improved by the Brain when one can reason -
+    given every source the floor used, and the floor itself - never replaced
+    by a guess when it cannot."""
+    if request.converse is not None:
+        notes = (f"Guidance instruction: {instruction}",) + _guidance_notes(sources) + (
+            f"A deterministic draft built from those sources: {floor}",
+        )
+        decision = request.converse(request.task, notes)
+        if decision is not None and decision.is_decided and decision.reason.strip():
+            return TaskResult.success(
+                request.task, request.own_name, decision.reason.strip(),
+                payload={**payload, "brain": decision.source, "sources": len(_guidance_notes(sources))},
+            )
+    return TaskResult.success(
+        request.task, request.own_name, floor,
+        payload={**payload, "brain": "deterministic", "sources": len(_guidance_notes(sources))},
+    )
+
+
+PERSONAL_GUIDANCE = ManagerCapability(
+    name="personal_guidance",
+    capabilities=frozenset({"guidance", "plan_week"}),
+    handle=personal_guidance,
+    description=(
+        "Guides the person through what they're dealing with, their direction, their week and what to do first - "
+        "from their own situation, goals, commitments, tasks and calendar, with a safe, honest floor in Half Brain."
+    ),
+    claims=personal_guidance_intent,
     scoreable=False,
 )
 
@@ -8187,6 +8975,23 @@ def personal_context(request: CapabilityRequest) -> TaskResult:
             )
             artifact_note = f" I'll use '{document_title}' as your current {candidate.topic}."
 
+    # A new value for a topic that already had a different one replaces it -
+    # said out loud, so a person who meant "and another one" can say so.
+    superseded_note = ""
+    if candidate.status == STATUS_CURRENT and candidate.value and not attached_id:
+        try:
+            previous = current_personal_context_for(candidate.topic, recall=request.recall)
+        except Exception:  # noqa: BLE001 - a read failure only loses the note
+            previous = None
+        if (
+            previous is not None and previous.status == STATUS_CURRENT and previous.value
+            and previous.value.strip().lower() != candidate.value.strip().lower()
+        ):
+            superseded_note = (
+                f" That replaces what you told me before ({previous.value}) - I've kept that as history. "
+                f"If it's an additional one, say \"my other {candidate.topic} is ...\"."
+            )
+
     record = build_personal_context_record(candidate, agent_name=request.own_name, artifact_id=attached_id)
     verdict = request.retain(record)
     if not verdict.allowed:
@@ -8227,7 +9032,7 @@ def personal_context(request: CapabilityRequest) -> TaskResult:
         confirmation = f"Got it - I'll remember that {said_back[:1].lower()}{said_back[1:]}"
     return TaskResult.success(
         request.task, request.own_name,
-        f"{confirmation}{calendar_note}{artifact_note}",
+        f"{confirmation}{calendar_note}{artifact_note}{superseded_note}",
         payload={
             "handled_by": "personal_context",
             "topic": candidate.topic,
@@ -8811,6 +9616,10 @@ MANAGER_CAPABILITIES: dict[str, ManagerCapability] = {
     IMAGE_ANALYSIS.name: IMAGE_ANALYSIS,
     # Pre-Stage-9 Campaign 8: was this image edited or generated - evidence only.
     IMAGE_AUTHENTICITY.name: IMAGE_AUTHENTICITY,
+    # Whole-ecosystem campaign: image transformation/enhancement/reconstruction
+    # and comparison, through an open, governed technique registry.
+    IMAGE_TRANSFORM.name: IMAGE_TRANSFORM,
+    IMAGE_COMPARISON.name: IMAGE_COMPARISON,
     GENERATE_DOCUMENT.name: GENERATE_DOCUMENT,
     CREATE_ARTIFACT.name: CREATE_ARTIFACT,
     REVISE_ARTIFACT.name: REVISE_ARTIFACT,
@@ -8852,6 +9661,8 @@ MANAGER_CAPABILITIES: dict[str, ManagerCapability] = {
     READ_BACK.name: READ_BACK,
     # Pre-Stage-9 Campaign 9: Alfred's own ruthless personal coach.
     COACH.name: COACH,
+    # Whole-ecosystem campaign: personal guidance across the person's own sources.
+    PERSONAL_GUIDANCE.name: PERSONAL_GUIDANCE,
     # Pre-Stage-9 Campaign 9: translation, named and honest.
     TRANSLATE.name: TRANSLATE,
 }
@@ -8921,6 +9732,19 @@ def select_capability(
     """
     registry = MANAGER_CAPABILITIES if capabilities is None else capabilities
     tokens = tokenize(task.description)
+
+    # The one exception to "no handler outranks another", and it is safety,
+    # not preference: a message that speaks of ending one's life or self-harm
+    # is answered with care and a pointer to real help before any other
+    # reading of its words ("I don't want to live anymore" also has the shape
+    # of a changed preference, and a memory correction must never be what
+    # answers it).
+    guidance = registry.get("personal_guidance")
+    if guidance is not None:
+        from src.services.memory.guidance import crisis_signal
+
+        if crisis_signal(task.description):
+            return guidance
 
     # A handler that recognises its own request is asked first. Sorted by name
     # so the answer is total and repeatable, exactly as the scoring below is,

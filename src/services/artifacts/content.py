@@ -68,6 +68,7 @@ TEXT_CONTENT_TYPES: tuple[str, ...] = (SUPPLIED_FILE_TYPE, DOCUMENT_TYPE)
 SHARED_FILE_PREFIX = "[shared a file]"
 
 ARTIFACT_ID_PATTERN = re.compile(r"\bartifact[:\s]+([0-9a-f]{6,32})\b", re.IGNORECASE)
+_PRODUCED_ARTIFACT = re.compile(r"\bartifact\s+(?:created|revised|updated)\b[^\n]*?\bid=([0-9a-f]{6,32})\b", re.IGNORECASE)
 
 # "page 4", "section 2", "slide 3", "row 10", "paragraph 5" - the unit
 # names the readers above actually produce, nothing else.
@@ -175,7 +176,12 @@ def artifact_ids_in(lines: Iterable[str]) -> tuple[str, ...]:
     that was actually shared in this conversation."""
     seen: list[str] = []
     for line in reversed(tuple(lines)):
-        for match in reversed(ARTIFACT_ID_PATTERN.findall(str(line))):
+        # An answer that produced an artifact ("Artifact created: id=... (an
+        # edited copy of artifact <original>)") names the new one first: the
+        # edited copy is "this document" from then on, not the original it
+        # was made from.
+        produced = _PRODUCED_ARTIFACT.findall(str(line))
+        for match in (*produced, *reversed(ARTIFACT_ID_PATTERN.findall(str(line)))):
             key = match.lower()
             if key not in seen:
                 seen.append(key)

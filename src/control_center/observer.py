@@ -236,6 +236,16 @@ class ControlCenter:
         except Exception:  # noqa: BLE001 - an unreadable config must not break a view
             return {}
 
+    def bind_channel(self, channel: Any) -> None:
+        """The door this view's Manager is spoken through - held so a backend
+        switched from here (a speech engine) reaches the channel that speaks,
+        not only the runtime record of it."""
+        self._channel = channel
+
+    @property
+    def channel(self) -> Any:
+        return getattr(self, "_channel", None)
+
     def rebind_runtime(self, runtime: Any) -> None:
         """Point this view at a runtime whose reasoning provider was switched
         in place (Pre-Stage-9 Campaign 4) - the Manager it observes is the

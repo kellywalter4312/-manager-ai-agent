@@ -550,7 +550,68 @@ def extract_calendar_item(
     3pm"). ``today`` is injectable, the same reason every clock in this
     project is (``day.py``'s own ``Calendar``) - a test resolving "on
     Friday" must not depend on which real day it happens to run."""
-    return _extract_recurring_add(text) or _extract_dated_add(text, today=today)
+    return (
+        _extract_recurring_add(text) or _extract_recurring_named_first(text)
+        or _extract_dated_add(text, today=today)
+    )
+
+
+# "I have yoga every Wednesday at 7am", "Yoga every Tuesday", "I go to choir on
+# Thursdays at 6pm", "add piano lessons each Monday 4-5pm to my calendar" - the
+# item named first, then the recurrence. Only "every"/"each" or a plural
+# weekday ("on Wednesdays") makes it weekly; "a dentist appointment on Friday"
+# stays the one-off dated shape below.
+_NAMED_FIRST_RECURRING = re.compile(
+    r"^\s*(?P<lead>(?:i\s+have|i've\s+got|i\s+have\s+got|there'?s|there\s+is|add(?:ing)?|schedule|put|"
+    r"i\s+(?:go\s+to|attend|do|play|take|teach|run|have\s+to\s+go\s+to))\s+)?"
+    r"(?:an?\s+|my\s+)?(?P<title>[a-z0-9][^.!?]*?)\s+"
+    r"(?P<marker>every|each|on)\s+(?P<when>[^.!?]+?)"
+    r"(?:\s+(?:to|in|on)\s+(?:my|the)\s+(?:calendar|schedule|diary))?\s*[.!]?\s*$",
+    re.IGNORECASE,
+)
+
+
+# A clause about something already said ("it's", "that is", "they're") or a
+# correction's lead ("actually", "no") is never the name of a calendar item.
+_NOT_AN_ITEM_TITLE = re.compile(
+    r"^\s*(?:actually|no|nope|well|so|but)\b|\b(?:it|that|this|they|he|she|we)(?:'s|'re|\s+is|\s+are|\s+was)\b",
+    re.IGNORECASE,
+)
+
+
+def _extract_recurring_named_first(text: str) -> "CalendarItemCandidate | None":
+    match = _NAMED_FIRST_RECURRING.match(str(text or ""))
+    if match is None:
+        return None
+    when = match.group("when")
+    found = find_weekdays(when)
+    if found is None:
+        return None
+    days, (start, end) = found
+    if when[:start].strip():
+        return None
+    plural = when[end - 1:end].lower() == "s"
+    if match.group("marker").lower() == "on" and not (plural and match.group("lead")):
+        # "on Wednesdays" is weekly only when an item was plainly introduced
+        # ("I go to choir on Thursdays"); "Actually, it's on Thursdays, not
+        # Tuesdays" is a correction, never a calendar item.
+        return None
+    if _NOT_AN_ITEM_TITLE.search(match.group("title")):
+        return None
+    after = re.sub(r"^\s*(?:at|from)\s+", "", when[end:], flags=re.IGNORECASE)
+    start_time = end_time = None
+    if after.strip():
+        timed = _match_time_range_at_start(after)
+        if timed is None or timed[2].strip(" ,.;"):
+            return None
+        start_time, end_time, _rest = timed
+    title = _clean_title(match.group("title"))
+    if not title:
+        return None
+    return CalendarItemCandidate(
+        title=_bounded(title), start_time=start_time, end_time=end_time,
+        recurrence=Recurrence(frequency=FREQUENCY_WEEKLY, days_of_week=days),
+    )
 
 
 def calendar_add_intent(text: str) -> bool:

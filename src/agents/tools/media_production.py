@@ -142,8 +142,29 @@ def parse_clip_specs(content: str) -> "list[ClipSpec]":
     capability's own docstring for why that distinction matters)."""
     return [
         ClipSpec(start_seconds=_parse_timecode(start), end_seconds=_parse_timecode(end))
-        for start, end in _TIME_RANGE_PATTERN.findall(content)
+        for start, end in _TIME_RANGE_PATTERN.findall(normalise_spoken_times(content))
     ]
+
+
+# How people say a time range out loud, rewritten to the timecodes the range
+# pattern reads: "second 1 to second 4" -> "1 to 4", "2 seconds to 5 seconds"
+# -> "2 to 5", "1 minute 20" -> "1:20", "between 2 and 6 seconds" -> "2 to 6".
+# Units and grammar only - no video, subject or phrase list.
+_MINUTES_AND_SECONDS = re.compile(
+    r"\b(\d+)\s*(?:minutes?|mins?)\s*(?:and\s+)?(\d{1,2})\s*(?:seconds?|secs?|s)?\b", re.IGNORECASE
+)
+_WHOLE_MINUTES = re.compile(r"\b(\d+)\s*(?:minutes?|mins?)\b", re.IGNORECASE)
+_SECOND_BEFORE_NUMBER = re.compile(r"\b(?:second|sec)s?\s+(\d+(?:\.\d+)?)\b", re.IGNORECASE)
+_NUMBER_BEFORE_SECONDS = re.compile(r"\b(\d+(?:\.\d+)?)\s*(?:seconds?|secs?|s)\b", re.IGNORECASE)
+_BETWEEN_AND = re.compile(r"\bbetween\s+((?:\d+:)?(?:\d+:)?\d+(?:\.\d+)?)\s+and\s+((?:\d+:)?(?:\d+:)?\d+(?:\.\d+)?)", re.IGNORECASE)
+
+
+def normalise_spoken_times(content: str) -> str:
+    text = _MINUTES_AND_SECONDS.sub(lambda m: f"{int(m.group(1))}:{int(m.group(2)):02d}", str(content or ""))
+    text = _WHOLE_MINUTES.sub(lambda m: f"{int(m.group(1))}:00", text)
+    text = _SECOND_BEFORE_NUMBER.sub(r"\1", text)
+    text = _NUMBER_BEFORE_SECONDS.sub(r"\1", text)
+    return _BETWEEN_AND.sub(r"\1 to \2", text)
 
 
 class MediaProductionTool(Tool):

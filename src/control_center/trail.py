@@ -257,7 +257,11 @@ def observe(
         succeeded=result.succeeded,
         detail=_result_detail(result),
         capability=capability,
-        brain_mode=manager_brain.mode.label,
+        # Assessed again after the work: the mode a turn reports is the one
+        # its own reasoning call just proved (or disproved). The pre-turn
+        # reading above said HALF BRAIN for the very turn a newly switched
+        # model first answered, so the label lagged the runtime by a turn.
+        brain_mode=assess_manager(manager).mode.label,
         specialist_brain_mode=specialist_mode,
         memory_recalled=recalled,
         memory_written=written,

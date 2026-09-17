@@ -317,9 +317,16 @@ class TestThisIsNotASecondRouter:
             # Pre-Stage-9 Campaign 8: an authenticity question is recognised by
             # its shape (an edited/fake/generated word about a picture, asked).
             "image_authenticity",
+            # Whole-ecosystem campaign: image comparison and transformation are
+            # recognised by shape (an image word plus a compare word, or a
+            # governed technique's own phrase) - never by "image" alone.
+            "image_comparison", "image_transform",
             "knowledge", "list_recordings", "list_tasks", "live_information",
             "media_production",
             "milestone_recognition", "participant_invitation", "personal_context",
+            # Whole-ecosystem campaign: guidance is recognised by its asking
+            # shapes (a situation, a week to plan, a life question), never a topic.
+            "personal_guidance",
             "personal_recurring_events",
             # Pre-Stage-9 Campaign 7: read-back is recognised by its reading
             # shape plus a kept collection, never by the word "read" alone.

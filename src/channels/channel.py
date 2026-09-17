@@ -37,6 +37,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
+import sys
 
 from src.channels.speech import NoSpeech, SpeechAdapter, SpeechUnavailable
 from src.control_center.trail import observe
@@ -62,6 +63,22 @@ SPOKEN_LIMIT = 400
 # speakable's own speak_in_full branch). Larger than SPOKEN_LIMIT by design;
 # still finite, so a single read-aloud turn cannot hold the voice forever.
 READ_ALOUD_SPOKEN_LIMIT = 4000
+
+
+def _show(text: str) -> None:
+    """Print a reply on this process's console without ever failing the turn.
+
+    A Windows console is often a narrow code page (cp1252/cp437): a Chinese
+    translation or an emoji cannot be encoded there, and a bare ``print`` raised
+    ``UnicodeEncodeError`` inside ``deliver`` - turning an answer that was
+    already produced into a 500 on ``POST /message``. The console copy is a
+    courtesy; the answer itself travels in the response. Characters the console
+    cannot show are replaced there, never in the reply."""
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        encoding = getattr(sys.stdout, "encoding", None) or "ascii"
+        print(str(text).encode(encoding, errors="replace").decode(encoding, errors="replace"))
 
 
 @dataclass(frozen=True)
@@ -217,7 +234,7 @@ class TextChannel(Channel):
 
     def deliver(self, response: Response) -> Response:
         """Print it. Typing never speaks, so ``spoken`` stays False."""
-        print(response.text)
+        _show(response.text)
         return response
 
 
@@ -362,7 +379,7 @@ class VoiceChannel(Channel):
         finally:
             if self._presence is not None and answered and intent is not None:
                 self._presence.clear_intent(answered)
-        print(response.text)
+        _show(response.text)
         if not spoken and self._speech.available:
             logger.warning("the speech engine accepted nothing to say")
         return replace(response, spoken=spoken)

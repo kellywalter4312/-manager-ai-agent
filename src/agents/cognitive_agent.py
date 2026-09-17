@@ -28,6 +28,7 @@ implementation - the same order the Manager followed, boundary first.
 
 from __future__ import annotations
 
+import re
 from typing import Sequence
 
 from src.agents.base_agent import BaseAgent
@@ -70,6 +71,12 @@ MEMORY_CONTEXT_LIMIT = 5
 # it, and kept importable from here because callers already reach for it.
 
 
+_ABOUT_ME = re.compile(
+    r"\bwhat\s+(?:do|else\s+do)\s+you\s+(?:know|remember)\s+about\s+me\b|\btell\s+me\s+what\s+you\s+know\s+about\s+me\b",
+    re.IGNORECASE,
+)
+
+
 class CognitiveAgent(BaseAgent):
     """A BaseAgent with its own reasoning and its own retention.
 
@@ -110,6 +117,13 @@ class CognitiveAgent(BaseAgent):
         """
         identity = getattr(self, "identity", None)
 
+        # What the person has taught, asked of any specialist: answered from
+        # the one canonical view of the person this agent is granted
+        # read-only - never a copy, never its own store - and with no model.
+        known = self.personal_context_reply(task)
+        if known is not None:
+            return known
+
         if identity_question(task.description):
             text = self_introduction(identity, self.spec.capabilities)
             if text is not None:
@@ -130,6 +144,42 @@ class CognitiveAgent(BaseAgent):
             return TaskResult.success(task, self.name, "Got it.")
 
         return None
+
+    def bind_user_knowledge(self, user_knowledge) -> None:
+        """Grant this agent the canonical, read-only view of the person
+        (``UserKnowledge``) - the same one the Manager reads."""
+        self._user_knowledge = user_knowledge
+
+    def personal_context_reply(self, task: Task) -> "TaskResult | None":
+        """"What do you know about me?", "where do I work?" - answered from the
+        granted canonical view, or None when this is not such a question or
+        no view was granted."""
+        from src.services.memory.personal_context import (
+            STATUS_CURRENT, describe_for_user, extract_personal_context_query, match_personal_context,
+        )
+
+        knowledge = getattr(self, "_user_knowledge", None)
+        if knowledge is None:
+            return None
+        text = str(task.description or "")
+        about_me = _ABOUT_ME.search(text) is not None
+        focus = extract_personal_context_query(text)
+        if focus is None and not about_me:
+            return None
+        items = tuple(knowledge.current())
+        matched = items if about_me and focus is None else match_personal_context(items, focus or "")
+        current = [item for item in matched if item.status == STATUS_CURRENT][:8]
+        if not current:
+            return TaskResult.success(
+                task, self.name, "You haven't told us anything about that yet.",
+                payload={"handled_by": "personal_context", "source": "user_knowledge", "count": 0},
+            )
+        lines = [describe_for_user(item) for item in current]
+        said = lines[0] if len(lines) == 1 else "Here's what I know:\n" + "\n".join(f"- {line}" for line in lines)
+        return TaskResult.success(
+            task, self.name, said,
+            payload={"handled_by": "personal_context", "source": "user_knowledge", "count": len(current)},
+        )
 
     # ---- this agent's own Workspace task board ----------------------------
     #
