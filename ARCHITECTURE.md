@@ -4,7 +4,10 @@
 what exists, this file wins — and where this file and the *code* disagree, the
 code wins and this file is wrong and must be corrected.
 
-Last synchronised against: `HEAD = 0bca94a` (2026-09-15), which carries
+Last synchronised against: the whole-ecosystem campaign of 2026-09-17
+(§52.49 - Control Center changes live, memory history, image intelligence,
+the weekly coach, personal guidance; 7877 tests passing, reachability 255/0/0),
+on top of `HEAD = 0bca94a` (2026-09-15), which carries
 everything the previous synchronisation line named (Phase 1 through
 Stage 11.2, §1–§47) plus the full Pre-Stage-9 closure campaign: REPAIR-01
 (§52.30) through Campaign 13 (§52.41), and the five Post-Pre-Stage-9
@@ -9942,3 +9945,186 @@ pollinations`), honoured on the next start, and then:
 | One governed lifecycle, not two | VERIFIED WORKING |
 | A live credential check reachable from the Control Center | VERIFIED WORKING (mechanism and route; no vendor contacted - the key is unfunded) |
 | AI image generation through a real vendor | VERIFIED WORKING (LIVE EXTERNAL VERIFIED, authorised by the owner) |
+
+
+### 52.49 Whole-ecosystem campaign - implement, integrate, runtime-verify, close
+
+The owner's brief: stop relying on earlier reports, inspect the running system
+against the whole requirement set, repair or build what is broken or missing
+inside the canonical architecture, and verify every result at runtime with real
+artifacts. Every check below was made against real, isolated systems -
+`scripts.serve_ui.build_live_system`, driven through `POST /message`,
+`POST /upload`, `POST /command`, `POST /translate/speech` and the recording
+routes - from a scratch working directory, so every relative `data/...` path
+(config, accounts, ledger, action log, memory, artifacts) landed outside the
+production store. Production `data/` was hashed before and after: 70 files,
+byte-identical.
+
+**Discovery, at runtime (Half Brain unless said).** The first pass found:
+
+- the Control Center saved a non-reasoning backend (`provider media use
+  local`, `translation_provider use argos`, ...) but the running Manager kept
+  the old object until a restart; a governed capability evolution said "this
+  running process still holds the previous state";
+- the turn that first proved a newly switched model was still labelled
+  HALF BRAIN (the mode was assessed only before the turn);
+- "I work as a nurse at St. Mary's hospital" was learned as "... at St.";
+- "Actually, it's on Thursdays, not Tuesdays" corrected "learning Spanish on
+  Tuesdays" into "learning on Thursdays", and every correction deleted the
+  corrected record, so no history remained;
+- "Remember that my passport expires in March 2028" was acknowledged but could
+  not be recalled, and "Forget my passport expiry" was not understood;
+- a second "my goal this year is ..." silently replaced the first;
+- "Arthur, who are you?" and "Arthur, where do I work?" were answered by
+  Alfred, and Arthur could not answer about the person without a model;
+- "What does this file say?", "Summarize this document" and "Translate this
+  document into French" were refused in Half Brain (the last was also routed to
+  knowledge instead of translation), and after an edit "this file" still meant
+  the original;
+- a Chinese translation crashed `POST /message` with a 500 - `channel.deliver`
+  printed the reply to a cp1252 console;
+- "From second 1 to second 4, make a clip of this video" and "Give me the part
+  of the video between 2 and 6 seconds" did not clip, and the local assistant
+  presented an echo of the request as its answer;
+- image transformation, enhancement, reconstruction and comparison did not
+  exist;
+- "I finished renewing my car insurance" did not complete "renew my car
+  insurance"; "I have yoga every Wednesday at 7am" was not a calendar item;
+- the coach had no weekly non-negotiables, no record of what was done, no
+  weekly review, no grades and no lowest areas; every personal-guidance request
+  ("I need help figuring out what I'm doing with my life", "Help me organize my
+  week", "Remember what I'm dealing with right now: ...") was refused, and the
+  last was misrouted to live information;
+- a new workspace type could only be created by editing the governed config by
+  hand; a newly installed translation pack's language could not be named; a new
+  reasoning backend needed an edit to the provider factory.
+
+**Repairs and implementations.**
+
+- *Live Control Center.* `composition.rebind_backends` is the sibling of
+  `rebind_reasoning`: every non-reasoning backend (speech, media, live
+  information, communication, knowledge, celebration, calendar events,
+  connections, avatar, environment, document rendering, translation, local
+  assistant) is built first through the factories a start uses, all or nothing,
+  then swapped into the live Manager's tools and bound collaborators and the
+  channel's speech engine - same conversation, memory, sessions, presence and
+  artifacts. The Manager's tool set moved into `control_center.manager_tools`
+  so a rebind and a start build the identical tools. `provider <category>
+  use/add/select/revoke` and every non-reasoning `ecosystem ... run/rollback`
+  apply live; a capability's governed value (`capability.general_conversation`)
+  and an image technique are read every turn; an identity document says plainly
+  that it is re-read by new sessions. The turn's Brain mode is now assessed after
+  the turn. Confirmation text no longer calls a translation switch a "reasoning
+  provider".
+- *Memory.* Abbreviation, initial and decimal stops are hidden while shapes are
+  matched and restored afterwards. A correction that names the wrong value swaps
+  exactly that value; a correction writes the corrected statement under the same
+  topic and keeps the wrong one as history (`corrects`), so current truth and
+  history are both real - two older tests that pinned deletion were re-pinned to
+  that requirement. Every free "remember that" note joins the canonical view with
+  a topic of its own (`extract_remembered_note`); forget accepts natural phrasing
+  and removes the best-matching topic with its history. "My other goal ...",
+  "another goal of mine is ..." and "also, my goal is ..." add a goal; a plain
+  restatement says what it replaced.
+- *Agents.* `exchange` addresses a registered specialist named at the start of
+  an utterance even before he has joined the room. Every specialist is granted
+  the canonical `UserKnowledge` and `CognitiveAgent.personal_context_reply`
+  answers "what do you know about me" from it, with no model and no copy.
+- *Documents.* With no model, "what does this file say" reads the document's
+  own words (knowledge still owns it, so a Brain receives the pages), and a
+  summary request gets an extract labelled as one - the document's most central
+  sentences in their original order (`extractive_outline`). Knowledge defers to
+  translation. An answer that produced an artifact names the new one first, so an
+  edited copy becomes "this document".
+- *Channel.* `_show` writes the console copy of a reply without ever failing the
+  turn.
+- *Media.* `normalise_spoken_times` reads "second 1 to second 4", "2 seconds to
+  5 seconds", "1 minute 20" and "between 2 and 6 seconds"; clip intent accepts
+  "the part of the video". The local assistant refuses to present an echo.
+- *Image intelligence.* `src/providers/media/image_techniques.py` is an open
+  registry: a technique is an id, a label, a purpose, the phrases people use for
+  it and one pixel operation. Built in: black and white, sharpen, remove noise,
+  enhance, upscale and deblur - Richardson-Lucy deconvolution under a Gaussian
+  blur model, reflect-padded, tuned by measurement until the restored image was
+  closer to the unblurred original than the blurred input at every tested blur
+  strength. Deconvolution is one row, not a subsystem. `compare_images` reports
+  identical bytes, perceptual-hash distance, pixel difference, where the
+  difference is and brightness - measurements, with a plain verdict.
+  `ImageIntelligenceTool` is the governed boundary (derived image artifacts,
+  originals untouched); capabilities `image_transform` and `image_comparison`
+  (against "the reference" when one is named). New techniques join through
+  Ecosystem Evolution with no redesign: `ImageTechniqueHandler` governs
+  `image_technique.<id>` - `enabled`/`disabled`, or
+  `pipeline:<step>,<step>|<label>|<phrase>;<phrase>` composing existing
+  techniques with no code - and `register_image_technique` adds a new
+  implementation in code. The inventory lists every technique.
+- *Organisation.* Task completion matches another form of the same words (by
+  stem, every word of one in the other). "<item> every/each <weekday> [at time]"
+  and "I go to <item> on <weekday>s" are weekly calendar items; a correction
+  clause ("it's", "actually") never is.
+- *Coach* (`src/services/memory/coaching.py`, handled by `coach`). Weekly
+  non-negotiables ("exercise 4 times", "no takeaway food") are canonical
+  personal-context commitments; reported progress is recorded per ISO week; the
+  weekly review grades each area arithmetically (short of an at-least target
+  proportionally, points off per time over an at-most limit, nothing reported
+  scores nothing, open tasks a week old and missed reminders become an area),
+  names the two lowest with the numbers, gives corrective feedback in the chosen
+  style (ruthless/direct/gentle), compares with last week's review, says which
+  goals nothing tracked moves, stores the review, and keeps one pending "weekly
+  review with your coach" reminder ahead so the review recurs through the
+  existing proactive reminder path.
+- *Personal guidance* (`src/services/memory/guidance.py`, capability
+  `personal_guidance`). "What I'm dealing with" is a canonical situation topic;
+  life direction and "I need to talk" are guided with what is already known and
+  focused questions; "organize my week" plans the next seven days across calendar
+  occurrences, reminders, open tasks placed on the lightest days and
+  non-negotiable sessions still to do; "what should I do first" ranks missed
+  reminders, reminders due, goal-linked tasks and the oldest; "how do my goals
+  relate to my non-negotiables" links by shared words and says honestly where
+  nothing links. With a Brain, every source and the deterministic draft are
+  handed to it. A message about ending one's life or self-harm is answered with
+  care and real crisis resources first - the one documented exception to
+  `select_capability`'s "no handler outranks another" (found live: "I don't want
+  to live anymore" had the shape of a changed preference and reached
+  `correct_memory`).
+- *Open-ended seams.* `workspace type <id> <label>|<panels>` (and `... remove`)
+  defines a workspace type from panels the page already renders.
+  `register_language` makes every language an installed translation pack names
+  nameable and translatable; the language table is enrichment, not the universe.
+  `register_provider` adds a reasoning backend with no factory edit. Gmail's
+  status shows its token's own recorded expiry, read locally.
+
+**Runtime verification (final code).** Eight audit harnesses, every one against
+real systems with real data:
+
+| Audit | Result | Evidence |
+|---|---|---|
+| Memory and learning | 11/11 | St. Mary's; Spanish on Thursdays with the Tuesday statement kept as history; passport note recalled then forgotten; two goals kept; GPA 3.8; one canonical store file; the corrected fact recalled by a *separate OS process* against the same store |
+| Documents | 15/15 | a genuine PDF (decoded by pypdf) read, quoted, extracted, translated offline into French, read aloud, edited into a derived copy that then became "this document"; a scanned image-only PDF read by OCR; DOCX, HTML (script stripped), EPUB; no memory pollution; Full Brain received the real extracted text |
+| Media and images | 9/12 | local transcription of a video; image described from real bytes by the local vision model (earlier pass, 243 s cold); authenticity evidence naming a Photoshop trace; local generation; black-and-white, sharpen and deblur artifacts; comparison. The three misses are honest refusals to clip past the end of a 2.28 s fixture - clipping is verified below |
+| Voice and translation | 23/23 | eight typed directions incl. pivot and Chinese; unknown and packless languages refused; Kokoro audio (97 KB, peak 22,873); TTS->STT round trip with local Whisper (exact) and Windows; spoken Spanish heard, translated and spoken in English, the reverse on the same pair, French->German with a device voice; a recording saved, listed and transcribed; five clip phrasings producing real MP4s of the asked durations |
+| Control Center, providers, evolution | 18/18 | a backend switch live in the running session; capability disable/enable live; credential add (secret never echoed), validate, revoke; environment choice surviving a rebuild; propose -> evaluate -> approve -> apply -> verify -> active -> rollback, double rollback refused, history; the real local model switched in live - it answered "why is the sky blue" (Rayleigh scattering) labelled LOCAL MODEL, the same conversation still knew "Amaka", and switching back returned to Half Brain on the next turn |
+| Agents and workspaces | 19/20 | Arthur answering for himself; Arthur's real inbox analysis (3 of 6); delegation; Arthur answering from the canonical view; room invitation, addressing and refusal of an unknown agent; no shadow store in Arthur's memory; workspaces and a new owner-defined type (the one "miss" is the harness expecting "now has" where every agent already has every type) |
+| Organisation, coach, guidance | 23/23 | tasks incl. "I finished renewing ..."; recurring and dated calendar items and a reschedule; a reminder fired by the heartbeat's proactive check with no page open, not repeated, persisted and present in the served snapshot; non-negotiables, logged progress, a ruthless review with takeaway food (3.0) and exercise (5.0) as the two lowest, the same review after a rebuild; guidance, week plan, first priority with the fixed calendar, situation recalled, goals linked |
+| Websites and the recurring review | 5/5 | the real salon site and a second, different local site declared with no code and read through the real Chromium backend; a natural request naming one site; the weekly-review reminder fired through the proactive path at Sunday 18:05 |
+
+A real browser (headless Chromium over CDP) rendered the served page: the 3D
+stage animates while idle (two frames differ), Alfred and Arthur show distinct
+environments, the Workspace lists the owner-defined "Research lab" type and the
+coach's review reminder on the task board, the 3D diagram draws a real WebGL
+scene (77 distinct colours), the Control Center view shows HALF BRAIN and durable
+memory, the phone layout has no horizontal overflow, and there were no console
+errors. Through the page's own HTTP door a translation switch asked for
+confirmation, applied live, and the next message answered "Grazie."
+
+**Suites.** `tests/test_whole_ecosystem_campaign.py` (34) and
+`tests/test_image_techniques_and_comparison.py` (20) pin the above. Full suite, fixed order:
+7877 passed, 0 failed. Reachability: production 255, test-only 0, unreachable
+0.
+
+**What remains outside software.** A funded vendor model (Full Brain answers
+beyond the scripted and local stand-ins), Gmail re-authorization (the token
+recorded expiry 2026-08-18; `python scripts/authorize_gmail.py`), funded
+video-generation vendors, and every physical device leg - hearing a speaker or
+headphones, a human voice on a microphone, a phone's camera and audio. Each has
+its software path verified above.
