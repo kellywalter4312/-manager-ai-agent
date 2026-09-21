@@ -2272,7 +2272,9 @@
       // another agent's named as <agent>/<screen> - through the one generic
       // screen renderer. A screen the agent does not offer says so.
       const [owner, screen] = String(arg || "").includes("/") ? String(arg).split("/") : [a.name, arg];
-      const named = agentNamed(owner) ? agentNamed(owner).name : owner;
+      // Saved panel definitions are lower-cased; agents are matched without case.
+      const found = S.agents.find(x => x.name.toLowerCase() === String(owner || "").toLowerCase());
+      const named = found ? found.name : owner;
       return `<div class="ws-panel ws-panel-surface" data-ws-surface="${esc(named + "/" + screen)}">
           ${LIVE ? surfaceBody(named, screen) : `<div class="ws-empty">${esc(screen)} - live only</div>`}</div>`;
     }

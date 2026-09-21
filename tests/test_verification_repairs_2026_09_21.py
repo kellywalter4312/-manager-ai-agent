@@ -234,3 +234,7 @@ def test_an_agent_screen_is_a_workspace_panel(system):
         WorkspaceType("bare", "Bare", "", ("surface",))
     page = (su.Path(su.__file__).resolve().parent.parent / "ui" / "index.html").read_text(encoding="utf-8")
     assert 'if(kind === "surface")' in page and "surfaceBody(named, screen)" in page
+    # saved panels are lower-cased ("surface:arthur/mailbox"); the page must
+    # still find Arthur (found by the final runtime matrix: an empty panel)
+    assert WorkspaceType("desk", "Desk", "", ("surface:Arthur/mailbox",)).panels == ("surface:arthur/mailbox",)
+    assert "x.name.toLowerCase() === String(owner" in page
