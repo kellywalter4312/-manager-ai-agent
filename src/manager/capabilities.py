@@ -4637,7 +4637,18 @@ def create_task(request: CapabilityRequest) -> TaskResult:
             request.task, request.own_name,
             "When should I remind you? Say a time - \"at 5pm\", \"tomorrow at 9\", \"in 20 minutes\".",
         )
-    record = build_task_record(request.task.description, agent_name=request.own_name, reminder=reminder)
+    description = request.task.description
+    source_note = ""
+    pointed = _TASK_FROM_CONTENT.search(description)
+    if pointed is not None:
+        # "Add a task from my design review recording for the drawings": the
+        # task is in that content, not in these words (2026-09-21: the words
+        # themselves became the task's title).
+        passage, source_note, problem = _task_passage_from_content(request, description, pointed.group("about"))
+        if problem:
+            return TaskResult.failure(request.task, request.own_name, problem)
+        description = f"Add a task: {passage}"
+    record = build_task_record(description, agent_name=request.own_name, reminder=reminder)
     if record is None:
         return TaskResult.failure(
             request.task, request.own_name, "Add a task to do what, exactly?"
@@ -4660,9 +4671,59 @@ def create_task(request: CapabilityRequest) -> TaskResult:
         )
     return TaskResult.success(
         request.task, request.own_name,
-        f"Added: {record.content}",
+        f"Added: {record.content}{source_note}",
         payload={"handled_by": "create_task", "task_id": record.id},
     )
+
+
+# "... from my <kind> [about/for/on X]" - a task that lives in content already
+# in play (a recording's transcript, a document, a file). Format nouns only.
+_TASK_FROM_CONTENT = re.compile(
+    r"\bfrom\s+(?:my|the|this|that|our)\s+(?:[a-z'-]+\s+){0,3}?"
+    r"(?:recording|voice\s+note|voice\s+memo|transcript|document|file|pdf|notes|handout)\b"
+    r"(?:\s+(?:for|about|on|regarding|covering)\s+(?P<about>[^.?!]+))?",
+    re.IGNORECASE,
+)
+
+
+def _task_passage_from_content(request: CapabilityRequest, text: str, about: "str | None") -> "tuple[str, str, str]":
+    """The one passage of the pointed-at content a task should be made from:
+    (passage, a note naming where it came from, a problem to say instead).
+    Chosen by the words the person gave for it, never guessed: no words, no
+    match, or a tie between passages is asked about rather than decided."""
+    found = resolve_content_sources(
+        text, tools=request.tools, history=request.history, limit=1, shared_files=request.shared_files,
+    )
+    if not found:
+        transcript_reason = ""
+        if recording_reference_intent(text):
+            _t, transcript_reason = recording_transcript_source(text, request.tools)
+        return "", "", "I can't find that content to take a task from" + (f": {transcript_reason}." if transcript_reason else ".")
+    payload, units = found[0]
+    title = str(payload.get("title") or "that content")
+    words = tokenize(about or "") - _QUERY_STOPWORDS
+    if not words:
+        return "", "", f"Which part of '{title}' should become the task? Say what it is about - \"...for the drawings\"."
+    # One sentence is one thing to do: passages are split into sentences, and a
+    # transcript's time heading ("0:05-0:08:") is where it was said, not what.
+    sentences = [
+        (unit.locator, sentence.strip())
+        for unit in units
+        for sentence in _SENTENCE_BREAK.split(_TIME_HEADING.sub("", unit.text))
+        if sentence.strip()
+    ]
+    scored = sorted(((len(words & tokenize(s)), -n) for n, (_loc, s) in enumerate(sentences)), reverse=True)
+    if not scored or scored[0][0] == 0:
+        return "", "", f"Nothing in '{title}' mentions {about.strip()} - which part should become the task?"
+    if len(scored) > 1 and scored[1][0] == scored[0][0]:
+        options = "; ".join(f"{sentences[-n][0]}: {sentences[-n][1][:80]}" for s, n in scored if s == scored[0][0])
+        return "", "", f"More than one part of '{title}' matches - which one? {options}"
+    locator, sentence = sentences[-scored[0][1]]
+    return sentence.rstrip("."), f" (taken from '{title}', {locator})", ""
+
+
+_SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s+|\n+")
+_TIME_HEADING = re.compile(r"^\s*\d+:\d{2}(?::\d{2})?\s*-\s*\d+:\d{2}(?::\d{2})?\s*:\s*")
 
 
 CREATE_TASK = ManagerCapability(
@@ -9163,6 +9224,7 @@ def configure_voice(request: CapabilityRequest, configuration: "Any") -> TaskRes
         facts, current=current, language=configuration.language, accent=configuration.accent,
         gender=gender if configuration.accent or configuration.language else None,
         pace=configuration.pace, current_language=current_language,
+        variant=configuration.variant, style=configuration.style,
     )
     if configuration.question:
         answer = f"Yes - I can: {plan.message}." if plan.ok else f"No. {plan.message}"
@@ -9172,12 +9234,37 @@ def configure_voice(request: CapabilityRequest, configuration: "Any") -> TaskRes
     if request.recall is None or request.retain is None or request.forget is None:
         return TaskResult.failure(request.task, request.own_name, "I don't have a way to change how I sound right now.")
     if plan.voice is not None and (current is None or plan.voice.voice_id != current.voice_id):
-        set_voice_preference(
-            agent_key, plan.voice.name, available=tuple(v.name for v in facts.voices),
-            recall=request.recall, remember=request.retain, forget=request.forget,
-        )
+        if voice_preference_for(agent_key, recall=request.recall):
+            # The person already chose a voice and is now changing how it
+            # sounds: their choice moves with their request.
+            set_voice_preference(
+                agent_key, plan.voice.name, available=tuple(v.name for v in facts.voices),
+                recall=request.recall, remember=request.retain, forget=request.forget,
+            )
+        else:
+            # The person asked for a language/accent/variant, not a voice: the
+            # voice that satisfies it is the agent's own choice - still theirs
+            # to override - never a pinned "user override" nobody made
+            # (2026-09-21: "speak English again" had locked in a voice).
+            from src.services.identity.voice_selection import VoiceSelection
+
+            chosen = _apply_voice_selection(
+                request, agent_key,
+                VoiceSelection(option=plan.voice, language_satisfied=True, accent_satisfied=True,
+                               gender_satisfied=True, reason="satisfies the requested voice settings"),
+                requested_language=plan.language, requested_accent=configuration.accent or configuration.variant,
+            )
+            if not chosen.succeeded:
+                return chosen
     if plan.language:
         set_voice_setting(agent_key, "language", plan.language, recall=request.recall, remember=request.retain, forget=request.forget)
+    if plan.language or configuration.variant:
+        # A named variety belongs to the language named with it; naming a
+        # language alone clears any earlier variety of another language.
+        set_voice_setting(agent_key, "variant", plan.variant or "", recall=request.recall,
+                          remember=request.retain, forget=request.forget)
+    if plan.style:
+        set_voice_setting(agent_key, "style", plan.style, recall=request.recall, remember=request.retain, forget=request.forget)
     if configuration.accent or (plan.voice is not None and (current is None or plan.voice.voice_id != current.voice_id)):
         # The accent asked for travels to other providers; a voice changed for
         # any other reason leaves no stale accent behind.
@@ -9188,10 +9275,23 @@ def configure_voice(request: CapabilityRequest, configuration: "Any") -> TaskRes
             agent_key, "pace", "" if plan.pace == "normal" else plan.pace,
             recall=request.recall, remember=request.retain, forget=request.forget,
         )
+    message = f"Done - from now on I'm {plan.message} ({facts.provider})."
+    if plan.language and plan.language != "english" and request.translate is None:
+        # Replies are written in English: speaking another language means
+        # translating them first. Without a translator the setting is kept,
+        # but it is not yet what is heard - said, never implied
+        # (2026-09-21: "speaking Italian" was confirmed and English was said).
+        message = (
+            f"I've set my spoken language to {plan.language.title()} ({facts.provider}), but I can't speak it yet: "
+            "my replies are written in English and no translation is enabled to put them into "
+            f"{plan.language.title()}, so until then they are said as written. Enable offline translation in the "
+            "Control Center with 'provider translation_provider use <backend>'."
+        )
     return TaskResult.success(
-        request.task, request.own_name, f"Done - from now on I'm {plan.message} ({facts.provider}).",
+        request.task, request.own_name, message,
         payload={**payload, "voice": plan.voice.name if plan.voice else None, "language": plan.language, "pace": plan.pace,
-                 "provider": facts.provider},
+                 "variant": plan.variant, "style": plan.style, "provider": facts.provider,
+                 "translated": plan.language in (None, "english") or request.translate is not None},
     )
 
 

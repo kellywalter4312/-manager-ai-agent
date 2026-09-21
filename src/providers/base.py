@@ -113,3 +113,13 @@ class LLMProvider(ABC):
 
     def __repr__(self) -> str:
         return f"<{type(self).__name__} name={self.name!r}>"
+
+
+def repeats_request(answer: str, question: str) -> bool:
+    """Whether a model's "answer" is only the request said back (the same
+    words, or the same words with a couple added) - no answer at all."""
+    def words(text: str) -> "list[str]":
+        return [w for w in "".join(ch.lower() if ch.isalnum() else " " for ch in str(text)).split()]
+
+    said, asked = words(answer), words(question)
+    return bool(asked) and (said == asked or (len(said) <= len(asked) + 2 and set(said) <= set(asked)))

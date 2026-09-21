@@ -1215,6 +1215,30 @@ def manager_tools(runtime, settings: Settings, config, agent_names=None) -> Tool
     ])
 
 
+def specialist_voice_handler(*, discover_voices, voice_facts, translate):
+    """``handler(agent, task)`` for a specialist choosing or configuring its own
+    voice: the one ``select_voice`` capability, run with that agent's own name
+    and own memory (its governed ``retain``), against the active provider's
+    voices and facts and the runtime's current translation - each read at the
+    moment of asking. Built here, in the composition root, so a specialist
+    holds only a callable and never imports the orchestrator's code."""
+    from src.manager.capabilities import CapabilityRequest, select_voice, select_voice_intent
+
+    def handle(agent, task):
+        if not select_voice_intent(task):
+            return None
+        request = CapabilityRequest(
+            task=task, identity=agent, roster=lambda: (), own_name=agent.name,
+            own_capabilities=tuple(sorted(agent.spec.capabilities)),
+            recall=agent.memory.recall, forget=agent.memory.forget, retain=agent.retain,
+            discover_voices=discover_voices, voice_facts=voice_facts,
+            translate=translate() if callable(translate) else None,
+        )
+        return select_voice(request)
+
+    return handle
+
+
 def build(settings: Settings):
     """Assemble the system exactly as the other entry points do.
 
@@ -1372,6 +1396,16 @@ def build(settings: Settings):
         # The provider that actually speaks - read through the channel, so a
         # live provider switch is what the next voice request plans against.
         manager.own_skills.bind_voice_facts(lambda: voice_facts(channel.speech))
+    # Every specialist chooses and configures its own voice through the same
+    # capability, against the same provider - read through the channel at the
+    # moment of asking, so a live provider switch is what it plans against.
+    for agent in manager.registry.all_agents():
+        if hasattr(agent, "bind_voice"):
+            agent.bind_voice(specialist_voice_handler(
+                discover_voices=lambda: tuple(getattr(channel.speech, "available_voices", lambda: ())()),
+                voice_facts=lambda: voice_facts(channel.speech),
+                translate=lambda: getattr(manager.own_skills, "_translate", None) if manager.own_skills is not None else None,
+            ))
     return (
         runtime,
         manager,
@@ -3689,7 +3723,14 @@ def run_command(
         if not voice_name:
             lines = [f"VOICE - {view.name}"]
             declared = voice_for(agent) if agent is not None else None
-            lines.append(f"  declared voice (identity): {declared.preferred_voice if declared and declared.preferred_voice else '(none declared)'}")
+            # Every voice the identity names, per provider - a name-matched
+            # engine's preferred_voice and each id-keyed provider's own id.
+            named = ([declared.preferred_voice] if declared and declared.preferred_voice else []) + [
+                f"{str(key)[: -len('_voice_id')]}: {value}"
+                for key, value in ((declared.style if declared else {}) or {}).items()
+                if str(key).endswith("_voice_id") and value
+            ]
+            lines.append(f"  declared voice (identity): {'; '.join(named) if named else '(none declared)'}")
             stored_choice = voice_preference_for(view.name, recall=memory.recall) if memory else None
             if stored_choice:
                 lines.append(f"  chosen voice: {stored_choice}")

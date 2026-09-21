@@ -6098,7 +6098,8 @@
           return;
         }
         if(i + 1 < sentences.length) next = voiceOf(agent, sentences[i + 1]);
-        setPhase("speaking", agent + " - " + clip.provider + " voice " + (clip.voice || "(provider default)"));
+        setPhase("speaking", agent + " - " + clip.provider + " voice " + (clip.voice || "(provider default)")
+          + (clip.language ? ", speaking " + clip.language : "") + (clip.note ? " (" + clip.note + ")" : ""));
         await play(clip);
       }
     }

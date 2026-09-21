@@ -117,6 +117,13 @@ class CognitiveAgent(BaseAgent):
         """
         identity = getattr(self, "identity", None)
 
+        # "Arthur, choose the voice that suits you" / "speak with a British
+        # accent": how this agent sounds, decided by the one voice capability
+        # every agent shares - never a second voice system per specialist.
+        voiced = self.voice_reply(task)
+        if voiced is not None:
+            return voiced
+
         # What the person has taught, asked of any specialist: answered from
         # the one canonical view of the person this agent is granted
         # read-only - never a copy, never its own store - and with no model.
@@ -144,6 +151,23 @@ class CognitiveAgent(BaseAgent):
             return TaskResult.success(task, self.name, "Got it.")
 
         return None
+
+    def bind_voice(self, handler) -> None:
+        """How this agent chooses and configures its own voice: a callable
+        ``handler(agent, task) -> TaskResult | None`` given by the composition
+        root, which runs the one governed voice capability with this agent's
+        own name and own memory against the active speech provider. Held as a
+        plain callable so this module never reaches the orchestrator's code -
+        the layering the specialist package keeps."""
+        self._voice_handler = handler
+
+    def voice_reply(self, task: Task) -> "TaskResult | None":
+        """This agent choosing, reselecting, releasing or configuring its own
+        voice, or None for anything else (and when no handler was given). The
+        person's explicit choice (Control Center ``voice <agent> <voice>``)
+        still wins over the agent's own, exactly as it does for the Manager."""
+        handler = getattr(self, "_voice_handler", None)
+        return handler(self, task) if callable(handler) else None
 
     def bind_user_knowledge(self, user_knowledge) -> None:
         """Grant this agent the canonical, read-only view of the person

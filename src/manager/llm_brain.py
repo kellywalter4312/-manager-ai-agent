@@ -69,6 +69,7 @@ from src.manager.brain_prompts import (
     parse_retention_or_unknown,
 )
 from src.providers.base import LLMProvider
+from src.providers.base import repeats_request
 from src.providers.availability import Availability, AvailabilityState
 from src.services.identity.personality import AgentPersonality, personality_prompt_fragment
 from src.utils.logging import get_logger, task_logger
@@ -315,6 +316,15 @@ class LLMManagerBrain(ManagerBrain):
         if completion.is_empty:
             return BrainDecision.no_view(
                 reason="the model returned no text", source=self._source(completion)
+            )
+        # A small model sometimes "answers" by repeating the request. That is
+        # no answer, and presenting it as Alfred's reply is worse than saying
+        # so (2026-09-21: the local model returned "Which of my commitments
+        # support my goals?" as its answer to exactly that question).
+        if repeats_request(completion.text, task.description):
+            return BrainDecision.no_view(
+                reason="the model repeated the request back instead of answering it",
+                source=self._source(completion),
             )
 
         return BrainDecision(

@@ -238,3 +238,56 @@ def test_an_agent_screen_is_a_workspace_panel(system):
     # still find Arthur (found by the final runtime matrix: an empty panel)
     assert WorkspaceType("desk", "Desk", "", ("surface:Arthur/mailbox",)).panels == ("surface:arthur/mailbox",)
     assert "x.name.toLowerCase() === String(owner" in page
+
+
+# ---------------------------------------------------------------------------
+# 7. capture -> action: a task taken from content, not from the request's words
+# ---------------------------------------------------------------------------
+
+def _share_text(system, name, text):
+    import base64 as _b64
+
+    su.route_upload("Alfred", name, "text/plain", _b64.b64encode(text.encode("utf-8")).decode(), "conversation", system)
+
+
+def test_a_task_from_a_document_is_the_matching_sentence(system):
+    _share_text(system, "minutes.txt", "Order new chairs for the lobby.\nRenew the parking permits before March.\n")
+    turn = _say(system, "Add a task from this document for the parking permits")
+    assert turn.outcome.startswith("Added: Renew the parking permits before March")
+    assert "taken from 'minutes.txt'" in turn.outcome
+    assert "from this document" not in turn.outcome.split("(taken")[0]
+
+
+def test_a_task_from_content_with_nothing_to_go_on_is_asked_not_invented(system):
+    _share_text(system, "minutes.txt", "Order new chairs for the lobby.\nRenew the parking permits before March.\n")
+    assert "Which part of" in _say(system, "Add a task from this document").outcome
+    assert "Nothing in" in _say(system, "Add a task from this document about the budget").outcome
+    listed = _say(system, "list my tasks").outcome
+    assert "budget" not in listed and "this document" not in listed
+
+
+# ---------------------------------------------------------------------------
+# 8. a model that repeats the request has not answered it
+# ---------------------------------------------------------------------------
+
+def test_a_repeated_request_is_no_answer_and_a_real_answer_still_is():
+    from src.manager.brain import BrainAction
+    from src.manager.llm_brain import LLMManagerBrain
+    from src.providers.base import Completion, LLMProvider
+
+    class _Says(LLMProvider):
+        def __init__(self, text):
+            self._text = text
+
+        @property
+        def name(self):
+            return "says"
+
+        def complete(self, prompt, *, system=None):
+            return Completion(text=self._text, provider="says", model="m", input_tokens=1, output_tokens=1)
+
+    question = Task(description="Which of my commitments support my goals?")
+    echoed = LLMManagerBrain(_Says("Which of my commitments support my goals?")).converse(question)
+    assert echoed.action is not BrainAction.REPORT and "repeated the request" in echoed.reason
+    answered = LLMManagerBrain(_Says("Jogging supports your cardiovascular goal.")).converse(question)
+    assert answered.action is BrainAction.REPORT

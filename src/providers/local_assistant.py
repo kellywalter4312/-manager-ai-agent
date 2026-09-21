@@ -19,6 +19,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from src.providers.base import repeats_request
+
 ATTRIBUTION = "answered by the small local model on this machine - not verified reasoning"
 VISION_ATTRIBUTION = "described by the small local vision model on this machine - not verified reasoning"
 _SYSTEM = (
@@ -56,7 +58,7 @@ class LocalAssistant:
         # no answer at all, and presenting it as one (found live: a clipping
         # request echoed back, attributed, as the "answer") is worse than the
         # honest absence the caller already reports.
-        if said is not None and _same_words(said, question):
+        if said is not None and repeats_request(said, question):
             return None
         return said
 
@@ -87,14 +89,6 @@ class LocalAssistant:
             return None
         text = (getattr(completion, "text", "") or "").strip()
         return text or None
-
-
-def _same_words(answer: str, question: str) -> bool:
-    def words(text: str) -> "list[str]":
-        return [w for w in "".join(ch.lower() if ch.isalnum() else " " for ch in str(text)).split()]
-
-    said, asked = words(answer), words(question)
-    return bool(asked) and (said == asked or (len(said) <= len(asked) + 2 and set(said) <= set(asked)))
 
 
 def available_local_assist_backends() -> "list[str]":

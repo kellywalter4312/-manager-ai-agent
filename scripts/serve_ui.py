@@ -1169,6 +1169,7 @@ def route_speech(agent: object, text: object, system: LiveSystem) -> tuple[int, 
         "pace": spoken.pace,
         "text": spoken.text,
         "synthesis_seconds": round(spoken.synthesis_seconds, 3),
+        "note": spoken.note,
         "audio_seconds": audio_seconds,
     }
     return 200, json.dumps(body).encode("utf-8"), "application/json; charset=utf-8"

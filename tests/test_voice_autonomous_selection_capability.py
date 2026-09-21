@@ -90,17 +90,45 @@ class TestExplicitOverrideTakesPrecedence:
 
 
 class TestAgentIndependence:
-    def test_arthur_has_no_select_voice_capability_at_all(self):
-        """Arthur is a structurally different agent (EmailAgent), not a
-        ManagerSkills instance - MANAGER_CAPABILITIES (and therefore
-        select_voice) never reaches it, the same independence already
-        proven for every other capability this project has added."""
+    def test_arthur_chooses_his_own_voice_into_his_own_memory(self):
+        """Updated 2026-09-21: every agent chooses its own voice (the owner's
+        requirement: "future agents must also be able to choose their own
+        voices"). Arthur is still a structurally different agent with none of
+        the Manager's capabilities; only the one shared voice capability
+        reaches him, through CognitiveAgent's conversational floor, and his
+        choice lands in his own memory - never Alfred's."""
+        from src.channels.speech import SpeechAdapter  # noqa: F401 - adapter shape only
+        from src.services.identity.voice_configuration import voice_facts
+        from src.services.identity.voice_options import VoiceOption
+
         runtime, manager, channel, conversation = real_system()
         arthur = manager.registry.get("Arthur")
-        assert arthur is not None
-        assert not hasattr(arthur, "_capabilities")
+        assert arthur is not None and not hasattr(arthur, "_capabilities")
+        voices = (
+            VoiceOption(voice_id="en-a", name="en-a", provider="scripted", language="english", locale="en-GB", gender="male"),
+            VoiceOption(voice_id="en-b", name="en-b", provider="scripted", language="english", locale="en-US", gender="female"),
+        )
+
+        class _Speaker:
+            name = "scripted"
+
+            def available_voices(self):
+                return voices
+
+        from scripts.control_center import specialist_voice_handler
+
+        arthur.bind_voice(specialist_voice_handler(discover_voices=lambda: voices,
+                                                   voice_facts=lambda: voice_facts(_Speaker()), translate=None))
         result = arthur.execute(Task(description="Arthur, find me an English voice"))
-        assert result.payload is None or result.payload.get("handled_by") != "select_voice"
+        assert result.succeeded and result.payload.get("handled_by") == "select_voice"
+        assert arthur.memory.recall(kind="user_context", tags={"voice_autonomous_choice:arthur"}, limit=5)
+        assert not manager.memory.recall(kind="user_context", tags={"voice_autonomous_choice:arthur"}, limit=5)
+        # still no route to his personal context: the person's facts are refused
+        from src.services.memory.memory import MemoryRecord
+
+        verdict = arthur.retain(MemoryRecord(content="The user lives in Lagos.", kind="user_context", tags={"x"},
+                                             context={"fact_type": "personal_context"}))
+        assert not verdict.allowed
 
     def test_alfreds_autonomous_choice_never_appears_under_arthurs_key(self):
         runtime, manager, channel, conversation = real_system()

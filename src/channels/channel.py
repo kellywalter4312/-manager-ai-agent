@@ -96,6 +96,8 @@ class SpokenAudio:
     pace: str
     text: str
     synthesis_seconds: float
+    # Why what is heard differs from what was configured, when it does.
+    note: str = ""
 
 
 @dataclass(frozen=True)
@@ -495,8 +497,13 @@ class VoiceChannel(Channel):
             )
         voice = self._voice_for_agent(agent_name)
         words = text
+        note = ""
         if voice is not None and voice.language and text:
+            requested = voice.language
             words, voice = self._in_spoken_language(text, voice)
+            if not voice.language:
+                note = f"said as written - it could not be put into {requested}"
+
         started = time.monotonic()
         audio = synthesize(words, voice)
         seconds = time.monotonic() - started
@@ -505,7 +512,7 @@ class VoiceChannel(Channel):
             voice=self._voice_in_use(voice),
             language=(voice.language if voice is not None else "") or "",
             pace=(voice.pace if voice is not None else "") or "",
-            text=words, synthesis_seconds=seconds,
+            text=words, synthesis_seconds=seconds, note=note,
         )
 
     def _voice_in_use(self, voice: VoiceProfile | None) -> str:

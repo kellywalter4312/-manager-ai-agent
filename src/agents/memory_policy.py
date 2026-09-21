@@ -121,6 +121,11 @@ MANAGER_CATEGORIES: dict[str, str] = {
     "lesson": "use domain_lesson; a specialist's lessons are about its own domain",
 }
 
+# The voice mechanism's own fact types (src/services/identity/voice_preference.py,
+# voice_configuration.py): how an agent itself sounds. Named here rather than
+# imported so the policy stays free of the identity services it judges.
+OWN_VOICE_FACT_TYPES = frozenset({"voice_preference", "voice_autonomous_choice", "voice_setting"})
+
 # Phrasings that describe a run rather than something learned from it. A
 # specialist narrating its own execution is writing a log entry, and a log
 # entry in a memory store is worse than no entry at all - it displaces the
@@ -199,6 +204,15 @@ class SpecialistMemoryPolicy(MemoryPolicy):
             )
 
         kind = record.kind
+
+        # 0. How this agent itself sounds - its own voice choice and voice
+        # settings. Stored with the voice mechanism's own record shape (kind
+        # user_context, shared with the Manager's voice facts), but a fact
+        # about the agent, never about the person: nothing of the user's
+        # personal context is admitted by this, only these fact types.
+        fact_type = (record.context or {}).get("fact_type")
+        if kind == "user_context" and fact_type in OWN_VOICE_FACT_TYPES:
+            return PolicyVerdict(allowed=True, reason=f"this agent's own {fact_type}", category=fact_type)
 
         # 1. A manager category, named so the mistake is legible.
         if kind in MANAGER_CATEGORIES:
