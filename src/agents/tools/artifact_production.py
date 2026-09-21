@@ -64,6 +64,22 @@ from src.services.artifacts.content import TEXT_CONTENT_TYPES, read_artifact_uni
 from src.services.artifacts.models import DocumentContent, ImageContent
 from src.services.artifacts.store import ArtifactError, ArtifactStore
 
+# A recording's transcript is an ordinary document derived from it, titled
+# with this prefix so "the transcript of this recording" is findable.
+TRANSCRIPT_TITLE_PREFIX = "Transcript - "
+# Words that say *that* a recording is meant, never *which* one.
+_RECORDING_REQUEST_WORDS = frozenset(
+    "recording recordings record recorded voice note memo latest last newest most recent audio video "
+    "read summarize summarise explain what does say said about made were decisions decided points "
+    "important simpler words part please could would tell from".split()
+)
+
+
+def _words(text: str) -> "set[str]":
+    import re
+
+    return set(re.findall(r"[a-z0-9]+", str(text or "").lower()))
+
 DOCUMENT_TYPE = "document"
 IMAGE_TYPE = "image"
 
@@ -124,10 +140,12 @@ class ArtifactProductionTool(Tool):
             return self._derive_document(content)
         if operation == "describe":
             return self._describe_artifact(content)
+        if operation == "find_recording":
+            return self._find_recording(content)
         raise ValueError(
             f"unknown artifact_production operation {operation!r}; expected one of: "
             "create_document, revise_document, create_image, revise_image, get, find_latest, "
-            "read_content, list_content, derive_document, describe"
+            "read_content, list_content, derive_document, describe, find_recording"
         )
 
     # ------------------------------------------------------------------
@@ -230,6 +248,44 @@ class ArtifactProductionTool(Tool):
             "renditions": dict(latest.renditions),
             "readable_units": len(read_artifact_units(artifact)),
         })
+
+    def _find_recording(self, content: str) -> str:
+        """The owned recording a request means - a saved voice recording or a
+        supplied audio/video file - and its saved transcript, if one exists.
+
+        The request's own words choose between recordings ("my interview
+        recording" is the one titled for the interview); with no word in
+        common, the newest is meant. A transcript is a document derived from
+        the recording (``related_artifact_ids``), found here rather than kept
+        in a second index."""
+        words = {w for w in _words(content) if len(w) > 3} - _RECORDING_REQUEST_WORDS
+        recordings = [
+            (position, a) for position, a in enumerate(self._store.all())
+            if a.owner_agent == self._owner_agent and (
+                a.type == "voice_recording"
+                or str(a.latest.metadata.get("content_kind", "")) in ("audio", "video")
+            )
+        ]
+        if not recordings:
+            raise ArtifactError(f"no recording exists yet for {self._owner_agent!r}")
+
+        def rank(pair):
+            position, artifact = pair
+            named = artifact.artifact_id == content.strip().lower()
+            overlap = len(words & _words(artifact.latest.title + " " + str(artifact.latest.metadata.get("purpose", ""))))
+            return (named, overlap, artifact.latest.created_at, position)
+
+        _position, chosen = max(recordings, key=rank)
+        transcripts = [
+            a for a in self._store.all()
+            if a.owner_agent == self._owner_agent and a.type in TEXT_CONTENT_TYPES
+            and chosen.artifact_id in a.latest.related_artifact_ids
+            and a.latest.title.startswith(TRANSCRIPT_TITLE_PREFIX)
+        ]
+        transcript = max(transcripts, key=lambda a: a.latest.created_at) if transcripts else None
+        described = json.loads(self._describe_artifact(chosen.artifact_id))
+        described["transcript_artifact_id"] = transcript.artifact_id if transcript is not None else ""
+        return json.dumps(described)
 
     def _read_content(self, content: str) -> str:
         """Every real text unit of one owned artifact, as JSON - a

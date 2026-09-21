@@ -267,6 +267,10 @@ class KokoroSpeechAdapter(SpeechAdapter):
         self._engine = Kokoro(self._model_path, self._voices_path)
         return self._engine
 
+    def voice_in_use(self, voice: VoiceProfile | None) -> "str | None":
+        """The Kokoro voice ``synthesize`` will actually use for ``voice``."""
+        return _voice_id_for(voice)
+
     def synthesize(self, text: str, voice: VoiceProfile | None = None) -> bytes:
         """The spoken audio for ``text`` as a complete WAV - never played.
         Raises ``SpeechUnavailable`` with a plain reason when it cannot."""

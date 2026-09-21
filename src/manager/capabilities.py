@@ -75,8 +75,10 @@ from src.manager.knowledge import (
     MODEL_KNOWLEDGE,
     gather_knowledge_evidence,
     read_artifact_content,
+    recording_transcript_source,
     resolve_content_sources,
     resolve_shared_media,
+    save_transcript,
     describe_artifact,
 )
 from src.services.artifacts.content import (
@@ -85,6 +87,7 @@ from src.services.artifacts.content import (
     content_reference_intent,
     locator_in,
     reading_selection,
+    recording_reference_intent,
     units_at,
 )
 from src.services.artifacts.ingestion import SUPPLIED_FILE_TYPE
@@ -2710,8 +2713,12 @@ LIVE_INFORMATION = ManagerCapability(
     # The marker-phrase signal above, checked first - the same "claims
     # before scoring" precedence forget/recall_memory/participant_invitation
     # already rely on, for the identical reason: a request's shape can
-    # settle what word-overlap scoring alone cannot.
-    claims=current_information_intent,
+    # settle what word-overlap scoring alone cannot. Content already in play
+    # ("read my latest recording to me") is never a question about the world
+    # right now, however "latest" it is (found at runtime 2026-09-21).
+    claims=lambda task, participants=(): (
+        current_information_intent(task, participants) and not content_reference_intent(task.description)
+    ),
 )
 
 
@@ -4149,7 +4156,7 @@ def clip_video_intent(task: Task, participants: Sequence[str] = ()) -> bool:
         return False
     if find_video_path(text) is not None:
         return True
-    return bool(parse_clip_specs(_NON_TIME_RANGES.sub(" ", text)))
+    return bool(parse_clip_specs(_without_non_time_ranges(text)))
 
 
 # A sentence that asks: an imperative opening (after an optional "please" or
@@ -4162,10 +4169,27 @@ _CLIP_REQUEST_CUE = re.compile(
     re.IGNORECASE,
 )
 # "5 to 10 miles", "between 20 and 30 people" - a range of something other than time.
+# The word after the range has to be able to name what was counted: a
+# grammatical word ("seconds 2 to 4 out of that video", "... from the video")
+# names nothing, and a range introduced by a time unit ("seconds 2 to 4") is a
+# time range whatever follows it (found at runtime 2026-09-21).
+_TIME_UNIT = r"(?:s|secs?|seconds?|mins?|minutes?|hours?|hrs?)"
 _NON_TIME_RANGES = re.compile(
-    r"\b\d+(?:\.\d+)?\s*(?:-|to|and|until|through)\s*\d+(?:\.\d+)?\s+(?!(?:s|secs?|seconds?|mins?|minutes?|hours?|hrs?)\b)[a-z]+",
+    r"\b\d+(?:\.\d+)?\s*(?:-|to|and|until|through)\s*\d+(?:\.\d+)?\s+"
+    rf"(?!(?:{_TIME_UNIT}|out|of|off|from|in|into|on|onto|at|for|to|and|or|but|so|then|as|with|please|now)\b)[a-z]+",
     re.IGNORECASE,
 )
+_AFTER_TIME_UNIT = re.compile(rf"\b{_TIME_UNIT}\s*(?:from\s+|between\s+)?$", re.IGNORECASE)
+
+
+def _without_non_time_ranges(text: str) -> str:
+    """``text`` with every range that measures something other than time
+    removed, so its numbers are never read as clip boundaries."""
+
+    def _drop(match: "re.Match[str]") -> str:
+        return match.group(0) if _AFTER_TIME_UNIT.search(text[: match.start()]) else " "
+
+    return _NON_TIME_RANGES.sub(_drop, text)
 
 
 def clip_video(request: CapabilityRequest) -> TaskResult:
@@ -6836,6 +6860,14 @@ CONVERSATION_CONTINUITY_MARKERS: tuple[str, ...] = (
 )
 
 
+# The grammar of asking about something - a question, or a request to have it
+# explained, summarised or described - never a subject word.
+_ASKS_ABOUT_CONTENT = re.compile(
+    r"\?|\b(?:what|who|when|where|why|how|which|did|does|was|were|summari[sz]e|explain|describe|tell\s+me|find)\b",
+    re.IGNORECASE,
+)
+
+
 def knowledge_intent(task: Task, participants: Sequence[str] = ()) -> bool:
     """Whether this request asks about settled subject matter.
 
@@ -6871,7 +6903,19 @@ def knowledge_intent(task: Task, participants: Sequence[str] = ()) -> bool:
     if not (
         _marker_present(text, KNOWLEDGE_QUESTION_MARKERS)
         or _marker_present(text, DOCUMENT_REFERENCE_MARKERS)
+        # A question about a recording is a question about its words - its
+        # transcript, answered like a document (2026-09-21). Only a question:
+        # "give me captions for this recording" asks for something to be done
+        # with it.
+        or (recording_reference_intent(text) and _ASKS_ABOUT_CONTENT.search(text))
     ):
+        return False
+    # Starting, stopping, cancelling, listing, transcribing, clipping or
+    # translating a recording is an instruction about it, never a question
+    # about what it says.
+    if (start_recording_intent(text) or stop_recording_intent(text) or cancel_recording_intent(text)
+            or list_recordings_intent(text) or transcribe_media_intent(task, participants)
+            or translate_media_intent(task, participants) or clip_video_intent(task, participants)):
         return False
     if current_information_intent(task, participants):
         return False
@@ -7370,10 +7414,16 @@ def read_content(request: CapabilityRequest) -> TaskResult:
             "I don't open web addresses myself. Save the page (or download the book) and share "
             "the file here - a web page (.html) or an e-book (.epub) - and I'll read it to you.",
         )
+    # "Read my recording to me": a recording's words are its transcript -
+    # kept, or made now through the configured transcription provider.
+    if recording_reference_intent(text) and not ARTIFACT_ID_PATTERN.search(text):
+        transcript, reason = recording_transcript_source(text, request.tools)
+        if transcript is None:
+            return TaskResult.failure(request.task, request.own_name, f"I can't read that recording to you: {reason}.")
     # Pre-Stage-9 Campaign 3: "read this file" means the file just shared.
     # When that file has no text (a video, an image, a recording) the honest
     # answer is about *that* file - never a different file read instead.
-    if not _POINTS_AT_A_DOCUMENT.search(text):
+    elif not _POINTS_AT_A_DOCUMENT.search(text):
         newest = resolve_shared_media(
             text, tools=request.tools, history=request.history, shared_files=request.shared_files,
         )
@@ -8646,14 +8696,21 @@ def translate_media(request: CapabilityRequest) -> TaskResult:
 # mesh and checked to be three-dimensional before it is saved.
 # ---------------------------------------------------------------------------
 
+# What a person calls the 3D thing they want. "view", "map", "visualisation"
+# were missing (2026-09-21: "an interactive 3D view of a water molecule" and
+# "an interactive 3D map of ..." fell through to open conversation).
+_MODEL3D_NOUNS = (
+    r"(?:model|object|scene|version|render(?:ing)?|mesh|sculpture|figure|shape|print|asset"
+    r"|view|map|visuali[sz]ation|representation|replica|reconstruction)"
+)
 _MODEL3D_REQUEST = re.compile(
-    r"\b(?:3d|3-d|three[\s-]dimensional)\s+(?:model|object|scene|version|render(?:ing)?|mesh|sculpture|figure|shape|print|asset)\b"
+    rf"\b(?:3d|3-d|three[\s-]dimensional)\s+{_MODEL3D_NOUNS}\b"
     r"|\b(?:model|build|make|create|sculpt|render)\b[^.?!]{0,60}?\bin\s+3d\b"
     r"|\b(?:make|build|create|design|give\s+me|generate|sculpt)\s+(?:me\s+)?(?:an?\s+|the\s+)?3d\s+\w+",
     re.IGNORECASE,
 )
 _MODEL3D_SUBJECT = re.compile(
-    r"\b(?:3d|3-d|three[\s-]dimensional)\s+(?:model|object|scene|version|render(?:ing)?|mesh|sculpture|figure|shape|asset)\s+of\s+(?P<a>[^:;.?!]{2,80})"
+    rf"\b(?:3d|3-d|three[\s-]dimensional)\s+{_MODEL3D_NOUNS}\s+of\s+(?P<a>[^:;.?!]{{2,80}})"
     r"|\b(?:make|build|create|design|give\s+me|generate|sculpt)\s+(?:me\s+)?(?:an?\s+|the\s+)?3d\s+(?P<b>[^:;.?!]{2,80})"
     r"|\b(?:model|build|make|create|sculpt|render)\s+(?P<c>[^:;.?!]{2,60}?)\s+in\s+3d\b",
     re.IGNORECASE,
@@ -8665,7 +8722,35 @@ def create_3d_model_intent(task: Task, participants: Sequence[str] = ()) -> bool
     return bool(_MODEL3D_REQUEST.search(text)) and not re.match(r"^\s*(?:what|why|how|is|are|does|do)\b", text, re.IGNORECASE)
 
 
+# Interaction a person asks of a 3D result. The 3D workspace today shows one
+# model turning on its own: camera control, fly-throughs and lighting modes are
+# not built, and a request for them is told so rather than silently dropped.
+_MODEL3D_INTERACTION = re.compile(
+    r"\b(?:interactive|rotate|rotating|spin|zoom|orbit|pan|fly[\s-]?(?:through|over|by)|walk[\s-]?through|explore"
+    r"|day\s*(?:and|/|&)\s*night|night\s+mode|day\s+mode|click\s+on|tour)\b",
+    re.IGNORECASE,
+)
+
+
 def create_3d_model(request: CapabilityRequest) -> TaskResult:
+    """Genuine 3D content for any subject (see ``_build_3d_model``), with an
+    honest word about any interaction asked for that the 3D workspace does not
+    offer yet."""
+    result = _build_3d_model(request)
+    if not _MODEL3D_INTERACTION.search(str(request.task.description or "")):
+        return result
+    note = (
+        " About the interaction you asked for: the 3D workspace shows a model turning on its own and lets you"
+        " download it as .glb; controlling the camera, fly-throughs and day/night modes are not built yet."
+    )
+    from dataclasses import replace as _replace
+
+    if result.error:
+        return _replace(result, error=result.error + note)
+    return _replace(result, output=result.output + note)
+
+
+def _build_3d_model(request: CapabilityRequest) -> TaskResult:
     """Genuine 3D content for any subject: the parts the person described, or -
     with a Brain - the subject restated as parts in the same grammar and read by
     the same parser. Nothing is saved that is not a valid, three-dimensional
@@ -8675,9 +8760,9 @@ def create_3d_model(request: CapabilityRequest) -> TaskResult:
     text = request.task.description
     found = _MODEL3D_SUBJECT.search(text)
     subject = " ".join((next((g for g in found.groups() if g), "") if found else "").split()).strip(" ,") or "a model"
-    subject = re.split(r"\s+(?:with|made\s+of|using)\s+", subject, maxsplit=1)[0]
-    subject = re.sub(r"^(?:model|object|scene|version|render(?:ing)?|mesh|sculpture|figure|shape|asset)\s+of\s+", "", subject,
-                     flags=re.IGNORECASE) or "a model"
+    subject = re.split(r"\s+(?:with|made\s+of|using|(?:that|which|so)?\s*(?:i|we|you)\s+(?:can|could)\b)\s*", subject,
+                       maxsplit=1, flags=re.IGNORECASE)[0].strip(" ,") or "a model"
+    subject = re.sub(rf"^{_MODEL3D_NOUNS}\s+of\s+", "", subject, flags=re.IGNORECASE) or "a model"
     parsed = json.loads(request.tools.invoke("model3d", {"operation": "parse", "content": json.dumps({"description": text})}).output)
     grammar = json.loads(request.tools.invoke("model3d", {"operation": "grammar", "content": "{}"}).output)
     description, planner = text, "described"
@@ -8717,12 +8802,16 @@ def create_3d_model(request: CapabilityRequest) -> TaskResult:
     made = json.loads(outcome.output)
     report = made["report"]
     parts = ", ".join(f"{p['name']} ({p['shape']})" for p in made["parts"]) or made["generator"]
+    # A part whose position could not be read was placed by default - said,
+    # never left looking like the placement that was asked for.
+    guessed = [f"{p['name']} ({p['note']})" for p in made["parts"] if str(p.get("note") or "").startswith("no position given")]
+    placed = (" I couldn't read where these go, so I placed them by default: " + "; ".join(guessed) + ".") if guessed else ""
     return TaskResult.success(
         request.task, request.own_name,
         (
             f"Artifact created: id={made['artifact_id']} type=model3d title={made['title']!r} glb=artifact/{made['artifact_id']}.glb - "
             f"a real glTF 2.0 mesh: {report['meshes']} part(s), {report['triangles']} triangles, "
-            f"{report['extent'][0]:g} x {report['extent'][1]:g} x {report['extent'][2]:g} units. Parts: {parts}. "
+            f"{report['extent'][0]:g} x {report['extent'][1]:g} x {report['extent'][2]:g} units. Parts: {parts}.{placed} "
             "Open the 3D diagram workspace to turn it around."
         ),
         payload={"handled_by": "create_3d_model", "artifact_id": made["artifact_id"], "planner": planner,
@@ -9633,6 +9722,11 @@ PERSONAL_CONTEXT = ManagerCapability(
     ),
     claims=personal_context_intent,
     scoreable=False,
+    # The one canonical personal memory (MEM-01): learning and recalling what a
+    # person tells about themselves is the agent's own memory, never work a
+    # workspace profile scopes away (found at runtime 2026-09-21: "What is my
+    # goal?" was refused inside an owner-created workspace).
+    anywhere=True,
 )
 
 
@@ -10153,8 +10247,24 @@ def transcribe_media(request: CapabilityRequest) -> TaskResult:
         return TaskResult.failure(
             request.task, request.own_name, f"I couldn't transcribe {name}: {outcome.error}",
         )
+    # Kept as a readable document derived from the recording, so later
+    # questions ("what was decided in it?") and "read it to me" reach its
+    # words without transcribing again. One transcript per recording: an
+    # existing one is not duplicated.
+    kept = ""
+    if artifact_id:
+        located = request.tools.invoke("artifact_production", {"operation": "find_recording", "content": artifact_id})
+        existing = ""
+        if located.ok:
+            try:
+                existing = str(json.loads(located.output).get("transcript_artifact_id") or "")
+            except ValueError:
+                existing = ""
+        saved = existing or save_transcript(request.tools, artifact_id, title or "recording", outcome.output)
+        if saved:
+            kept = f"\n(Kept as a readable transcript: artifact {saved}.)"
     return TaskResult.success(
-        request.task, request.own_name, f"Transcript of {name}:\n{outcome.output}",
+        request.task, request.own_name, f"Transcript of {name}:\n{outcome.output}{kept}",
         payload={"handled_by": "transcribe_media", "artifact_id": artifact_id},
     )
 

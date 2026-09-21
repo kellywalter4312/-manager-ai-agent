@@ -170,11 +170,18 @@ class TestVoiceSettingsCarryAcrossProviders:
         assert same.preferred_voice == "Mono Hazel"
 
     def test_with_no_accent_asked_for_nothing_is_invented(self):
+        """A voice chosen on another provider, with no accent to carry, leaves
+        this provider speaking the agent's own declared voice - never the
+        foreign name, which this provider cannot match and would replace with
+        a voice of its own choosing (2026-09-21: heard live as Zira)."""
         memory = EphemeralMemory()
         set_voice_preference("Alfred", "Mono Hazel", available=("Mono Hazel",),
                              recall=memory.recall, remember=memory.remember, forget=memory.forget)
-        profile = effective_voice_for(_Agent("Alfred"), recall=memory.recall, discover_voices=lambda: MULTILINGUAL.voices)
-        assert profile.preferred_voice == "Mono Hazel" and not any(k.endswith("_voice_id") for k in profile.style)
+        agent = _Agent("Alfred")
+        agent.voice = VoiceProfile(key="alfred", preferred_voice="Declared David")
+        profile = effective_voice_for(agent, recall=memory.recall, discover_voices=lambda: MULTILINGUAL.voices)
+        assert profile.preferred_voice == "Declared David"
+        assert not any(k.endswith("_voice_id") for k in profile.style)
 
 
 # ---------------------------------------------------------------------------

@@ -146,6 +146,10 @@ class TestMovementIntent:
     def test_the_handlers_that_answer_anywhere_are_declared_on_the_capability(self):
         anywhere = {name for name, cap in MANAGER_CAPABILITIES.items() if cap.anywhere}
         assert {"workspace_navigation", "small_talk", "about_self", "recall_memory"} <= anywhere
+        # the canonical personal memory too - learning and recalling what a
+        # person tells about themselves (refused in a scoped workspace until
+        # 2026-09-21)
+        assert {"personal_context", "forget", "correct_memory"} <= anywhere
         assert "current_datetime" not in anywhere and "create_diagram" not in anywhere
 
 

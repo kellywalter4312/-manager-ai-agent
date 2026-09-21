@@ -33,7 +33,14 @@ from typing import Iterable, Mapping
 # ``produced`` - the artifacts made while an agent was working in this
 # workspace (attributed when each was created).
 # ``model3d`` - the agent's genuine 3D models (glTF), shown turning in 3D.
-PANEL_KINDS = ("tasks", "diagram3d", "artifacts", "produced", "model3d")
+# ``surface:<kind>`` (or ``surface:<agent>/<kind>``) - any screen an agent
+# declares and answers (``GET /surface/<agent>/<kind>.json``: a mailbox, the
+# findings of an analysis, whatever a future agent registers), drawn by the
+# page's one generic screen renderer. This is what keeps a workspace nobody
+# anticipated composable without page code: a new agent screen is a new panel.
+PANEL_KINDS = ("tasks", "diagram3d", "artifacts", "produced", "model3d", "surface")
+# Panels that need an argument after the colon.
+_PANELS_WITH_ARGUMENT = ("artifacts", "surface")
 # The artifact metadata key naming the workspace an artifact was made in.
 ARTIFACT_WORKSPACE_KEY = "workspace"
 WORKSPACE_TYPE_PREFIX = "workspace_type."
@@ -45,7 +52,7 @@ def _valid_panel(panel: str) -> bool:
     kind, _sep, arg = panel.partition(":")
     if kind not in PANEL_KINDS:
         return False
-    return kind != "artifacts" or bool(arg.strip())
+    return kind not in _PANELS_WITH_ARGUMENT or bool(arg.strip())
 
 
 @dataclass(frozen=True)

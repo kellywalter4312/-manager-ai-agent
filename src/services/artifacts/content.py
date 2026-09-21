@@ -188,12 +188,28 @@ def artifact_ids_in(lines: Iterable[str]) -> tuple[str, ...]:
     return tuple(seen)
 
 
+# "my recording", "the interview recording", "my latest voice note", "the
+# transcript" - one recording pointed at (singular: "my recordings" asks for a
+# list, list_recordings' own request). A recording's words are its transcript.
+RECORDING_REFERENCE = re.compile(
+    r"\b(?:my|the|this|that|our|your)\s+(?:[a-z'-]+\s+){0,3}?(?:recording|voice\s+note|voice\s+memo|transcript)\b(?!s)",
+    re.IGNORECASE,
+)
+
+
+def recording_reference_intent(text: str) -> bool:
+    """Whether ``text`` points at one recording (or its transcript)."""
+    return bool(RECORDING_REFERENCE.search(str(text or "")))
+
+
 def content_reference_intent(text: str) -> bool:
     """Whether ``text`` points at content already in play - a format noun
-    with a pointing word, an explicit artifact id, or a unit locator."""
+    with a pointing word, a recording, an explicit artifact id, or a unit
+    locator."""
     return bool(
         _marker_present(text, CONTENT_REFERENCE_MARKERS)
         or ARTIFACT_ID_PATTERN.search(str(text or ""))
+        or recording_reference_intent(text)
     )
 
 

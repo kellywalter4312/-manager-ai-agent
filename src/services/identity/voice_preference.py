@@ -372,6 +372,14 @@ def effective_voice_for(
             carried = voice_for_settings(options, agent_key, recall=recall)
             if carried is not None:
                 return _apply_provider_choice(base, provider=carried.provider, voice_id=carried.voice_id, name=carried.name)
+            if options:
+                # A voice of another provider, and no setting to carry across:
+                # this provider speaks the voice the agent's identity declares
+                # for it. Writing the foreign name into ``preferred_voice``
+                # used to erase that declared voice, and a name-matched engine
+                # then picked one of its voices at random (2026-09-21: Alfred,
+                # declared as David, heard as Zira).
+                return base
         return replace(base, preferred_voice=override)
 
     choice = autonomous_voice_choice_for(agent_key, recall=recall)

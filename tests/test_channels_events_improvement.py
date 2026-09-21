@@ -1018,6 +1018,9 @@ class TestTheNewLayersOwnNothing:
             # channel.py writes a reply to the console safely (sys.stdout's
             # own encoding) - standard library, like the rest.
             "sys",
+            # channel.py reports how long a voice took to synthesise
+            # (VoiceChannel.spoken_audio_for, 2026-09-21) - standard library.
+            "time",
         }
         for package in NEW_PACKAGES:
             for path in sorted((REPO_ROOT / package).rglob("*.py")):

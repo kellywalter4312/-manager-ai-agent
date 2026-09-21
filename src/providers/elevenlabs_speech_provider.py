@@ -220,6 +220,10 @@ class ElevenLabsSpeechAdapter(SpeechAdapter):
         """The languages the account's voices are verified to speak, as ElevenLabs reports them."""
         return tuple(sorted({o.language for o in self.available_voices() if o.language}))
 
+    def voice_in_use(self, voice: VoiceProfile | None) -> "str | None":
+        """The ElevenLabs voice id ``synthesize`` will actually use for ``voice``."""
+        return _voice_id_for(voice)
+
     def synthesize(self, text: str, voice: VoiceProfile | None = None) -> bytes:
         voice_id = _voice_id_for(voice)
         if voice_id is None:

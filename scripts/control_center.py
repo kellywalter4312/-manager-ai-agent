@@ -189,6 +189,7 @@ from src.services.identity.presence import (  # noqa: E402
     set_digital_human_style,
     set_environment_preference,
 )
+from src.services.identity.voice import voice_for  # noqa: E402
 from src.services.identity.voice_preference import (  # noqa: E402
     autonomous_voice_choice_for,
     effective_voice_for,
@@ -857,7 +858,7 @@ def run_workspace_type_definition_command(rest: str) -> str:
     try:
         defined = WorkspaceType(ident, label.strip() or ident, "Added by the owner.", tuple(panels.split(",")))
     except ValueError as exc:
-        return f"FAILED: {exc}. Panels the page renders: {', '.join(PANEL_KINDS)} (artifacts:<type>)."
+        return f"FAILED: {exc}. Panels the page renders: {', '.join(PANEL_KINDS)} (artifacts:<type>, surface:<screen> or surface:<agent>/<screen>)."
     save_governed_config(config.with_value(key, f"{defined.label}|{','.join(defined.panels)}"), DEFAULT_CONFIG_PATH)
     return (
         f"Defined the workspace type '{defined.workspace_id}' ({defined.label}: {', '.join(defined.panels)}). "
@@ -936,7 +937,7 @@ def run_workspace_definition_command(centre: "ControlCenter", action: str, rest:
         try:
             defined = WorkspaceType(ident, label.strip() or ident, "Created by the owner.", tuple(panels.split(",")), profile)
         except ValueError as exc:
-            return f"FAILED: {exc}. Panels the page renders: {', '.join(PANEL_KINDS)} (artifacts:<type>)."
+            return f"FAILED: {exc}. Panels the page renders: {', '.join(PANEL_KINDS)} (artifacts:<type>, surface:<screen> or surface:<agent>/<screen>)."
         from src.control_center.workspace_catalog import workspaces_for
 
         created = save(defined, f"Created the workspace '{defined.workspace_id}' ({defined.label}; panels {', '.join(defined.panels)}; "
@@ -970,7 +971,7 @@ def run_workspace_definition_command(centre: "ControlCenter", action: str, rest:
         try:
             defined = _replace(current, panels=tuple(value.split(",")))
         except ValueError as exc:
-            return f"FAILED: {exc}. Panels the page renders: {', '.join(PANEL_KINDS)} (artifacts:<type>)."
+            return f"FAILED: {exc}. Panels the page renders: {', '.join(PANEL_KINDS)} (artifacts:<type>, surface:<screen> or surface:<agent>/<screen>)."
         return save(defined, f"The {current.label} workspace now shows {', '.join(defined.panels)}.")
     if action in ("archive", "restore"):
         archived = action == "archive"
@@ -3687,7 +3688,8 @@ def run_command(
 
         if not voice_name:
             lines = [f"VOICE - {view.name}"]
-            lines.append(f"  current preferred_voice: {current.preferred_voice if current else '(none declared)'}")
+            declared = voice_for(agent) if agent is not None else None
+            lines.append(f"  declared voice (identity): {declared.preferred_voice if declared and declared.preferred_voice else '(none declared)'}")
             stored_choice = voice_preference_for(view.name, recall=memory.recall) if memory else None
             if stored_choice:
                 lines.append(f"  chosen voice: {stored_choice}")
@@ -3697,9 +3699,14 @@ def run_command(
                 from src.services.identity.voice_configuration import current_option as _current_option
 
                 speaking_with = _current_option(voice_facts(speech), current)
+                # Asked of the provider itself where it can say: the voice it
+                # will actually use, so a substitution is shown as one.
+                in_use = getattr(speech, "voice_in_use", None)
+                used = str(in_use(current) or "") if callable(in_use) else ""
                 lines.append(
                     f"  speaking with ({speech.name}): "
-                    + (speaking_with.name if speaking_with is not None else "the provider's default - no installed voice is chosen")
+                    + (speaking_with.name if speaking_with is not None and (not used or used in (speaking_with.voice_id, speaking_with.name))
+                       else used or "the provider's default - no installed voice is chosen")
                 )
             # Agent-autonomous voice selection checkpoint: which of the
             # three governed sources (explicit override, this agent's

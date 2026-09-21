@@ -514,14 +514,16 @@ class TestTheRealLiveProductionPath:
         route_message() must keep calling exchange() with speak=True -
         the exact two-line change this phase made. Written as a source
         check because exercising the real socket is out of scope for
-        this suite (see tests/test_live_ui.py's own docstring on why)."""
-        import ast
+        this suite (see tests/test_live_ui.py's own docstring on why).
 
-        tree = ast.parse((REPO_ROOT / "scripts" / "serve_ui.py").read_text("utf-8"))
+        Updated 2026-09-21: a page that voices the reply on its own device
+        (``voice_output="device"``, through POST /speech in the agent's
+        configured voice) asks the server not to play it here as well -
+        every other caller still speaks, so the default stays speak-on."""
         source = (REPO_ROOT / "scripts" / "serve_ui.py").read_text("utf-8")
-        assert "route_message(text, self.server.system, to=to)" in source
+        assert "route_message(text, self.server.system, to=to, voice_output=voice_output)" in source
         fn = source.split("def route_message(", 1)[1].split("\ndef ", 1)[0]
-        assert "speak=True" in fn
+        assert 'speak=voice_output != "device"' in fn
 
 
 # ---------------------------------------------------------------------------

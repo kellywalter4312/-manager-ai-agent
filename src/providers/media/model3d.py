@@ -453,7 +453,10 @@ _NUMBER = r"(-?\d+(?:\.\d+)?)"
 _COUNTS = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
            "nine": 9, "ten": 10, "twelve": 12, "a pair of": 2, "pair of": 2}
 _NOT_NAMES = frozenset("for as with of at on in to that which called named the a an and radius height width depth length "
-                       "diameter size thick tall wide long deep high sitting placed resting standing lying mounted".split())
+                       "diameter size thick tall wide long deep high sitting placed resting standing lying mounted "
+                       # relation words and the pronouns that follow them ("a cube beside it")
+                       "beside next alongside under underneath below beneath above atop around round inside within "
+                       "behind left right through it this those these them".split())
 
 
 def _colour(text: str) -> "tuple[int, int, int] | None":
@@ -535,11 +538,20 @@ _RELATIONS = (
 )
 
 
+# "on top of it", "under that one" - a word standing for the part described
+# just before, which is how people describe a stack in one breath.
+_PRONOUN_TARGET = re.compile(r"(?:it|that(?:\s+one)?|this(?:\s+one)?|them|those|these)\b")
+
+
 def _relation(clause: str, known: Sequence[str]) -> "tuple[str, str] | None":
+    """The relation a clause names and the earlier part it is relative to -
+    by that part's name, or by a pronoun meaning the part described last."""
     for kind, pattern in _RELATIONS:
         for match in re.finditer(pattern, clause):
             rest = clause[match.end():]
             target = next((name for name in sorted(known, key=len, reverse=True) if re.match(re.escape(name) + r"\b", rest)), None)
+            if target is None and known and _PRONOUN_TARGET.match(rest):
+                target = known[-1]
             if target is not None:
                 return kind, target
     return None

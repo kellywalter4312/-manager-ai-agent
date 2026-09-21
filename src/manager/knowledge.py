@@ -58,8 +58,11 @@ from dataclasses import dataclass, field
 from typing import Callable, Sequence
 
 import json
+import re
 
+from src.agents.tools.artifact_production import TRANSCRIPT_TITLE_PREFIX
 from src.agents.tools.toolset import ToolSet
+from src.services.artifacts.models import DocumentContent, DocumentSection
 from src.core.contracts import tokenize
 from src.services.artifacts.content import (
     ContentUnit,
@@ -313,6 +316,86 @@ def read_artifact_content(tools: ToolSet, artifact_id: str) -> "tuple[dict, tupl
     return (payload, units) if units else None
 
 
+MEDIA_TOOL = "media_production"
+_NAMES_A_RECORDING = re.compile(r"\b(?:recording|recordings|voice\s+note|voice\s+memo)\b", re.IGNORECASE)
+_TRANSCRIPT_LINE = re.compile(r"^\s*(\d+:\d{2}(?::\d{2})?\s*-\s*\d+:\d{2}(?::\d{2})?)\s*:\s*(.+?)\s*$")
+
+
+def names_a_recording(text: str) -> bool:
+    """Whether a request points at a recording ("my recording", "the interview
+    recording", "my latest voice note")."""
+    return bool(_NAMES_A_RECORDING.search(str(text or "")))
+
+
+def transcript_document(title: str, transcript: str) -> DocumentContent:
+    """A transcript as an ordinary document: one section per timed passage,
+    headed by its time range, so it is read, quoted and searched like any
+    other document. Untimed lines become one section each."""
+    sections = []
+    for index, line in enumerate(line for line in str(transcript).splitlines() if line.strip()):
+        timed = _TRANSCRIPT_LINE.match(line)
+        heading, body = (timed.group(1), timed.group(2)) if timed else (f"passage {index + 1}", line.strip())
+        sections.append(DocumentSection(heading=heading, body=body))
+    if not sections:
+        raise ValueError("an empty transcript is not a document")
+    return DocumentContent(title=f"{TRANSCRIPT_TITLE_PREFIX}{title}", sections=tuple(sections))
+
+
+def save_transcript(tools: ToolSet, recording_id: str, title: str, transcript: str) -> "str | None":
+    """Keep a transcript as a document derived from its recording - the
+    recording itself untouched - and return the new document's id, or None
+    when it could not be saved."""
+    if not tools.permits(ARTIFACT_TOOL) or not recording_id:
+        return None
+    try:
+        doc = transcript_document(title, transcript)
+    except ValueError:
+        return None
+    outcome = tools.invoke(ARTIFACT_TOOL, {"operation": "derive_document", "content": f"{recording_id}\n{doc.to_json()}"})
+    found = re.search(r"\bid=([0-9a-f]{12})\b", outcome.output or "") if outcome.ok else None
+    return found.group(1) if found else None
+
+
+def recording_transcript_source(
+    query: str, tools: ToolSet,
+) -> "tuple[tuple[dict, tuple[ContentUnit, ...]] | None, str]":
+    """The readable transcript of the recording ``query`` means, and - when
+    there is none - the plain reason why.
+
+    A transcript already saved is read; otherwise the recording is transcribed
+    through the configured transcription provider (the same governed
+    ``media_production`` tool ``transcribe_media`` uses) and kept as a derived
+    document, so the next question about it needs no second transcription.
+    Nothing is invented: no provider, no transcript."""
+    if not tools.permits(ARTIFACT_TOOL):
+        return None, ""
+    located = tools.invoke(ARTIFACT_TOOL, {"operation": "find_recording", "content": str(query or "")})
+    if not located.ok:
+        return None, "there is no recording yet"
+    try:
+        recording = json.loads(located.output)
+    except ValueError:
+        return None, ""
+    title = str(recording.get("title") or "your recording")
+    existing = str(recording.get("transcript_artifact_id") or "")
+    if existing:
+        read = read_artifact_content(tools, existing)
+        if read is not None:
+            return read, ""
+    renditions = recording.get("renditions") or {}
+    path = next(iter(renditions.values()), None)
+    if path is None or not tools.permits(MEDIA_TOOL):
+        return None, f"'{title}' has no transcript, and I have no transcription tool to make one"
+    heard = tools.invoke(MEDIA_TOOL, {"operation": "transcribe", "content": str(path)})
+    if not heard.ok:
+        return None, f"I couldn't transcribe '{title}': {heard.error}"
+    saved = save_transcript(tools, str(recording.get("artifact_id") or ""), title, heard.output)
+    read = read_artifact_content(tools, saved) if saved else None
+    if read is None:
+        return None, f"I transcribed '{title}' but couldn't keep the transcript"
+    return read, ""
+
+
 def resolve_content_sources(
     query: str,
     *,
@@ -338,6 +421,12 @@ def resolve_content_sources(
     """
     if not tools.permits(ARTIFACT_TOOL) or limit <= 0:
         return []
+    # A request naming a recording ("what was decided in my recording?") is
+    # about that recording's words - its transcript, read like any document.
+    if names_a_recording(query) and not artifact_ids_in([query]):
+        transcript, _reason = recording_transcript_source(query, tools)
+        if transcript is not None:
+            return [transcript]
     candidates: list[str] = []
     shared = _shared_ids(shared_files)
     for artifact_id in artifact_ids_in([query]) + artifact_ids_in(_history_lines(history)) + shared:
@@ -434,6 +523,9 @@ def gather_knowledge_evidence(
                 )
         if referenced:
             sources.append(SUPPLIED_CONTENT)
+        elif names_a_recording(text):
+            _transcript, reason = recording_transcript_source(text, granted)
+            unavailable.append(f"your recording: {reason or 'it has no transcript'}")
 
     if recall is None:
         unavailable.append(

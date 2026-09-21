@@ -102,6 +102,14 @@ Seven routes:
                          document, image, audio, video), registered as a
                          supplied_file artifact; shared from the
                          conversation, also recorded in the room.
+    POST /speech        {"agent": "...", "text": "..."} -> those words as
+                         audio in that agent's own configured voice, for the
+                         listener's device to play, with the provider, voice,
+                         language, pace and synthesis time that produced it.
+                         409 (with the reason) when no voice provider is
+                         configured - never another voice instead. The page
+                         sends POST /message with "voice_output": "device" so
+                         the reply is not also played on this machine.
     POST /workspace/select {"agent": "...", "workspace": "<id>"} -> moves that
                          agent into one of its workspaces - the identical saved
                          choice 'workspace <agent> use <id>' makes in the
@@ -168,6 +176,7 @@ from scripts.exchange import (  # noqa: E402
 from src.services.audit.action_log import DEFAULT_ACTION_LOG_PATH, load_action_log  # noqa: E402
 from scripts.export_ui import render  # noqa: E402
 from src.config.settings import Settings  # noqa: E402
+from src.channels.channel import speakable  # noqa: E402
 from src.control_center.interfaces import InterfaceFeature, describe_interface  # noqa: E402
 from src.control_center.observer import ControlCenter  # noqa: E402
 from src.control_center.render import render_overview  # noqa: E402
@@ -426,9 +435,15 @@ def _route_artifact_file(path: str, system: LiveSystem) -> tuple[int, bytes, str
 
 
 def route_message(
-    text: object, system: LiveSystem, *, to: object = None
+    text: object, system: LiveSystem, *, to: object = None, voice_output: object = None
 ) -> tuple[int, bytes, str]:
     """Decide what to answer for `POST /message`. No socket involved.
+
+    ``voice_output="device"`` means the listener's own device will voice the
+    reply (through ``POST /speech``, in the answering agent's configured
+    voice): the server then does not also play it on this machine's speakers,
+    and the written answer is returned at once instead of after that playback
+    has finished. Anything else keeps the original behaviour below.
 
     Malformed or empty text never reaches `Conversation.say()` or
     `ManagerAgent.handle_task()` - both live only inside `exchange()`, and
@@ -497,7 +512,7 @@ def route_message(
         with system.lock:
             turn = exchange(
                 system.channel, system.conversation, text.strip(),
-                addressed=addressed, speak=True, action_log_path=DEFAULT_ACTION_LOG_PATH,
+                addressed=addressed, speak=voice_output != "device", action_log_path=DEFAULT_ACTION_LOG_PATH,
             )
     except Exception:  # noqa: BLE001 - an HTTP boundary must not crash the process
         logger.exception("live message handling failed")
@@ -515,6 +530,10 @@ def route_message(
             "handled_by": turn.handled_by,
             "delegated": turn.delegated,
             "outcome": turn.outcome,
+            # What is said aloud - the identical words a spoken delivery on
+            # this machine says (``speakable``), for a device that voices the
+            # reply itself through POST /speech.
+            "speech": speakable(turn),
             "succeeded": turn.succeeded,
             "brain_mode": turn.brain_mode,
             "specialist_brain_mode": turn.specialist_brain_mode,
@@ -1095,6 +1114,66 @@ def _json_error(status: int, message: str) -> tuple[int, bytes, str]:
     return status, json.dumps({"error": message}).encode("utf-8"), "application/json; charset=utf-8"
 
 
+_SPEECH_LOCK = threading.Lock()
+
+
+def route_speech(agent: object, text: object, system: LiveSystem) -> tuple[int, bytes, str]:
+    """Decide what to answer for `POST /speech` - one piece of an agent's reply
+    in that agent's own configured voice, as audio the listener's device plays.
+
+    The page asks sentence by sentence, fetching the next while the current
+    one plays, so the first words are heard after one sentence's synthesis
+    rather than the whole reply's. The voice is resolved by the channel exactly
+    as a spoken delivery would be (``VoiceChannel.spoken_audio_for``); a system
+    with no voice provider is refused with the reason and how to choose one -
+    the page then says so in writing and never substitutes another voice.
+
+    Held under its own lock, not the conversation's: a local engine is not
+    safe to call from two threads, and a reply being voiced must not stop the
+    next message from being answered."""
+    from src.channels.speech import SpeechUnavailable
+
+    if not isinstance(agent, str) or not agent.strip():
+        return _json_error(400, "give the 'agent' whose voice this is")
+    if not isinstance(text, str) or not text.strip():
+        return _json_error(400, "give the 'text' to say")
+    if system.manager.registry.get(agent.strip()) is None:
+        return _json_error(404, f"no agent called '{agent.strip()}'")
+    spoken_audio_for = getattr(system.channel, "spoken_audio_for", None)
+    if not callable(spoken_audio_for):
+        return _json_error(409, f"the {system.channel.name} channel carries no speech engine")
+    try:
+        with _SPEECH_LOCK:
+            spoken = spoken_audio_for(agent.strip(), text.strip())
+    except SpeechUnavailable as exc:
+        return _json_error(409, str(exc))
+    except Exception as exc:  # noqa: BLE001 - a provider failure is reported, never hidden
+        logger.exception("speech synthesis failed")
+        return _json_error(502, f"the voice provider could not speak that: {exc}")
+    audio_seconds = None
+    try:
+        import io
+        import wave
+
+        with wave.open(io.BytesIO(spoken.audio)) as handle:
+            audio_seconds = round(handle.getnframes() / handle.getframerate(), 3)
+    except Exception:  # noqa: BLE001 - a non-WAV provider simply reports no duration
+        audio_seconds = None
+    body = {
+        "agent": agent.strip(),
+        "audio_base64": base64.b64encode(spoken.audio).decode("ascii"),
+        "format": spoken.format,
+        "provider": spoken.provider,
+        "voice": spoken.voice,
+        "language": spoken.language,
+        "pace": spoken.pace,
+        "text": spoken.text,
+        "synthesis_seconds": round(spoken.synthesis_seconds, 3),
+        "audio_seconds": audio_seconds,
+    }
+    return 200, json.dumps(body).encode("utf-8"), "application/json; charset=utf-8"
+
+
 def route_upload(
     agent: object, filename: object, mime_type: object, data_base64: object, source: object,
     system: LiveSystem,
@@ -1465,6 +1544,7 @@ class SnapshotHandler(BaseHTTPRequestHandler):
             "/upload",
             "/translate/text",
             "/translate/speech",
+            "/speech",
         ):
             self._respond(404, b"not found", "text/plain; charset=utf-8")
             return
@@ -1488,7 +1568,12 @@ class SnapshotHandler(BaseHTTPRequestHandler):
         if self.path == "/message":
             text = payload.get("text") if isinstance(payload, dict) else None
             to = payload.get("to") if isinstance(payload, dict) else None
-            status, body, content_type = route_message(text, self.server.system, to=to)
+            voice_output = payload.get("voice_output") if isinstance(payload, dict) else None
+            status, body, content_type = route_message(text, self.server.system, to=to, voice_output=voice_output)
+        elif self.path == "/speech":
+            agent = payload.get("agent") if isinstance(payload, dict) else None
+            words = payload.get("text") if isinstance(payload, dict) else None
+            status, body, content_type = route_speech(agent, words, self.server.system)
         elif self.path == "/avatar":
             agent = payload.get("agent") if isinstance(payload, dict) else None
             avatar_id = payload.get("avatar_id") if isinstance(payload, dict) else None

@@ -196,5 +196,11 @@ class TestEffectiveVoicePrecedence:
             return (ITALIAN,)
 
         profile = effective_voice_for(agent, recall=manager.memory.recall, discover_voices=discover)
-        assert profile.preferred_voice == "Some Unrelated Name"
+        # Updated 2026-09-21: the honest fallback is the agent's own declared
+        # voice, not the unmatched name - a name-matched engine that cannot
+        # find that name picks one of its own voices instead (Alfred was heard
+        # live in Zira's voice that way).
+        declared = effective_voice_for(agent, recall=None)
+        assert profile.preferred_voice == declared.preferred_voice
+        assert profile.preferred_voice != "Some Unrelated Name"
         assert "elevenlabs_voice_id" not in profile.style or profile.style.get("elevenlabs_voice_id") != "it-voice-1"

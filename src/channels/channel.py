@@ -82,6 +82,23 @@ def _show(text: str) -> None:
 
 
 @dataclass(frozen=True)
+class SpokenAudio:
+    """Words synthesized in an agent's own voice for the listener's device to
+    play, with the facts of how: which provider, which of its voices, which
+    language and pace, and how long synthesis took. Reported, so a listener
+    who hears the wrong voice can see exactly what spoke."""
+
+    audio: bytes
+    format: str
+    provider: str
+    voice: str
+    language: str
+    pace: str
+    text: str
+    synthesis_seconds: float
+
+
+@dataclass(frozen=True)
 class Response:
     """One answer, in every form it took.
 
@@ -456,7 +473,55 @@ class VoiceChannel(Channel):
         with no memory at all, which degrades to exactly the bare
         declared voice - never a crash, never a fabricated preference.
         """
-        answered = getattr(response.turn, "handled_by", "")
+        return self._voice_for_agent(getattr(response.turn, "handled_by", ""))
+
+    def spoken_audio_for(self, agent_name: str, text: str) -> "SpokenAudio":
+        """The words ``agent_name`` would say, as audio for the listener's own
+        device to play - never played here.
+
+        The identical resolution ``deliver()`` uses: the agent's effective
+        VoiceProfile, its chosen spoken language, then the configured speech
+        provider. Nothing picks a voice of its own, and nothing falls back to
+        another one: a provider that cannot synthesize raises
+        ``SpeechUnavailable`` with its reason, for the caller to say out loud
+        (in writing) rather than substitute a stranger's voice."""
+        import time
+
+        synthesize = getattr(self._speech, "synthesize", None)
+        if not callable(synthesize):
+            raise SpeechUnavailable(
+                f"no voice provider is configured (speech provider '{self._speech.name}') - "
+                "choose one in the Control Center with 'provider speech_provider use <backend>'"
+            )
+        voice = self._voice_for_agent(agent_name)
+        words = text
+        if voice is not None and voice.language and text:
+            words, voice = self._in_spoken_language(text, voice)
+        started = time.monotonic()
+        audio = synthesize(words, voice)
+        seconds = time.monotonic() - started
+        return SpokenAudio(
+            audio=audio, format="wav", provider=self._speech.name,
+            voice=self._voice_in_use(voice),
+            language=(voice.language if voice is not None else "") or "",
+            pace=(voice.pace if voice is not None else "") or "",
+            text=words, synthesis_seconds=seconds,
+        )
+
+    def _voice_in_use(self, voice: VoiceProfile | None) -> str:
+        """The voice the provider itself says it speaks ``voice`` in - asked,
+        never inferred from the profile, so a provider that substitutes is
+        reported as substituting. Empty when the provider cannot say."""
+        ask = getattr(self._speech, "voice_in_use", None)
+        if not callable(ask):
+            return ""
+        try:
+            return str(ask(voice) or "")
+        except Exception:  # noqa: BLE001 - naming the voice is a report, never a reason to fail
+            return ""
+
+    def _voice_for_agent(self, answered: str) -> VoiceProfile | None:
+        """The effective voice of the named agent - see ``_voice_of``."""
         if not answered:
             return None
         try:

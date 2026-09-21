@@ -375,6 +375,11 @@ class WindowsSpeechAdapter(SpeechAdapter):
     def pace_words(self) -> "tuple[str, ...]":
         return tuple(_PACE_RATES)
 
+    def voice_in_use(self, voice: VoiceProfile | None) -> "str | None":
+        """The installed voice this engine will actually speak ``voice`` in -
+        the identical choice ``speak``/``synthesize`` make, reported."""
+        return _select_voice_name(voice, self.installed_voice_names())
+
     def _voice_lines(self, voice: VoiceProfile | None) -> str:
         selected = _select_voice_name(voice, self.installed_voice_names())
         lines = f'$synth.SelectVoice("{selected}")' if selected else ""
