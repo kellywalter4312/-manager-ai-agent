@@ -10599,3 +10599,78 @@ and the Control Center names its source.
 byte-identical throughout. The host stopped the browser re-run of the page's
 ambient voice loop for low system memory, so it was last verified on
 `2d7f1bf`.
+
+### 52.54 The Control Center manages providers and credentials - action to runtime
+
+**The question.** Can a person, from the served page's own Control Center,
+add, check, select, switch, persist and revoke a replaceable provider and its
+credential, and does each action reach the running system? The whole chain
+has to hold: Control Center action, persisted configuration, runtime
+configuration, observed behaviour, restart, and a truthful UI.
+
+**How it was verified.** A headless browser drove the page itself, as a
+person would:
+- it filled the Provider accounts form, a new Voices form and the console
+- it clicked Go and accepted the real confirmation dialogs
+
+After each action the runtime was asked what actually happened:
+- `POST /speech` for which voice synthesised
+- `POST /message` for which reasoning backend answered
+
+The run restarted once in the middle. Outward network was blocked in-process,
+so no vendor was contacted and no metered call was made. Afterwards two
+distinctive fake secrets were hunted through every surface.
+
+**Defects found, repaired in the one existing provider module
+(`scripts/control_center.py`) and the one credential store:**
+
+- **A stored credential was never used to build its backend.** For every
+  non-LLM category, `use` and `validate` built the backend with
+  `credential=None`. The account a person had just added in the Control Center
+  was ignored, and the refusal told them to set `ELEVENLABS_API_KEY` in the
+  environment. Now both build with `store.active(backend)` and say to add an
+  account when there is none. This affects every credentialed backend:
+  ElevenLabs, Whisper API, Runway, Veo, and any future one.
+- **Revoking the active backend's account left it running.** The rebuild
+  failed ("Saved, but not applied") and the running engine kept the revoked
+  credential. `_retire_backend_without_account` now handles this: when the last
+  account of a category's active backend is revoked and that backend cannot
+  run without one, the category moves to its own `none`/`null` backend. That
+  move is saved, applied live and stated. The person then chooses the next
+  one; nothing falls back silently.
+- **Credentials were plaintext at rest.** `account_store_file.py` now writes
+  each credential with Windows DPAPI (`CryptProtectData`, per user and per
+  machine, standard library via ctypes). An earlier plaintext entry still
+  loads and is protected on the next save. Where DPAPI does not exist, the
+  value is written as before, and the module says so. The format change is
+  internal to the persistence companion; `CredentialStore` is unchanged.
+- **The null provider's label was presented as an answer.** With reasoning on
+  and the vendor revoked, "[null-provider] no language model is configured;
+  received a 590-character prompt" was shown as Alfred's reply.
+  `LLMProvider.produces_answers` (False for `NullProvider`) lets `converse`
+  report no answer instead. `deliberate` already treated it as no opinion.
+- **Control Center gaps.** The page's provider form lacked `use` (the action
+  that actually switches a category's backend) and `check`, and its note
+  implied `select` switched backends. The Control Center had no voice
+  variant, style, accent-clear or release, although the voice architecture
+  supports all four. These were added over the existing commands, and a small
+  Voices form drives `voice <agent> ...`. There is no new subsystem: the forms
+  compose the same command strings the terminal accepts.
+
+**Evidence:**
+
+| Check | Result |
+|---|---|
+| Voice switching | Kokoro to Windows spoke with the switched provider. ElevenLabs added in the form built, and then failed honestly at synthesis with no fallback. Revoking it retired the category to `none`, and `/speech` answered 409. |
+| LLM switching | `probe_one` to `probe_two` changed the answering backend. Anthropic failed honestly. Revoking it retired the provider to `null`, and the reply said so. |
+| Voice settings | Accent, variant, style (refused), pace, both agents' voices, release and clear all worked. |
+| Restart | Every choice and account survived. |
+| Category sweep | All 17 categories behaved the same way. |
+| Secret hunt | 0 hits across 34 surfaces. On disk mid-run, the key was not plaintext. |
+
+**Left for the owner.**
+- Production `accounts.json` still holds one account for `reservablething`,
+  the 2026-09-11 verification fixture service. Its value was never read. It is
+  not removed without the owner's approval.
+- Real vendor answers need real, funded keys and the owner's authorisation to
+  reach them.

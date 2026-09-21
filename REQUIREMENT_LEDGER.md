@@ -46,7 +46,7 @@ does not re-derive file:line citations already verified in that section
 — it points at them rather than duplicating them, to avoid the two
 documents drifting apart.
 
-**Last reconciled:** 2026-09-21 (second campaign), voice governance for every agent, voice dimensions, capture-to-task and the model-echo guard (ARCHITECTURE.md §52.53, section U) - 8072 tests passing in both fixed and randomised order; production `data/` byte-identical. Earlier the same day: runtime re-verification and repair campaign (ARCHITECTURE.md §52.52) - every closure item re-run through its real runtime/user-facing path; 8054 tests passing in both fixed and randomised order; production `data/` byte-identical. Section T holds its rows and supersedes the section R rows it names. Previous reconciliation: 2026-09-17, closure campaign 3 (ARCHITECTURE.md §52.51) -
+**Last reconciled:** 2026-09-22, Control Center provider/credential/voice management verified through the served page from action to runtime (ARCHITECTURE.md §52.54, section V) - 8083 tests passing in both fixed and randomised order; production `data/` byte-identical. Before that: 2026-09-21 (second campaign), voice governance for every agent, voice dimensions, capture-to-task and the model-echo guard (ARCHITECTURE.md §52.53, section U) - 8072 tests passing in both fixed and randomised order; production `data/` byte-identical. Earlier the same day: runtime re-verification and repair campaign (ARCHITECTURE.md §52.52) - every closure item re-run through its real runtime/user-facing path; 8054 tests passing in both fixed and randomised order; production `data/` byte-identical. Section T holds its rows and supersedes the section R rows it names. Previous reconciliation: 2026-09-17, closure campaign 3 (ARCHITECTURE.md §52.51) -
 8015 tests passing in both fixed and randomised order; production `data/`
 byte-identical across all 90 files. Section S holds this campaign's rows, and
 CON-03 is closed there: the 2026-09-16 "out-of-band edit" conclusion is
@@ -444,6 +444,36 @@ Full suite: **8072 passed** fixed order, **8072 passed** randomised order. Produ
 
 **Runtime re-run on the committed tree (`4cd9209`).** Voice governance, translated voice (Whisper), Arthur's choice across a restart and the 35-check broad matrix all re-ran on the committed tree with production `data/` byte-identical. The browser run of the page's own ambient voice loop (T-VOICE-01) was stopped by the host for low system memory before it started; it was last verified on `2d7f1bf`, and the page has changed since only in the speaking indicator's title text and the new `note` field it displays.
 
+## V. Control Center provider, credential and voice management - action to runtime (2026-09-22)
+
+Verified through the **served page's own Control Center** (a headless browser
+filling its Provider accounts form, its new Voices form and its console,
+accepting the real confirmation dialogs) with the runtime checked after every
+action (`POST /speech` for which voice actually speaks, `POST /message` for
+which reasoning backend actually answers), a real restart in the middle, and
+all outward network blocked in-process so no vendor was contacted.
+ARCHITECTURE.md §52.54. Regression protection:
+`tests/test_control_center_provider_lifecycle.py` (11). Suites: **8083 passed** fixed and
+randomised order; production `data/` byte-identical. Commit: `5f66de7`.
+
+Levels used below: **code** (implemented), **registered**, **integrated**
+(wired into the runtime), **CC** (reachable from the page's Control Center),
+**persisted**, **runtime** (behaviour observed), **restart** (survives one).
+
+| ID | Requirement | Previous | Finding / repair | Evidence | Boundary | Status |
+|---|---|---|---|---|---|---|
+| V-PROV-01 | Switch a category's active backend from the page | console only | The page's provider form had add/select/revoke/validate but not `use` (the action that switches a backend) or `check`; both added over the same command | Form `use kokoro` -> `/speech` Kokoro; `use windows` -> Microsoft David; persisted `provider.speech_provider`; restart kept it | - | VERIFIED (code, registered, integrated, CC, persisted, runtime, restart) |
+| V-PROV-02 | A credential added in the Control Center is what a credentialed backend is built with | **BROKEN** - `use`/`validate` built the backend with no credential and said "Set ELEVENLABS_API_KEY in the environment" | `use` and `validate` now build with the account stored for that backend; with none, the refusal says to add one here | Form add ElevenLabs account -> `validate` OK (construction only) -> `use elevenlabs` saved and live -> `/speech` 502 "could not speak that: outward connection blocked" - **no fallback** to the previous provider. Same lifecycle for Runway, Whisper API, Anthropic in the category sweep | Real vendor answers need funded/real keys - EXTERNAL | VERIFIED - EXTERNAL AUTH REQUIRED (vendor output) |
+| V-PROV-03 | Revoking an account stops the runtime using it | **BROKEN** - revoking the active backend's account left the engine running on the revoked credential ("Saved, but not applied") | The category moves to its own none/null backend, saved, applied live and announced; the person picks the next one - never a silent fallback | Revoke active ElevenLabs -> "no longer used: 'speech_provider' is now 'none'" -> `/speech` 409 "no voice provider is configured"; revoke active Anthropic -> `llm_provider` 'null' -> "no language model is configured" | - | VERIFIED |
+| V-PROV-04 | Health / live credential check from the page | CLI + console | `check` in the form; confirmation says it leaves the machine and may be charged | `check elevenlabs studio-voice` -> "NOT AUTHORIZED - the vendor was never reached" (blocked), recorded honestly as never reached | Reaching the vendor needs the owner's authorisation and a real key - EXTERNAL | VERIFIED - EXTERNAL AUTH REQUIRED |
+| V-PROV-05 | Every provider category is manageable the same way | - | Category sweep (17 categories) through the console's route | Every local backend `use` applied to the runtime; every credentialed backend (runway, whisper, elevenlabs, anthropic) add -> use -> revoke-retire; every category's choice survived a restart | `communication_provider` has only `null` (outward delivery goes through declared services - CON-05); `avatar`/`environment`/`celebration` have one backend | VERIFIED (config->runtime->restart); behaviour per category: speech, LLM, translation, transcription, media/clipping, image generation, notifications verified in earlier rows; live information and image generation reach the internet - EXTERNAL AUTH |
+| V-LLM-01 | LLM backend switch from the page changes the answering backend | T/U rows | - | Form `use probe_one` + governed reasoning on -> `/message` "[probe_one]"; `use probe_two` -> "[probe_two]"; restart -> "[probe_two]"; `use anthropic` -> honest provider failure (blocked), no fallback | Real vendor answers - EXTERNAL | VERIFIED - EXTERNAL AUTH REQUIRED |
+| V-LLM-02 | The null provider's label is never a reply | **BROKEN** - "[null-provider] no language model is configured; received a 590-character prompt" shown as Alfred's answer | `LLMProvider.produces_answers` (False for the null provider); `converse` reports no answer | After revoking the active LLM account: "I don't have a way to properly reason about that yet... no language model is configured" | - | VERIFIED |
+| V-SEC-01 | Credentials never shown or logged | - | Two distinctive fake secrets hunted after the whole run | **0 hits in 34 surfaces**: every command response, every confirmation dialog, the page DOM (the credential field is cleared after Go), `snapshot.json`, all Python logging at DEBUG, the audit log and every other file under the sandbox `data/` | - | VERIFIED |
+| V-SEC-02 | Credentials protected at rest | **PARTIAL** - plaintext JSON under git-ignored `data/credentials/` | Written with Windows DPAPI (per user, per machine) in the one credential store's persistence module; an earlier plaintext file still loads and is protected on its next save; where DPAPI does not exist, written as before and documented | Mid-run `accounts.json`: secret in plaintext **False**, protected field present **True**; round-trip and restart kept the accounts | Non-Windows platforms: no at-rest protection added | VERIFIED (Windows) |
+| V-VOICE-01 | Voice settings from the page, each dimension apart | language/accent/pace/test only | `voice <agent> variant`, `style`, `accent clear`, `style clear`, `release` added; the view shows variant and style; a Voices form on the page drives the command | Form: Alfred accent italian -> `im_nicola`; style calm -> refused (no styles); variant british -> `bm_daniel` "speaking British English"; pace slow; Arthur `am_eric`; restart kept both agents' voices; release -> Alfred's own choice; accent clear | Hearing it - HARDWARE | VERIFIED - HARDWARE DEPENDENT |
+| V-DATA-01 | Production credential file holds only real accounts | - | Found: production `data/credentials/accounts.json` holds one account for `reservablething`, the 2026-09-11 verification fixture service (CON-03 lineage) that no longer exists | Counted and named only - its value was never read | Removal is the owner's decision | OPEN - OWNER DECISION |
+
 ## O. Explicit Scope Boundaries (non-requirements, preserve these)
 
 | ID | Statement | Source | Status |
@@ -459,6 +489,7 @@ Full suite: **8072 passed** fixed order, **8072 passed** randomised order. Produ
 ## Open items requiring the owner, summarized
 
 **Decision needed (not a software gap):**
+- Production `data/credentials/accounts.json` holds one leftover account for the 2026-09-11 verification fixture service `reservablething` (V-DATA-01) - remove only with your approval.
 - *(none open — CON-03 closed 2026-09-17, see below.)*
 
 **External action required (Alfred-side work is complete):**
