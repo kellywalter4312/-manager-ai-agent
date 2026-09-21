@@ -10338,3 +10338,160 @@ three tests in `test_credential_authorization.py` repointed to the seam that is
 now real (`registry_factory.build_provider`/`build_speech` rather than the
 Control Center's own names) and one rewritten to prove the refusal comes from the
 mechanism instead of the deleted tuple.
+
+### 52.52 Runtime re-verification - the live voice path, and closure items that did not hold
+
+**Why this round happened.** The owner did not accept section R's "campaign
+closed" as the verification state. The requirement is stronger: every capability
+verified working through its real runtime path, and through the Control Center
+where a person manages it. A read-only reconstruction against `eeba78e` re-ran the
+closure items in an isolated sandbox of the real served system, using subjects
+never used while building: a supplier meeting, a candidate interview, a desk lamp,
+a snowman, Nairobi, a water molecule, a greenhouse workspace, a Spanish train
+announcement. Several rows did not hold. The owner then reported a live defect:
+Alfred heard in a female voice that was not the one chosen, and lagging.
+`REQUIREMENT_LEDGER.md` section T holds the rows.
+
+**The voice the owner heard.** The trace ran from the Control Center, through the
+persisted state, the runtime build, the active provider and the voice ID, to
+synthesis and playback. It found three separate causes.
+
+1. *Nothing was configured, and the page filled the gap silently.* Production
+   has never persisted a speech provider (`data/evolution/config.json` holds
+   `values: {}`, and no `MANAGER_SPEECH` is set), so the live server's engine is
+   `none`. Earlier Kokoro selections lived only in audit sandboxes. The page's
+   ambient loop then spoke every reply with
+   `speechSynthesis.speak(new SpeechSynthesisUtterance(text))` and no voice set,
+   so the browser used the OS default. This PC has David (male), Hazel and Zira
+   (both female). Alfred's declared voice (Kokoro `am_eric`) was never on that
+   path.
+2. *The server voiced the reply in the wrong place, and blocked while it did.*
+   `route_message` always called `exchange(speak=True)`. Kokoro synthesised the
+   whole reply, `winsound` played it on the PC, and only then did the HTTP reply
+   return: `/message` took 34 s. The browser then spoke the same words again in
+   its own voice.
+3. *A voice chosen on one provider erased the declared voice on another.* In
+   `effective_voice_for`, an override matching none of the active provider's
+   voices, with no accent to carry, was written into `preferred_voice`. That
+   overwrote the identity's own Windows voice ("Microsoft David Desktop").
+   Windows could not match the foreign name, so `_select_voice_name` fell back
+   to `crc32("alfred") % 3`, which is **Zira**. Nothing reported it.
+
+**The repair keeps one resolution path and moves playback to the device.**
+
+- `VoiceChannel.spoken_audio_for(agent, text)` resolves the voice exactly as
+  `deliver()` does (effective VoiceProfile, then spoken language, then the
+  configured provider) and synthesises without playing.
+- It reports the provider, the voice the provider itself says it uses (a new
+  `voice_in_use` on every adapter), language, pace and synthesis time.
+- `POST /speech` serves it. With no provider it answers 409 with the reason and
+  the Control Center command that fixes it. There is no substitute voice.
+- `POST /message` with `voice_output: "device"` does not also play on the PC,
+  returns at once, and carries `speech`: the same `speakable` words a spoken
+  delivery would say.
+- The page voices the reply sentence by sentence and fetches the next sentence
+  while the current one plays. With no provider it shows "NO VOICE PROVIDER — SEE
+  CONTROL CENTER" with the reason. The browser's own voice is no longer used for
+  replies.
+- `effective_voice_for` keeps the declared voice when an override belongs to
+  another provider.
+- The Control Center's `voice <agent>` labels the identity's declared voice as
+  such and shows the voice the provider will actually use.
+
+**Latency, measured.** Kokoro int8 on this i5-6300U synthesises slower than real
+time: 6.8–8.9 s of inference for 2.5 s of audio, with WAV packing taking 0.05 s.
+That is a provider/hardware limit, and buffering cannot hide it. What software
+added is gone:
+
+- the text reaches the page in 0.01 s rather than 34 s
+- the first audio arrives after one sentence rather than the whole reply
+- Windows' first audio arrives in 1.4–5 s depending on how warm its engine is,
+  and the next sentence is ready before the first ends
+
+**Verified through the page's real ambient loop.** The check ran headless
+Chromium with a stand-in recogniser. `Audio.play` and `speechSynthesis` were
+instrumented, and server-side playback was counted.
+
+| Phase | Result |
+|---|---|
+| No provider | 409 with the indicator shown; 0 browser-voice calls |
+| Kokoro | Alfred `am_eric`, Arthur `bm_daniel` |
+| Control Center `voice Alfred bm_daniel` | Alfred `bm_daniel` |
+| Real restart | still `bm_daniel` |
+| `provider speech_provider use windows` | **Microsoft David Desktop** |
+
+PC playback calls were zero in every phase. Identity, memory and role were
+unchanged across every voice and provider change.
+
+**Closure items that did not hold, repaired at their source.**
+
+- **Clipping.** R-05's own non-time-range filter read "seconds 2 to 4 **out** of
+  that video" as a range of *outs* and deleted it. A range introduced by a time
+  unit, or followed by a grammatical word, is now a time range. Twelve phrasings
+  were checked both ways. At runtime a real 3.0 s clip was cut; "I cut 3 to 5
+  carrots while the cooking video played" was not clipped.
+- **3D placement.** `_relation` knew only part names, so "on top of it" and "on
+  top of that" fell through to "beside the last part", and the reply still said
+  it was built. Pronouns now refer to the part described just before, and any
+  default placement is named in the reply. At runtime the lighthouse keeper's
+  cottage came out stacked (2.4 units tall, read from the GLB bytes).
+- **3D routing.** "3D view", "map" and "visualisation" were not 3D requests. They
+  are now, and a request for interaction is told plainly what is not built. The
+  interactive-experience layer itself (camera control, fly-throughs, lighting
+  modes, data-driven scenes) is **missing software**, recorded as NOT FOUND. It
+  is not external.
+- **Scoped workspaces.** `personal_context`, the one canonical personal memory,
+  was not `anywhere`, so "What is my goal?" was refused inside an owner-created
+  workspace. It now answers everywhere; work outside the profile is still
+  scoped.
+- **Workspace panels.** Panels were five fixed kinds. `surface:<screen>` and
+  `surface:<agent>/<screen>` make any screen an agent declares (the open,
+  registered surfaces) a panel, drawn by the page's one generic screen renderer.
+  In a real browser, Arthur's inbox (6 items) rendered in an owner-created
+  workspace beside the task board. That check found saved panels lower-cased and
+  the page matching agents by exact name, fixed in `2d7f1bf`.
+- **Recordings as intelligence.** The microphone path was already real, but had
+  no ledger row: `start/stop/cancel/list_recording`, browser `MediaRecorder`, and
+  `POST /recording/save` producing an artifact plus a governed memory record. A
+  transcript, though, was shown once and thrown away. Now:
+  - A transcript is kept as a document derived from its recording
+    (`related_artifact_ids`), made on demand through the configured
+    transcription provider.
+  - `find_recording` picks the recording a request means by the request's own
+    words, otherwise the newest.
+  - "My recording" or "the interview recording" resolve to its transcript, so
+    `knowledge`, `read_content` and a Brain read it like any document.
+  - `live_information` yields to content already in play.
+  - Acting on a recording (captions, clipping, transcribing) is not a question
+    about it. That collision was caught by the full suite, not by me.
+
+  At runtime (a garden committee meeting):
+  - Half Brain quoted the decisions word for word, read the recording aloud,
+    and gave a labelled extract.
+  - After a restart it answered from the kept transcript with no second
+    transcription.
+  - Full Brain, a probe backend selected in the Control Center, received the
+    transcript's words.
+- **Not changed, only restated honestly.**
+  - Goal-to-commitment links by meaning ("cardiovascular health" and "jogging")
+    need a model, so R-03 is PARTIAL rather than VERIFIED WORKING.
+  - R-06's third citation (`0c651e7f:13822`) is an automatic context summary
+    written by Claude, not the owner's words. The owner's genuine instruction
+    makes Gmail send conditional on explicit governance and authorisation, so it
+    is an owner decision.
+  - Screen and camera-video capture are not implemented: missing software, not
+    external.
+- **A real LLM request through the Control Center.** `provider llm_provider use
+  local` plus the governed `brain.manager` produced real Qwen2.5-1.5B inference
+  (292 s and 115 s, labelled LOCAL MODEL). Switching to a second backend changed
+  who answered. The local answers were unusable, and it lost a taught goal, as
+  PRV-08 already records.
+
+**Suites.** New: `tests/test_live_voice_output_path.py` (11) and
+`tests/test_verification_repairs_2026_09_21.py` (28). Four existing pins were
+updated where the pinned behaviour was the defect:
+- `route_message` still speaks by default
+- the foreign-voice fallback in two tests
+- the `anywhere` set now includes personal memory
+
+The `time` import in `src/channels` was added to that layer's stdlib allow-list.
