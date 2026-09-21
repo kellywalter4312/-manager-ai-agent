@@ -10495,3 +10495,107 @@ updated where the pinned behaviour was the defect:
 - the `anywhere` set now includes personal memory
 
 The `time` import in `src/channels` was added to that layer's stdlib allow-list.
+
+### 52.53 Voice governance for every agent, voice dimensions, capture to action
+
+**Starting point.** The development state was rebuilt from the repository at
+`1eff54b` (clean), not from an old phase label. The voice system was then
+re-verified at runtime against the owner's stated model:
+
+- the agent chooses its voice
+- the person overrides it
+- the provider supplies it
+
+The dimensions must stay separate: provider, voice identity, language, accent,
+dialect/variant, style, pace and translation target. A broad matrix then re-ran
+every other capability with fresh inputs. `REQUIREMENT_LEDGER.md` section U
+holds the rows.
+
+**What held without change.** Alfred's own voice governance was already right:
+`select_voice` chooses, reselects excluding the last choice, releases the
+person's override, and defers to that override. The choice survives a restart,
+and the Control Center names its source.
+
+**What did not hold, and the repairs.**
+
+- **A language was confirmed that was not spoken.** "Speak Italian" answered
+  "Done - from now on I'm speaking Italian" while English was said, because no
+  translator was enabled to put the written reply into Italian.
+  `configure_voice` now keeps the setting but says it cannot be spoken yet, and
+  how to enable translation. `SpokenAudio.note` and `POST /speech` report "said
+  as written", and the page's indicator shows it. With translation enabled,
+  Italian is really spoken: Whisper identified it with p=0.999.
+- **A request about how to sound was recorded as a choice of voice nobody
+  made.**
+  - The voice that satisfied "English with an Italian accent" was written as
+    the person's explicit override, and it was female.
+  - "Speak English again" then pinned a different female voice.
+
+  Such a voice is now the agent's own choice, recorded like any autonomous
+  choice and still the person's to override. The one exception is when the
+  person had already chosen a voice: then their choice moves with their
+  request. Accent and variant choices keep the current voice's gender (the
+  language branch already did).
+- **The variant and style dimensions were missing.**
+  - A language's own regional variety is now a setting separate from accent:
+    `variant` is a native voice of that language whose reported locale is that
+    region. It is parsed from "speak Brazilian Portuguese" or "use a British
+    English dialect", carried across providers, and refused naming the variants
+    that exist. "Use a Nigerian English voice if one is available" stays the
+    softer select-voice request it already was.
+  - `style` is represented only through a provider's reported
+    `speaking_styles()`. No local provider reports any, so a style request is
+    refused honestly rather than ignored.
+  - The translation target remains the translator's own, never the voice's.
+- **Specialists could not choose.** "Arthur, choose the voice that suits you"
+  was refused. `CognitiveAgent.conversational_reply` now asks a
+  composition-built callable (`specialist_voice_handler`). It runs the one
+  `select_voice` with the specialist's own name, own memory and own governed
+  `retain`, against the provider's voices, facts and translation, all read at
+  the moment of asking. The specialist memory policy admits exactly the agent's
+  own voice facts (`voice_preference`, `voice_autonomous_choice`,
+  `voice_setting`) and still refuses the person's context (tested).
+  - The first version imported the orchestrator's module into the specialist
+    package. Three existing layering tests failed on it, correctly, and the
+    callable design replaced it.
+  - Verified: Arthur chose, the person overrode him, release returned the
+    choice to him, restart kept it, and Alfred was untouched throughout.
+- **Capture to action.** "Add a task from my design review recording for the
+  drawings" made a task of those very words. `create_task` now resolves the
+  pointed-at content through the same resolution questions use (so a
+  recording's transcript), takes the one sentence matching the words given,
+  names where it came from, and asks when there is no match or a tie.
+- **A model echo presented as an answer.** The local model, selected in the
+  Control Center, returned "Which of my commitments support my goals?" as its
+  answer to that question. `LLMManagerBrain.converse` now treats a reply that
+  only repeats the request as no answer. It uses the check the local assistant
+  already had, moved to `src/providers/base.py` and shared.
+- **The Control Center showed no declared voice for Arthur.** "(none declared)"
+  appeared because only the Windows-style name was read. It now lists the voice
+  declared for each provider.
+
+**Honest limits recorded, not repaired.**
+- Offline translation has one Portuguese: a Brazilian voice speaks European
+  "comboio".
+- No local provider has speaking styles.
+- The Windows recogniser mishears names ("Tomas" became "to wash").
+- Semantic goal linking needs a capable model; the local one echoes.
+
+**Broad matrix, fresh inputs: 35/35 on the committed tree.** It covered:
+- **Translation:** text translation, speech to translated speech, the live
+  display, subtitles.
+- **LLM switching and accounts:** switching changed the answering backend and
+  survived a restart; accounts were added, listed, validated, persisted and
+  revoked with no secret echoed.
+- **Capture to question and task.**
+- **3D and media:** a 3D street lamp, a refused bare subject, an edited real
+  PNG, a 4.0 s clip, and a non-clip left alone.
+- **Gmail and Arthur:** Gmail status and a refused send, plus Arthur's memory,
+  status and screens.
+- **Workspaces:** create, rename, Arthur and Alfred moving in, restart, a
+  390 px phone render with no horizontal overflow, archive, restore, remove.
+
+**Suites.** 8072 passed in fixed and randomised order, with production `data/`
+byte-identical throughout. The host stopped the browser re-run of the page's
+ambient voice loop for low system memory, so it was last verified on
+`2d7f1bf`.
