@@ -18,8 +18,9 @@ entry point chooses to load one, ever touch this file - the identical
 boundary ``gmail_credentials_path`` already sits behind. Secrets are
 written to disk here (there is no way to persist a credential without
 that being true somewhere - Gmail's own token file already does this),
-never logged, never echoed back in full by the CLI built on top of this
-module.
+protected by Windows' per-user encryption (DPAPI) where it exists (see
+the bottom of this module), never logged, never echoed back in full by
+the CLI built on top of this module.
 """
 
 from __future__ import annotations
@@ -56,7 +57,7 @@ def load_credential_store(path: "Path | str" = DEFAULT_ACCOUNTS_PATH) -> Credent
             ProviderAccount(
                 provider=entry["provider"],
                 account_id=entry["account_id"],
-                credential=entry["credential"],
+                credential=_read_credential(entry),
                 model=entry.get("model"),
             ),
             activate=False,
@@ -105,7 +106,7 @@ def save_credential_store(store: CredentialStore, path: "Path | str" = DEFAULT_A
             {
                 "provider": account.provider,
                 "account_id": account.account_id,
-                "credential": account.credential,
+                **_stored_credential(account.credential),
                 "model": account.model,
             }
             for account in store
@@ -117,3 +118,70 @@ def save_credential_store(store: CredentialStore, path: "Path | str" = DEFAULT_A
         },
     }
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# At rest: on Windows a credential is written protected by the operating
+# system's own per-user encryption (DPAPI, ``CryptProtectData``) - readable
+# only by this Windows account on this machine, useless if the file is copied
+# elsewhere or read by another user. Where DPAPI does not exist the value is
+# written as before, and nothing pretends otherwise. A plaintext entry from an
+# earlier version still loads, and is protected the next time the store is
+# saved. Standard library only (ctypes), like the rest of this module.
+# ---------------------------------------------------------------------------
+
+_PROTECTED_KEY = "credential_protected"
+_DPAPI_PREFIX = "dpapi:"
+
+
+def _stored_credential(credential: str) -> dict:
+    protected = _dpapi(credential.encode("utf-8"), protect=True)
+    if protected is None:
+        return {"credential": credential}
+    import base64
+
+    return {_PROTECTED_KEY: _DPAPI_PREFIX + base64.b64encode(protected).decode("ascii")}
+
+
+def _read_credential(entry: dict) -> str:
+    value = entry.get(_PROTECTED_KEY)
+    if not value:
+        return entry["credential"]
+    import base64
+
+    if not str(value).startswith(_DPAPI_PREFIX):
+        raise ValueError("unknown credential protection format")
+    clear = _dpapi(base64.b64decode(str(value)[len(_DPAPI_PREFIX):]), protect=False)
+    if clear is None:
+        raise ValueError(
+            "a stored credential is protected by Windows for another user or machine and cannot be read here - "
+            "add the account again from the Control Center"
+        )
+    return clear.decode("utf-8")
+
+
+def _dpapi(data: bytes, *, protect: bool) -> "bytes | None":
+    """``CryptProtectData``/``CryptUnprotectData`` over ``data``; None where
+    DPAPI is unavailable (not Windows) or refuses (another user's data)."""
+    import sys
+
+    if sys.platform != "win32":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    class _Blob(ctypes.Structure):
+        _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+    buffer = ctypes.create_string_buffer(data, len(data))
+    source = _Blob(len(data), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_char)))
+    result = _Blob()
+    crypt32, kernel32 = ctypes.windll.crypt32, ctypes.windll.kernel32
+    call = crypt32.CryptProtectData if protect else crypt32.CryptUnprotectData
+    ok = call(ctypes.byref(source), None, None, None, None, 0x1, ctypes.byref(result))  # CRYPTPROTECT_UI_FORBIDDEN
+    if not ok:
+        return None
+    try:
+        return ctypes.string_at(result.pbData, result.cbData)
+    finally:
+        kernel32.LocalFree(result.pbData)

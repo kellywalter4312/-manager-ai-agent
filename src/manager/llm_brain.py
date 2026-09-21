@@ -317,6 +317,15 @@ class LLMManagerBrain(ManagerBrain):
             return BrainDecision.no_view(
                 reason="the model returned no text", source=self._source(completion)
             )
+        # No model is configured behind this provider: its label is not a
+        # reply (2026-09-21: "[null-provider] no language model is configured;
+        # received a 590-character prompt" was shown to the person as Alfred's
+        # answer once reasoning was on and the vendor had been revoked).
+        if not getattr(self._provider, "produces_answers", True):
+            return BrainDecision.no_view(
+                reason="no language model is configured (the reasoning provider is 'null')",
+                source=self._source(completion),
+            )
         # A small model sometimes "answers" by repeating the request. That is
         # no answer, and presenting it as Alfred's reply is worse than saying
         # so (2026-09-21: the local model returned "Which of my commitments

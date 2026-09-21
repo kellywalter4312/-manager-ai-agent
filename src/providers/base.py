@@ -111,6 +111,13 @@ class LLMProvider(ABC):
         silently sending nothing.
         """
 
+    @property
+    def produces_answers(self) -> bool:
+        """Whether this provider's completions are a model's answers. A
+        stand-in that reports "no model is configured" (``NullProvider``)
+        says False, so its label is never presented to a person as a reply."""
+        return True
+
     def __repr__(self) -> str:
         return f"<{type(self).__name__} name={self.name!r}>"
 

@@ -739,6 +739,17 @@ def run_voice_configuration_command(centre, channel, agent_name: str, agent, mem
         return f"the {channel.name} channel carries no speech engine"
     facts = voice_facts(speech)
     remember = memory.remember
+    if action == "release":
+        # The person hands the choice back: their explicit voice goes, the
+        # agent's own choice (or its declared voice) speaks again.
+        from src.services.identity.voice_preference import release_voice_preference
+
+        released = release_voice_preference(agent_name, recall=memory.recall, forget=memory.forget)
+        return (f"{agent_name} chooses its own voice again - your explicit choice was released."
+                if released else f"{agent_name} was already choosing its own voice - nothing was locked in.")
+    if action in ("variant", "accent", "style") and value.lower() in ("clear", "default", "none"):
+        set_voice_setting(agent_name, action, "", recall=memory.recall, remember=remember, forget=memory.forget)
+        return f"{agent_name}'s {action} setting is cleared - the voice speaks as it naturally does."
     if action == "test":
         words = value or "This is how I sound right now."
         profile = effective_voice_for(agent, recall=memory.recall, discover_voices=getattr(speech, "available_voices", None))
@@ -771,11 +782,23 @@ def run_voice_configuration_command(centre, channel, agent_name: str, agent, mem
     if action == "language" and value.lower() in ("clear", "default", "none"):
         set_voice_setting(agent_name, "language", "", recall=memory.recall, remember=remember, forget=memory.forget)
         return f"{agent_name} speaks the language replies are written in again."
+    variant = language_named = None
+    if action == "variant":
+        # "voice Alfred variant british" (the current language's variety) or
+        # "voice Alfred variant brazilian portuguese".
+        from src.services.identity.voice_configuration import canonical_language, region_word
+
+        words = value.lower().split()
+        variant = region_word(words[0]) if words else None
+        language_named = canonical_language(" ".join(words[1:])) if len(words) > 1 else None
+        if variant is None:
+            return f"FAILED: '{value}' does not name a regional variety (e.g. british, american, brazilian)."
     plan = plan_voice(
-        facts, current=current, current_language=current_language,
-        language=value if action == "language" else None,
+        facts, current=current, current_language=language_named or current_language,
+        language=(value if action == "language" else language_named),
         accent=value if action == "accent" else None,
         pace=value.lower() if action == "pace" else None,
+        variant=variant, style=value if action == "style" else None,
     )
     if not plan.ok:
         return f"FAILED: {plan.message}"
@@ -786,6 +809,10 @@ def run_voice_configuration_command(centre, channel, agent_name: str, agent, mem
         )
     if plan.language:
         set_voice_setting(agent_name, "language", plan.language, recall=memory.recall, remember=remember, forget=memory.forget)
+    if plan.language or plan.variant:
+        set_voice_setting(agent_name, "variant", plan.variant or "", recall=memory.recall, remember=remember, forget=memory.forget)
+    if plan.style:
+        set_voice_setting(agent_name, "style", plan.style, recall=memory.recall, remember=remember, forget=memory.forget)
     if action == "accent" or (plan.voice is not None and (current is None or plan.voice.voice_id != current.voice_id)):
         # The accent asked for travels to other providers; a voice changed for
         # any other reason leaves no stale accent behind.
@@ -1600,6 +1627,34 @@ def _require_category(registry, category: str):
     return adapter, None
 
 
+def _retire_backend_without_account(centre: "ControlCenter", adapter, category: str, backend: str, store) -> str:
+    """When the account just revoked was the last one of the backend a
+    category is actively using, and that backend cannot run without one, the
+    running system must stop using the revoked credential: the category moves
+    to its own "no provider" backend (``none``/``null``), saved and applied
+    live, and the reply says so. Not a fallback to some other provider - the
+    person chooses the next one. "" when nothing needs retiring."""
+    if category == LLM_CATEGORY:
+        active = centre.runtime.settings.provider
+    else:
+        field_name = GOVERNED_BACKEND_FIELDS.get(category)
+        active = getattr(centre.runtime.settings, field_name, None) if field_name else None
+    if active != backend or store.active(backend) is not None:
+        return ""
+    if adapter.validate(backend, credential=None).ok:
+        return ""  # a backend that runs without an account keeps running
+    known = {descriptor.key for descriptor in adapter.available()}
+    off = next((key for key in ("none", "null") if key in known), None)
+    if off is None:
+        return (f" '{backend}' was the active {category} backend and has no account left; this category has no "
+                f"'none' backend to move to - choose another with 'provider {category} use <backend>'.")
+    config = load_governed_config(DEFAULT_CONFIG_PATH)
+    save_governed_config(config.with_value(f"provider.{category}", off), DEFAULT_CONFIG_PATH)
+    applied = _apply_reasoning_live(centre, store) if category == LLM_CATEGORY else _apply_backends_live(centre)
+    return (f" '{backend}' was the active {category} backend and has no account left, so it is no longer used: "
+            f"'{category}' is now '{off}'. Choose the next one with 'provider {category} use <backend>'." + applied)
+
+
 def _require_backend(adapter, category: str, backend: str):
     """A backend key must actually belong to this category's own,
     honest catalog (``adapter.available()``) - the identical "no
@@ -1867,6 +1922,9 @@ def run_provider_command(centre: "ControlCenter", rest: str) -> str:
             return backend_error
         store.revoke(backend, account_id)
         save_credential_store(store, DEFAULT_ACCOUNTS_PATH)
+        retired = _retire_backend_without_account(centre, adapter, category, backend, store)
+        if retired:
+            return f"revoked {backend}/{account_id}." + retired
         if category == LLM_CATEGORY and backend == centre.runtime.settings.provider:
             return f"revoked {backend}/{account_id}." + _apply_reasoning_live(centre, store)
         return f"revoked {backend}/{account_id}." + (_apply_backends_live(centre) if category != LLM_CATEGORY else "")
@@ -1888,11 +1946,20 @@ def run_provider_command(centre: "ControlCenter", rest: str) -> str:
             field_name = GOVERNED_BACKEND_FIELDS.get(category)
             if field_name is None:
                 return f"'use' is not available for '{category}' - it has no single backend choice to save."
-            outcome = adapter.validate(backend, credential=None)
+            # Built with the account the person stored for this backend here -
+            # never only an environment variable (2026-09-21: an ElevenLabs key
+            # added in the Control Center could not be used from it).
+            stored = store.active(backend)
+            outcome = adapter.validate(backend, credential=stored)
             if not outcome.ok:
+                hint = (
+                    "" if stored is not None else
+                    f" No account is stored for '{backend}' - add one here first: "
+                    f"provider {category} add {backend} <account-id> <credential>."
+                )
                 return (
-                    f"FAILED: '{backend}' cannot be used for '{category}': {outcome.detail}. "
-                    "Nothing was saved."
+                    f"FAILED: '{backend}' cannot be used for '{category}': {outcome.detail}.{hint} "
+                    "Nothing was saved - the current backend stays in use."
                 )
             config = load_governed_config(DEFAULT_CONFIG_PATH)
             save_governed_config(config.with_value(f"provider.{category}", backend), DEFAULT_CONFIG_PATH)
@@ -1920,7 +1987,9 @@ def run_provider_command(centre: "ControlCenter", rest: str) -> str:
         if not action_args:
             return "usage: provider <category> validate <key> [credential]"
         key = action_args[0]
-        credential = action_args[1] if len(action_args) > 1 else None
+        # A typed credential is validated as given; otherwise the account the
+        # person stored for this backend is the one checked.
+        credential = action_args[1] if len(action_args) > 1 else store.active(key)
         outcome = adapter.validate(key, credential=credential)
         detail = (
             f"{'OK' if outcome.ok else 'FAILED'}: {outcome.detail}\n"
@@ -3715,7 +3784,7 @@ def run_command(
         available = tuple(catalog_fn()) if callable(catalog_fn) else None
 
         sub_action, _, sub_value = voice_name.partition(" ")
-        if sub_action.lower() in ("language", "accent", "pace", "test") and agent is not None:
+        if sub_action.lower() in ("language", "variant", "accent", "pace", "style", "test", "release") and agent is not None:
             return run_voice_configuration_command(
                 centre, channel, view.name, agent, memory, sub_action.lower(), sub_value.strip(),
             )
@@ -3799,9 +3868,12 @@ def run_command(
             lines.append(f"  spoken language: {_setting(view.name, 'language', recall=memory.recall) or 'the language replies are written in'}")
             accent_setting = _setting(view.name, "accent", recall=memory.recall) or "the chosen voice's own"
             lines.append(f"  accent: {accent_setting}")
+            lines.append(f"  variant: {_setting(view.name, 'variant', recall=memory.recall) or 'none chosen'}")
+            lines.append(f"  style: {_setting(view.name, 'style', recall=memory.recall) or 'none chosen'}")
             lines.append(f"  pace: {_setting(view.name, 'pace', recall=memory.recall) or (current.pace if current and current.pace else 'provider default')}")
             lines.append(f"  choose with: voice {view.name} <name>")
-            lines.append(f"  configure: voice {view.name} language <name|clear> | accent <name> | pace <word> | test <words>")
+            lines.append(f"  configure: voice {view.name} language <name|clear> | variant <region> [language] | clear | accent <name|clear> "
+                         f"| style <word|clear> | pace <word> | test <words> | release (hand the choice back to {view.name})")
             lines.append(
                 "  or ask in conversation, e.g. 'find me an Italian voice' - "
                 "select_voice will choose autonomously among the options above"

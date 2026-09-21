@@ -29,6 +29,10 @@ class NullProvider(LLMProvider):
     def name(self) -> str:
         return "null"
 
+    @property
+    def produces_answers(self) -> bool:
+        return False
+
     def complete(self, prompt: str, *, system: str | None = None) -> Completion:
         if not prompt.strip():
             raise ValueError("prompt must not be empty")

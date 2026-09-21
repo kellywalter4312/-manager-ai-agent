@@ -1432,8 +1432,10 @@
               <select id="cc-prov-action">
                 <option value="add">add</option>
                 <option value="select">select</option>
+                <option value="use">use (make this backend active)</option>
                 <option value="revoke">revoke</option>
                 <option value="validate">validate</option>
+                <option value="check">check (asks the vendor)</option>
               </select>
             </div>
             <div class="mgmt-row">
@@ -1445,8 +1447,33 @@
               provider module a terminal's own 'provider' command already uses - the same
               confirmation step and administrative audit record apply to add/select/revoke,
               and no credential is ever echoed back or logged. A category has exactly one
-              active backend at a time - selecting a new one replaces it, unlike Connections
-              below, where connecting one service never disconnects another.</div>
+              active backend at a time: 'use' makes a backend the active one (a local backend
+              needs no account), 'select' chooses which of a backend's accounts it uses, and
+              'check' asks the vendor whether an account's credential is accepted - the one
+              action that leaves this machine. Connecting a service below never disconnects another.</div>
+          </div>
+
+          <div class="mgmt-sub">
+            <div class="lab">Voices</div>
+            <div class="mgmt-row">
+              <input type="text" id="cc-voice-agent" placeholder="agent, e.g. Alfred"/>
+              <select id="cc-voice-action">
+                <option value="">show</option>
+                <option value="choose">choose voice</option>
+                <option value="language">language</option>
+                <option value="variant">variant (dialect)</option>
+                <option value="accent">accent</option>
+                <option value="style">style</option>
+                <option value="pace">pace</option>
+                <option value="test">test (save a sample)</option>
+                <option value="release">release (the agent chooses)</option>
+              </select>
+              <input type="text" id="cc-voice-value" placeholder="value, e.g. british, clear, slow"/>
+              <button type="button" id="cc-voice-go">Go</button>
+            </div>
+            <div class="mgmt-note">The same 'voice' command a terminal uses. Which provider speaks is chosen above
+              (category speech_provider, action use); here each agent's own voice, language, variety, accent, style
+              and pace - each kept separate, and refused honestly when the provider cannot do it.</div>
           </div>
 
           <div class="mgmt-sub">
@@ -5163,11 +5190,33 @@
           command = "provider " + category + " revoke " + backend + " " + account;
         }else if(action === "validate"){
           command = "provider " + category + " validate " + backend + (credential ? " " + credential : "");
+        }else if(action === "use"){
+          command = "provider " + category + " use " + backend;
+        }else if(action === "check"){
+          command = "provider " + category + " check " + backend + (account ? " " + account : "");
         }
         if(command){
           runCommand(command);
           provCredential.value = "";
         }
+      });
+    }
+
+    // Voices: a guided form over the same "voice" command the console takes.
+    const voiceAgent = stage.querySelector("#cc-voice-agent");
+    const voiceAction = stage.querySelector("#cc-voice-action");
+    const voiceValue = stage.querySelector("#cc-voice-value");
+    const voiceGo = stage.querySelector("#cc-voice-go");
+    if(voiceGo && voiceAgent && voiceAction && voiceValue){
+      voiceGo.addEventListener("click", () => {
+        const agent = voiceAgent.value.trim();
+        const action = voiceAction.value;
+        const value = voiceValue.value.trim();
+        if(!agent){ out.textContent = "Enter an agent first, e.g. " + manager().name + "."; return; }
+        if(!action){ runCommand("voice " + agent); return; }
+        if(action === "release"){ runCommand("voice " + agent + " release"); return; }
+        if(!value){ out.textContent = action + " needs a value."; return; }
+        runCommand(action === "choose" ? "voice " + agent + " " + value : "voice " + agent + " " + action + " " + value);
       });
     }
 
