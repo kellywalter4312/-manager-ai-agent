@@ -10965,3 +10965,60 @@ artifact's own declared type when the extension alone is ambiguous).
 depends on what the OS/browser combination genuinely offers - requested
 (`audio: true` alongside `video: true`) and silently dropped where
 unsupported, never worked around or fabricated.
+
+### 52.59 CON-05/PDF-10 - the website-connection mechanism, now real-
+browser-verified
+
+**The question.** The fourth known entry point named for this campaign.
+Unlike T-3D-02/T-REC-03, this was never missing software - the ledger
+already recorded CON-05's generalized outward-connection mechanism as
+VERIFIED WORKING, and PDF-10/RD-05 ("fetch/read a live web address") as
+correctly gated behind it: a deliberate governance boundary (no agent
+ever reaches an undeclared, unauthorized address), not a defect. The
+question this campaign actually had to answer was narrower: is that
+still true, and is the specific mechanism PDF-10 depends on -
+`WebsiteConnection` (`src/providers/website_connection.py`, built on
+`CDPBrowser`) - verified as deeply as the REST-based `DeclaredConnection`
+path already is?
+
+**What was found.** `tests/test_website_connection.py`'s own docstring
+names a real, structural gap in its own coverage: `tests/conftest.py`'s
+`_no_network` fixture blocks every outbound socket, including
+`127.0.0.1`, for the whole pytest session - by deliberate project
+policy. A real `CDPBrowser` needs a real localhost connection to prove
+anything, so it *cannot run inside that suite at all* - every existing
+test drives `WebsiteConnection` against a hand-written double instead.
+That is honestly disclosed, not hidden, but it means the mechanism's
+real-browser behaviour had never actually been observed - exactly the
+gap this whole campaign's verification standard exists to catch ("a
+backend test passes" is not the bar).
+
+**What was done - no source changed, because none needed to.** A live
+verification script (outside pytest, the only place a real `CDPBrowser`
+can run) served a real local HTML page - never the real internet, no
+vendor, nothing metered - with a real form, then drove a real, non-mocked
+`WebsiteConnection` through its actual governed operations:
+
+| Operation | Real result |
+|---|---|
+| `navigate` | Loaded the real local page; `ConnectionStatus.SUCCEEDED` |
+| `read_page` | Discovered the real DOM's own input/button/link, each given a real `data-alfred-locator`, with real labels read from the actual page |
+| `fill_field` | A real `input`/`change` event dispatched into the real `<input>` |
+| `click` | Genuinely activated the button's own `onclick` handler, which read the just-filled value back out of the DOM and wrote `"Thanks, Ada Lovelace!"` into the page - confirmed by a second real `read_page` |
+| An unknown locator | `ConnectionStatus.FAILED`, honestly, never a fabricated success |
+
+This is real evidence a fake double cannot produce: the click's own
+effect depended on the fill's own effect having genuinely reached the
+real page's own JavaScript - two governed operations composing correctly
+against a real DOM, not merely each returning the right Python-level
+status object.
+
+**Outcome.** CON-05 and PDF-10/RD-05 keep their existing classification -
+this was verification depth, not a repair, and nothing here authorizes
+or declares any real outward connection. What changed is confidence: the
+mechanism PDF-10 depends on is now proven against a real browser, not
+only against the double the committed suite is structurally limited to.
+The remaining gap for PDF-10/RD-05 is exactly what the ledger already
+said it was - an owner-declared, owner-authorized connection - and this
+campaign invented no new one, consistent with its own instruction not to
+build around a deliberate governance boundary.
