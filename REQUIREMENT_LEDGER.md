@@ -475,6 +475,30 @@ Levels used below: **code** (implemented), **registered**, **integrated**
 | V-VOICE-01 | Voice settings from the page, each dimension apart | language/accent/pace/test only | `voice <agent> variant`, `style`, `accent clear`, `style clear`, `release` added; the view shows variant and style; a Voices form on the page drives the command | Form: Alfred accent italian -> `im_nicola`; style calm -> refused (no styles); variant british -> `bm_daniel` "speaking British English"; pace slow; Arthur `am_eric`; restart kept both agents' voices; release -> Alfred's own choice; accent clear | Hearing it - HARDWARE | VERIFIED - HARDWARE DEPENDENT |
 | V-DATA-01 | Production credential file holds only real accounts | Found: production `data/credentials/accounts.json` held one account for `reservablething`, the 2026-09-11 verification fixture service (CON-03 lineage) that no longer exists | Owner authorised removal 2026-09-22; run through the existing operator tool, not a hand edit: `PYTHONPATH=. python scripts/ecosystem_cli.py revoke-account reservablething testaccount` | `accounts` before: `[*] reservablething/testaccount`; `accounts.json` after: `{"accounts": [], "active": {}}` — the same empty-store shape `load_credential_store` already treats as a valid, error-free start; file confirmed git-ignored (`data/*` + explicit `data/credentials/accounts.json` rule), so this is a production-data change with no source diff; no other file under `data/` changed (mtime sweep); full suite re-run after, both orders, 8083/8083 | The stale `connection.reservablething` pointer in `data/evolution/state.json` (a cached snapshot string, not a credential or account) was left untouched — out of the authorised scope and already recorded under CON-03 as cosmetic | VERIFIED — removed, confirmed gone, regression-clean |
 
+## W. Final ecosystem closure - capability, workspace and system reachability (2026-09-22)
+
+Verified through the **served system** (`serve_ui.build_live_system` ->
+`control_center.build`) by ordinary conversation and Control Center
+commands, with a restart in the middle, every governed path sandboxed, no
+network and no metered call. ARCHITECTURE.md §52.61. Regression protection:
+`tests/test_capability_authorization_and_defined_specialists.py` (45).
+Closes the question N-08's row left open ("other Manager-only capabilities
+were not swept").
+
+| ID | Requirement | Before | Change | Evidence | Status |
+|---|---|---|---|---|---|
+| W-CAP-01 | Every capability states who may use it; Manager-only only with a stated reason | No authority concept - every capability de facto Manager-only | `ManagerCapability.authority` (grantable default / every_agent / manager + mandatory reason); `capability_access.py` | 50 registered: 23 grantable, 15 every-agent, 12 Manager-only, each reason registered; a Manager-only capability without a reason cannot be registered | VERIFIED |
+| W-CAP-02 | A specialist can be authorised for a capability without taking it from Alfred | Not possible | `capabilities grant/revoke <agent> <name>`, read live by one shared `SpecialistCapabilities` handler | Nova granted `create_3d_model` builds a real `.glb`; Alfred builds straight after; revoke live at once; grant survives restart | VERIFIED |
+| W-AGT-01 | A new specialist needs no code and no specialist-type list | Only code-defined specialists (`SPECIALISTS`) | `agent create <key> <Name>\|<area>[\|grants]` -> `GeneralSpecialist` from data | Created, own identity/Brain/memory/voice/Workspace, persisted, reloaded, removed; same grant path for shipped Arthur | VERIFIED |
+| W-AGT-02 | A specialist is never a second Manager | - | Empty roster in every specialist request; roster/invitation Manager-only | "which agents do you have?" to Nova -> "only Alfred does ... Ask Alfred." | VERIFIED |
+| W-3D-01 | 3D dimensions as said | **BROKEN** - "8 wide 0.3 tall 2 deep" built 0.3 wide (each adjective took the number after it) | Adjectives read the number before, nouns the number after (`model3d._dimensions`) | Bridge 8 x 0.3 x 2, shed 2 x 2 x 3, greenhouse 3 x 2 x 4; Full Brain boat 4 x 4 x 1.5 (was 3 x 1.7 x 1.5) | REPAIRED, VERIFIED |
+| W-MEM-01 | What a specialist says it remembered, it can recall | **BROKEN** - "Nova, remember that X" -> "I've remembered that", stored in Alfred's memory; Nova: "I don't have anything remembered" | Plain note to an addressed specialist written through its own governed `retain` as its own explicit capture; person facts stay canonical | Nova and Arthur each recall "the windmill project is due on Friday"; "my goal is to learn Rust" still lands in the canonical record | REPAIRED, VERIFIED |
+| W-WS-01 | Workspaces never own capabilities | - | Workspace profile only redirects to another workspace set up for the work (recovered work) | Archived workspace -> Alfred still builds; no workspace for it -> work still done | VERIFIED |
+| W-WS-02 | Asked to create a workspace, an agent states the governed rule | Generic "can't reason" (Half Brain), a Brain free to claim success (Full) | Request-shaped recognition in `workspace_navigation`; `general_assistance` yields | Alfred and Nova: "I can't create workspaces - that's the owner's to do in the Control Center (workspace create ...)"; "I set up a new workspace yesterday" unclaimed | REPAIRED, VERIFIED |
+| W-ROS-01 | Alfred answers plain roster questions | Unanswered in Half Brain (four scored words only) | `roster_intent` - roster-question shapes, never bare "agent"/"team" | "which agents do you have?", "list your specialists", "who's on your team?" -> roster naming Nova and Arthur | REPAIRED, VERIFIED |
+| W-CC-01 | The static export describes the same system as the served page | **BROKEN** - granted capabilities missing from `export_ui` | Specialists equipped exactly as `control_center.build` does | Served and exported snapshot capability lists identical | REPAIRED, VERIFIED |
+| W-REPO-01 | Crash recovery without loss | Index zeroed by the crash | Snapshot, index rebuilt from HEAD, `fsck` clean | 14 recovered files intact; nothing had been staged (no objects between `ccec6c4` and the crash) | RESOLVED |
+
 ## O. Explicit Scope Boundaries (non-requirements, preserve these)
 
 | ID | Statement | Source | Status |
@@ -507,6 +531,8 @@ Levels used below: **code** (implemented), **registered**, **integrated**
 - U-VOICE-05 - ElevenLabs' real speaking-style capability (and a genuine gender-reporting defect found alongside it) now truthfully reported and wired to real voice selection; see the row itself for the full repair and evidence.
 - T-3D-02 - the 3D workspace's model viewer now offers real drag-orbit camera control, scroll-zoom, an automated fly-through and a day/night lighting toggle; see the row itself for the full repair and evidence.
 - T-REC-03 - screen and camera capture, real getDisplayMedia/getUserMedia(video) recording saved as a real, playable video_recording artifact; two real adjacent defects (specialist recordings never actually remembered; a video MediaRecorder's own mimeType comma corrupting the saved base64 payload) found and fixed alongside it; see the row itself for the full repair and evidence.
+
+- Section W (final ecosystem closure) - capability authority and owner grants, owner-defined specialists, and four defects found live and repaired (3D widths, a specialist's false "I've remembered", the static export's missing grants, workspace-creation honesty) plus roster questions; see the section itself.
 
 **Genuinely open, software-only, no owner action required:**
 - CON-05, PDF-10 — both correctly gated on a governed, owner-declared outward connection that doesn't exist yet; not defects, and the mechanism itself is now real-browser-verified (2026-09-22), not merely a fake-double proof — see CON-05's own row.

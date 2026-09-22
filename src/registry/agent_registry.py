@@ -49,6 +49,15 @@ class AgentRegistry:
             ", ".join(sorted(agent.spec.capabilities)),
         )
 
+    def unregister(self, name: str) -> BaseAgent | None:
+        """Remove the agent with this name and return it, or None if no agent
+        by that name is registered - an owner withdrawing a specialist they
+        created. What the agent kept stays wherever its own memory keeps it."""
+        agent = self._agents.pop(name, None)
+        if agent is not None:
+            logger.info("unregistered '%s'", name)
+        return agent
+
     def get(self, name: str) -> BaseAgent | None:
         """Return the agent with this name, or None if it is not registered."""
         return self._agents.get(name)

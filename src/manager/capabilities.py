@@ -508,6 +508,12 @@ class CapabilityRequest:
 # A handler answers one kind of question and returns the standard result shape.
 CapabilityHandler = Callable[[CapabilityRequest], TaskResult]
 
+# Who may use a capability - see ManagerCapability.authority.
+AUTHORITY_GRANTABLE = "grantable"
+AUTHORITY_EVERY_AGENT = "every_agent"
+AUTHORITY_MANAGER = "manager"
+CAPABILITY_AUTHORITIES = (AUTHORITY_GRANTABLE, AUTHORITY_EVERY_AGENT, AUTHORITY_MANAGER)
+
 
 @dataclass(frozen=True)
 class ManagerCapability:
@@ -551,10 +557,40 @@ class ManagerCapability:
     # describing itself, its own memory, moving between workspaces. A
     # profile scopes *work*; it never makes an agent unable to converse.
     anywhere: bool = False
+    # Final ecosystem closure: who may use this capability. A capability is
+    # registered once, here, and *authorised* per agent - never owned by one.
+    #
+    #   grantable    the default. The Manager always has it; the owner may
+    #                authorise any specialist for it in the Control Center
+    #                (``capabilities grant <agent> <name>``). Granting it
+    #                never takes it from the Manager or from anyone else.
+    #   every_agent  every agent has it, with its own name, memory and voice.
+    #                ``own_path`` names the agent-level route a specialist
+    #                reaches it through when that is not the shared
+    #                capability handler.
+    #   manager      system-level orchestration only the Manager holds;
+    #                ``authority_reason`` must say why. Never a default: a
+    #                capability is Manager-only because its reason is stated.
+    #
+    # A new capability therefore needs no list edited anywhere to become
+    # authorisable, and no specialist has to exist for it to be registered.
+    authority: str = "grantable"
+    authority_reason: str = ""
+    own_path: str = ""
 
     def __post_init__(self) -> None:
         if not self.name.strip():
             raise ValueError("ManagerCapability.name must not be empty")
+        if self.authority not in CAPABILITY_AUTHORITIES:
+            raise ValueError(
+                f"ManagerCapability '{self.name}' has authority {self.authority!r}; "
+                f"expected one of {', '.join(CAPABILITY_AUTHORITIES)}"
+            )
+        if self.authority == AUTHORITY_MANAGER and not self.authority_reason.strip():
+            raise ValueError(
+                f"ManagerCapability '{self.name}' is Manager-only but states no reason - "
+                "a restriction must say why it exists"
+            )
         if not self.capabilities:
             raise ValueError(
                 f"ManagerCapability '{self.name}' must answer to at least one word"
@@ -736,6 +772,8 @@ def invite_participant(request: CapabilityRequest) -> TaskResult:
 # word with no handler behind it is dropped, so these words mean something
 # exactly as far as this function goes.
 PARTICIPANT_INVITATION = ManagerCapability(
+    authority='manager',
+    authority_reason="coordinating the other agents is the orchestrator's role - a specialist that could list or invite its peers would be a second Manager",
     name="participant_invitation",
     capabilities=frozenset({"invite", "bring", "join", "participant", "participants"}),
     handle=invite_participant,
@@ -789,7 +827,31 @@ PARTICIPANT_INVITATION = ManagerCapability(
 # ("status report please", "give me a status report" - both proven still
 # routed here in this fix's own regression test), so nothing genuine was
 # lost; only the bare, over-broad word was.
+#
+# Final ecosystem closure: word scoring alone never reached this for the
+# plainest questions a person asks the orchestrator - "which agents do you
+# have?", "list your specialists", "who's on your team?" all came back
+# unanswered in Half Brain. Recognised here by shape, never by a bare word:
+# each names agents or specialists, or asks after *his* team, so "the report"
+# and "my team at work" stay what they are.
+_ROSTER_QUESTION = re.compile(
+    r"\b(?:which|what)\s+(?:other\s+)?(?:agents|specialists)"
+    r"(?:\s+(?:do|does|are|is|have|has|can|could|exist|work|you)\b|\s*[?.!]|\s*$)"
+    r"|\b(?:list|show|name)\s+(?:me\s+)?(?:all\s+(?:of\s+)?)?(?:the|your|all|every)\s+(?:other\s+)?(?:agents?|specialists?)\b"
+    r"|\bhow\s+many\s+(?:agents|specialists)\b"
+    r"|\bwho(?:'s|\s+is|\s+are)\s+(?:on|in)\s+your\s+team\b"
+    r"|\bwho\s+(?:works\s+with\s+you|do\s+you\s+work\s+with)\b",
+    re.IGNORECASE,
+)
+
+
+def roster_intent(task: Task, participants: Sequence[str] = ()) -> bool:
+    return bool(_ROSTER_QUESTION.search(str(task.description or "")))
+
+
 ROSTER_REPORT = ManagerCapability(
+    authority='manager',
+    authority_reason="coordinating the other agents is the orchestrator's role - a specialist that could list or invite its peers would be a second Manager",
     name="roster_report",
     anywhere=True,
     capabilities=frozenset(
@@ -802,6 +864,7 @@ ROSTER_REPORT = ManagerCapability(
     ),
     handle=report_roster,
     description="Reports the Manager's own capabilities and its specialist roster.",
+    claims=roster_intent,
 )
 
 
@@ -917,6 +980,8 @@ def asks_who_you_are(task: Task, participants: Sequence[str] = ()) -> bool:
 
 
 SELF_DESCRIPTION = ManagerCapability(
+    authority='every_agent',
+    own_path="CognitiveAgent.conversational_reply - the agent's own identity",
     # Named to sort first among the claiming handlers, and deliberately: a
     # direct question about who you are is answered by identity, not by
     # whichever other handler also recognises a word in it. This is not a
@@ -946,6 +1011,8 @@ SELF_DESCRIPTION = ManagerCapability(
 
 
 CONVERSATIONAL_FLOOR = ManagerCapability(
+    authority='every_agent',
+    own_path="CognitiveAgent.conversational_reply - the agent's own identity",
     # Named to sort *after* every other Manager capability's name
     # ("general_assistance", "participant_invitation", "roster_report") on
     # purpose. select_capability breaks a scoring tie by handler name,
@@ -1373,6 +1440,14 @@ def general_assistance_intent(task: Task, participants: Sequence[str] = ()) -> b
     # web search instead.
     if list_recordings_intent(task.description):
         return False
+    # Final ecosystem closure, the identical reasoning again, found live:
+    # "create a workspace called garden planning" matches this function's
+    # own "create" verb gate and workspace_navigation's own create shape at
+    # once - alphabetical sorting would otherwise let this capability win
+    # ("general_assistance" < "workspace_navigation") and answer with a
+    # Brain's guess instead of the owner's governed route.
+    if _asks_to_create_workspace(task.description or ""):
+        return False
     return True
 
 
@@ -1544,6 +1619,8 @@ def _assisted_answer(request: CapabilityRequest, *, context: "Sequence[str]" = (
 
 
 OPEN_CONVERSATION = ManagerCapability(
+    authority='every_agent',
+    own_path="CognitiveAgent.general_conversation - the agent's own Brain",
     name="open_conversation",
     anywhere=True,
     # Kinds of interaction, never subjects - the same discipline
@@ -1848,6 +1925,7 @@ def recall_memory(request: CapabilityRequest) -> TaskResult:
 
 
 FORGET = ManagerCapability(
+    authority='every_agent',
     name="forget",
     anywhere=True,
     capabilities=frozenset({"forget"}),
@@ -1863,6 +1941,7 @@ FORGET = ManagerCapability(
 )
 
 RECALL_MEMORY = ManagerCapability(
+    authority='every_agent',
     name="recall_memory",
     anywhere=True,
     capabilities=frozenset({"recall"}),
@@ -2489,6 +2568,8 @@ def correct_memory(request: CapabilityRequest) -> TaskResult:
 
 
 CORRECT_MEMORY = ManagerCapability(
+    authority='manager',
+    authority_reason='writes the one canonical record of the person, which only the Manager writes - every specialist reads it (personal_context_reply) and keeps its own memory',
     name="correct_memory",
     anywhere=True,
     capabilities=frozenset({"correct", "correction"}),
@@ -4464,6 +4545,8 @@ def start_recording(request: CapabilityRequest) -> TaskResult:
 
 
 START_RECORDING = ManagerCapability(
+    authority='every_agent',
+    own_path="CognitiveAgent.bind_recording - the agent's own recording session",
     name="start_recording",
     capabilities=frozenset({"recording", "audio"}),
     handle=start_recording,
@@ -4511,6 +4594,8 @@ def stop_recording(request: CapabilityRequest) -> TaskResult:
 
 
 STOP_RECORDING = ManagerCapability(
+    authority='every_agent',
+    own_path="CognitiveAgent.bind_recording - the agent's own recording session",
     name="stop_recording",
     capabilities=frozenset({"recording", "audio"}),
     handle=stop_recording,
@@ -4541,6 +4626,8 @@ def cancel_recording(request: CapabilityRequest) -> TaskResult:
 
 
 CANCEL_RECORDING = ManagerCapability(
+    authority='every_agent',
+    own_path="CognitiveAgent.bind_recording - the agent's own recording session",
     name="cancel_recording",
     capabilities=frozenset({"recording", "audio"}),
     handle=cancel_recording,
@@ -4604,6 +4691,8 @@ def list_recordings(request: CapabilityRequest) -> TaskResult:
 
 
 LIST_RECORDINGS = ManagerCapability(
+    authority='every_agent',
+    own_path="CognitiveAgent.bind_recording - the agent's own recording session",
     name="list_recordings",
     capabilities=frozenset({"recording", "audio"}),
     handle=list_recordings,
@@ -4742,6 +4831,8 @@ _TIME_HEADING = re.compile(r"^\s*\d+:\d{2}(?::\d{2})?\s*-\s*\d+:\d{2}(?::\d{2})?
 
 
 CREATE_TASK = ManagerCapability(
+    authority='every_agent',
+    own_path="CognitiveAgent.workspace_task_reply - the agent's own task board",
     name="create_task",
     # claims decides this, not word overlap - "task" alone would collide
     # with ordinary speech ("that was quite a task") the same way
@@ -4796,6 +4887,8 @@ def list_tasks(request: CapabilityRequest) -> TaskResult:
 
 
 LIST_TASKS = ManagerCapability(
+    authority='every_agent',
+    own_path="CognitiveAgent.workspace_task_reply - the agent's own task board",
     name="list_tasks",
     capabilities=frozenset({"task", "tasks"}),
     handle=list_tasks,
@@ -4884,6 +4977,8 @@ def complete_task(request: CapabilityRequest) -> TaskResult:
 
 
 COMPLETE_TASK = ManagerCapability(
+    authority='every_agent',
+    own_path="CognitiveAgent.workspace_task_reply - the agent's own task board",
     name="complete_task",
     capabilities=frozenset({"task", "tasks", "done", "finished", "completed"}),
     handle=complete_task,
@@ -4955,6 +5050,8 @@ def reopen_task(request: CapabilityRequest) -> TaskResult:
 
 
 REOPEN_TASK = ManagerCapability(
+    authority='every_agent',
+    own_path="CognitiveAgent.workspace_task_reply - the agent's own task board",
     name="reopen_task",
     capabilities=frozenset({"task", "tasks"}),
     handle=reopen_task,
@@ -5020,6 +5117,8 @@ def update_task(request: CapabilityRequest) -> TaskResult:
 
 
 UPDATE_TASK = ManagerCapability(
+    authority='every_agent',
+    own_path="CognitiveAgent.workspace_task_reply - the agent's own task board",
     name="update_task",
     capabilities=frozenset({"task", "tasks"}),
     handle=update_task,
@@ -5161,6 +5260,8 @@ def _answer_completion_countdown(request: CapabilityRequest, today) -> TaskResul
 
 
 TEMPORAL_DERIVATION = ManagerCapability(
+    authority='manager',
+    authority_reason="works on the person's own calendar, commitments and records kept in the Manager's memory - run for a specialist it would start a second, disconnected copy in that specialist's memory",
     name="temporal_derivation",
     capabilities=frozenset({"age", "birthday", "graduate", "graduation", "countdown"}),
     handle=temporal_derivation,
@@ -5369,6 +5470,7 @@ def current_datetime(request: CapabilityRequest) -> TaskResult:
 
 
 CURRENT_DATETIME = ManagerCapability(
+    authority='every_agent',
     name="current_datetime",
     capabilities=frozenset({"date", "day", "month", "year", "time", "hour", "minute", "clock", "calendar", "today"}),
     handle=current_datetime,
@@ -5612,6 +5714,8 @@ def milestone_recognition(request: CapabilityRequest) -> TaskResult:
 
 
 MILESTONE_RECOGNITION = ManagerCapability(
+    authority='manager',
+    authority_reason="works on the person's own calendar, commitments and records kept in the Manager's memory - run for a specialist it would start a second, disconnected copy in that specialist's memory",
     name="milestone_recognition",
     capabilities=frozenset({"milestone", "milestones"}),
     handle=milestone_recognition,
@@ -6150,6 +6254,8 @@ def personal_recurring_events(request: CapabilityRequest) -> TaskResult:
 
 
 PERSONAL_RECURRING_EVENTS = ManagerCapability(
+    authority='manager',
+    authority_reason="works on the person's own calendar, commitments and records kept in the Manager's memory - run for a specialist it would start a second, disconnected copy in that specialist's memory",
     name="personal_recurring_events",
     # Word overlap cannot tell "my mom's birthday is March 24" from an
     # ordinary sentence containing "birthday" - claims below is what
@@ -8661,6 +8767,8 @@ def _with_brain_if_available(request: CapabilityRequest, sources: dict, floor: s
 
 
 PERSONAL_GUIDANCE = ManagerCapability(
+    authority='manager',
+    authority_reason="works on the person's own calendar, commitments and records kept in the Manager's memory - run for a specialist it would start a second, disconnected copy in that specialist's memory",
     name="personal_guidance",
     capabilities=frozenset({"guidance", "plan_week"}),
     handle=personal_guidance,
@@ -8847,6 +8955,10 @@ def _build_3d_model(request: CapabilityRequest) -> TaskResult:
     subject = " ".join((next((g for g in found.groups() if g), "") if found else "").split()).strip(" ,") or "a model"
     subject = re.split(r"\s+(?:with|made\s+of|using|(?:that|which|so)?\s*(?:i|we|you)\s+(?:can|could)\b)\s*", subject,
                        maxsplit=1, flags=re.IGNORECASE)[0].strip(" ,") or "a model"
+    # "a 3D windmill, then a document": the next step of a longer request is
+    # not part of what is being modelled.
+    subject = re.split(r"\s*,?\s+(?:and\s+)?(?:then|after\s+that|afterwards)\b", subject,
+                       maxsplit=1, flags=re.IGNORECASE)[0].strip(" ,") or "a model"
     subject = re.sub(rf"^{_MODEL3D_NOUNS}\s+of\s+", "", subject, flags=re.IGNORECASE) or "a model"
     parsed = json.loads(request.tools.invoke("model3d", {"operation": "parse", "content": json.dumps({"description": text})}).output)
     grammar = json.loads(request.tools.invoke("model3d", {"operation": "grammar", "content": "{}"}).output)
@@ -8948,6 +9060,24 @@ _WORKSPACE_QUESTION = re.compile(
     r"|\b(?:list|show)\s+(?:me\s+)?(?:your|my|the|all|his|her|their)\s+(?:\w+\s+)?workspaces\b",
     re.IGNORECASE,
 )
+# "Alfred, create a workspace called garden planning": making a workspace is
+# the owner's governed write (Control Center ``workspace create``), never an
+# agent's - so the request is answered with that, truthfully, rather than left
+# to a Brain that could claim to have made one. Only a request - the verb in
+# command position, after an optional name, "please", "can you" or "let's" -
+# so "I set up a new workspace yesterday" stays a remark; and prepositions are
+# excluded so "make a model in the workspace" stays the work it is.
+_WORKSPACE_CREATE_SHAPE = re.compile(
+    r"^(?:please\s+)?(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?|i(?:'d|\s+would)\s+like\s+you\s+to\s+"
+    r"|i\s+(?:want|need)\s+you\s+to\s+|let'?s\s+)?"
+    r"(?:create|make|set\s+up|start|add|open)\s+(?:me\s+|us\s+)?(?:a|an|another)\s+(?:new\s+)?"
+    r"(?:(?!(?:in|into|for|on|at|to|of)\b)[\w'&-]+\s+){0,2}?workspace\b",
+    re.IGNORECASE,
+)
+
+
+def _asks_to_create_workspace(text: str) -> bool:
+    return bool(_WORKSPACE_CREATE_SHAPE.search(_strip_vocative(text)))
 
 
 def _workspace_move_target(text: str) -> "str | None":
@@ -8962,7 +9092,8 @@ def _workspace_move_target(text: str) -> "str | None":
 
 def workspace_navigation_intent(task: Task, participants: Sequence[str] = ()) -> bool:
     text = str(task.description or "")
-    return _workspace_move_target(text) is not None or bool(_WORKSPACE_QUESTION.search(text))
+    return (_workspace_move_target(text) is not None or bool(_WORKSPACE_QUESTION.search(text))
+            or _asks_to_create_workspace(text))
 
 
 def _profile_words(workspace: dict) -> str:
@@ -8976,6 +9107,13 @@ def workspace_navigation_reply(task: Task, agent_name: str, invoke: "Callable[[d
     the request is not about moving between workspaces. Generic to any agent:
     the Manager's own capability and a specialist's turn both come here."""
     text = str(task.description or "")
+    if _asks_to_create_workspace(text):
+        return TaskResult.failure(
+            task, agent_name,
+            "I can't create workspaces - that's the owner's to do in the Control Center "
+            "(workspace create <id> <label>|<panel>,<panel>, then workspace "
+            f"{agent_name} add <id>). Once it's mine I can go to it and work there.",
+        )
     target = _workspace_move_target(text)
     if target is None and not _WORKSPACE_QUESTION.search(text):
         return None
@@ -9017,6 +9155,8 @@ def workspace_navigation(request: CapabilityRequest) -> TaskResult:
 
 
 WORKSPACE_NAVIGATION = ManagerCapability(
+    authority='every_agent',
+    own_path="ManagerAgent.take_action - the agent's own workspaces",
     name="workspace_navigation",
     anywhere=True,
     capabilities=frozenset({"workspace", "workspaces"}),
@@ -9044,6 +9184,8 @@ TRANSLATE_MEDIA = ManagerCapability(
 
 
 COACH = ManagerCapability(
+    authority='manager',
+    authority_reason="works on the person's own calendar, commitments and records kept in the Manager's memory - run for a specialist it would start a second, disconnected copy in that specialist's memory",
     name="coach",
     capabilities=frozenset({"coach", "accountability"}),
     handle=coach,
@@ -9057,6 +9199,8 @@ COACH = ManagerCapability(
 
 
 READ_BACK = ManagerCapability(
+    authority='manager',
+    authority_reason="works on the person's own calendar, commitments and records kept in the Manager's memory - run for a specialist it would start a second, disconnected copy in that specialist's memory",
     name="read_back",
     capabilities=frozenset({"read", "aloud"}),
     handle=read_back,
@@ -9488,6 +9632,8 @@ def select_voice(request: CapabilityRequest) -> TaskResult:
 
 
 SELECT_VOICE = ManagerCapability(
+    authority='every_agent',
+    own_path="CognitiveAgent.bind_voice - the agent's own voice",
     name="select_voice",
     capabilities=frozenset({"voice", "accent"}),
     handle=select_voice,
@@ -9829,6 +9975,8 @@ def personal_context(request: CapabilityRequest) -> TaskResult:
 
 
 PERSONAL_CONTEXT = ManagerCapability(
+    authority='manager',
+    authority_reason='writes the one canonical record of the person, which only the Manager writes - every specialist reads it (personal_context_reply) and keeps its own memory',
     name="personal_context",
     capabilities=frozenset({
         "learned", "skill", "skills", "schedule", "timetable", "syllabus",
@@ -10268,6 +10416,8 @@ def calendar(request: CapabilityRequest) -> TaskResult:
 
 
 CALENDAR = ManagerCapability(
+    authority='manager',
+    authority_reason="works on the person's own calendar, commitments and records kept in the Manager's memory - run for a specialist it would start a second, disconnected copy in that specialist's memory",
     name="calendar",
     capabilities=frozenset({
         "calendar", "schedule", "appointment", "appointments", "event", "events",

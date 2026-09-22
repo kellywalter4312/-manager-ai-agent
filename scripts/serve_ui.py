@@ -1375,6 +1375,8 @@ MANAGEMENT_VERBS = frozenset(
         "profile", "voice", "review", "capabilities", "provider", "connections",
         "services", "sites", "ecosystem", "tasks", "artifacts", "personal", "governance",
         "calendar", "experience", "workspace", "recordings", "translation",
+        # Final ecosystem closure: creating specialists and granting capabilities.
+        "agent", "agents",
     }
 )
 

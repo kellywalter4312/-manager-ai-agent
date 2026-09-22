@@ -35,7 +35,7 @@ from src.config.coherence import (  # noqa: E402
     check_configuration,
 )
 from src.config.settings import Settings  # noqa: E402
-from src.composition import build_manager, build_runtime  # noqa: E402
+from src.composition import build_manager, build_runtime, register_defined_specialists  # noqa: E402
 from src.providers.factory import ProviderConfigurationError  # noqa: E402
 from src.services.memory.day import Calendar, TimezoneError  # noqa: E402
 from src.heartbeat.reporting import render_proactive_report, write_report  # noqa: E402
@@ -132,7 +132,7 @@ def build_manager_factory(
         # follows its wiring: a caller that has no schedule - a test driving
         # this factory directly, or any code predating Step 8 - keeps working
         # unchanged. The runner supplies one on every wake.
-        return build_manager(
+        manager = build_manager(
             runtime,
             mailbox=mailbox,
             profile=profile,
@@ -143,6 +143,10 @@ def build_manager_factory(
             fetch_limit=settings.heartbeat_limit,
             capabilities=capabilities,
         )
+        # The owner's own specialists, registered exactly as every other
+        # entry point registers them - no mission is given to them here.
+        register_defined_specialists(runtime, manager, load_governed_config(DEFAULT_CONFIG_PATH).values, accounts=accounts)
+        return manager
 
     return build
 

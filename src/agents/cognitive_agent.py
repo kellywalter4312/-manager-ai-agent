@@ -142,6 +142,15 @@ class CognitiveAgent(BaseAgent):
         if known is not None:
             return known
 
+        # "Nova, build a 3D model of a lighthouse" / "read this file aloud":
+        # any registered capability this agent is authorised for - the
+        # every-agent ones, and whatever the owner granted it - run with this
+        # agent's own name, memory and Brain. The same capability the Manager
+        # runs, never a copy, and granting it here takes nothing from anyone.
+        capable = self.capability_reply(task)
+        if capable is not None:
+            return capable
+
         if identity_question(task.description):
             text = self_introduction(identity, self.spec.capabilities)
             if text is not None:
@@ -199,6 +208,30 @@ class CognitiveAgent(BaseAgent):
         request work when simply said or typed instead."""
         handler = getattr(self, "_recording_handler", None)
         return handler(self, task) if callable(handler) else None
+
+    def bind_capabilities(self, handler) -> None:
+        """This agent's authorised capabilities: a callable
+        ``handler(agent, task) -> TaskResult | None`` given by the
+        composition root, which reads the owner's governed grants at the
+        moment of asking and runs the one registered capability that claims
+        the request - with this agent's own name, memory and Brain. Held as
+        a plain callable for the identical layering reason ``bind_voice``
+        is: this package never reaches the orchestrator's code."""
+        self._capability_handler = handler
+
+    def capability_reply(self, task: Task) -> "TaskResult | None":
+        """The answer of an authorised capability that claims this request,
+        or None (nothing claimed it, nothing is granted, or no handler was
+        given) - the caller then does its own work, unchanged."""
+        handler = getattr(self, "_capability_handler", None)
+        return handler(self, task) if callable(handler) else None
+
+    def authorised_capabilities(self) -> "tuple[str, ...]":
+        """The registered capabilities this agent may use right now, by name
+        - empty when no handler was given."""
+        handler = getattr(self, "_capability_handler", None)
+        names = getattr(handler, "authorised", None)
+        return tuple(names(self)) if callable(names) else ()
 
     def bind_user_knowledge(self, user_knowledge) -> None:
         """Grant this agent the canonical, read-only view of the person
@@ -300,6 +333,14 @@ class CognitiveAgent(BaseAgent):
         """
         insight = self.brain.converse(task, notes)
         if not insight.is_useful or not insight.summary.strip():
+            # When the request is really a registered capability this agent
+            # is not authorised for, that is the true reason - said instead of
+            # blaming a missing model, and naming who can do it.
+            handler = getattr(self, "_capability_handler", None)
+            unauthorised = getattr(handler, "unauthorised_reason", None)
+            reason = unauthorised(self, task) if callable(unauthorised) else None
+            if reason:
+                return TaskResult.failure(task, self.name, reason)
             return TaskResult.failure(
                 task,
                 self.name,

@@ -50,7 +50,9 @@ from src.agents.brain_factory import (
 from src.agents.specialists import (
     SPECIALISTS,
     SpecialistContext,
+    SpecialistDefinition,
     SpecialistWiring,
+    build_general_specialist,
     wiring_for,
 )
 from src.agents.base_agent import BaseAgent
@@ -590,6 +592,59 @@ def build_runtime(
     return runtime
 
 
+def build_defined_specialist(
+    runtime: Runtime,
+    definition: "SpecialistDefinition",
+    *,
+    user_knowledge: "UserKnowledge | None",
+    accounts: "CredentialStore | None" = None,
+) -> BaseAgent:
+    """One owner-defined specialist, equipped exactly as a shipped one is: its
+    own identity, its own Brain from its own area over the one shared
+    connection (its own provider instance), its own memory selected by its
+    own name, the shared celebration provider, and the person's canonical
+    context read-only. What it may *do* is not decided here - that is the
+    owner's grants, read at the moment of asking."""
+    wiring = definition.wiring()
+    account = accounts.active(runtime.settings.provider) if accounts is not None else None
+    brain = build_specialist_brain(
+        runtime.settings, build_provider(runtime.settings, account=account),
+        wiring.brain_domain, personality=wiring.personality,
+    )
+    return build_general_specialist(SpecialistContext(
+        settings=runtime.settings, calendar=runtime.calendar, provider=runtime.provider,
+        wiring=wiring, brain=brain, user_knowledge=user_knowledge, celebration=runtime.celebration,
+    ))
+
+
+def register_defined_specialists(
+    runtime: Runtime,
+    manager: ManagerAgent,
+    values: "Mapping[str, str] | None",
+    *,
+    accounts: "CredentialStore | None" = None,
+) -> "tuple[BaseAgent, ...]":
+    """Register every specialist the owner defined (``agent create``) with
+    ``manager`` - the one step every entry point takes after ``build_manager``,
+    so a terminal, the served page, a static export and the heartbeat all
+    describe the same set of agents. A definition naming an agent that is
+    already registered is skipped with a warning, never a second agent under
+    one name."""
+    from src.agents.specialists import defined_specialists
+
+    own = manager.own_skills.name if manager.own_skills is not None else None
+    user_knowledge = manager.own_skills.user_knowledge if manager.own_skills is not None else None
+    added = []
+    for definition in defined_specialists(values or {}):
+        if manager.registry.get(definition.name) is not None or definition.name == own:
+            logger.warning("the specialist definition '%s' names an agent that already exists; skipped", definition.key)
+            continue
+        agent = build_defined_specialist(runtime, definition, user_knowledge=user_knowledge, accounts=accounts)
+        manager.register_agent(agent)
+        added.append(agent)
+    return tuple(added)
+
+
 def translate_for(runtime: Runtime) -> "Any | None":
     """The interpreter's offline text translation, bound narrowly - None unless
     a translation engine is really installed and chosen."""
@@ -709,6 +764,18 @@ def rebind_reasoning(
             personality=entry.wiring.personality,
         )
         specialists[key] = replace(entry, brain=brain)
+    # Owner-defined specialists (registered live, not in runtime.specialists):
+    # each its own Brain from its own area, over the one shared connection -
+    # built before anything live is touched, like every other.
+    shipped = {entry.wiring.name for entry in specialists.values()}
+    defined_brains = {
+        agent.name: build_specialist_brain(
+            settings, build_provider(settings, account=manager_account),
+            agent.brain_domain, personality=agent.personality,
+        )
+        for agent in manager.registry.all_agents()
+        if agent is not manager.own_skills and agent.name not in shipped and hasattr(agent, "brain_domain")
+    }
 
     manager.brain = manager_brain
     manager.router = router
@@ -721,6 +788,9 @@ def rebind_reasoning(
     specialist_names = {entry.wiring.name: key for key, entry in specialists.items()}
     for agent in manager.registry.all_agents():
         key = specialist_names.get(agent.name)
+        if agent.name in defined_brains:
+            agent.brain = defined_brains[agent.name]
+            continue
         if key is None or agent is skills:
             continue
         if hasattr(agent, "brain"):

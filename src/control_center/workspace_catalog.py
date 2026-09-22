@@ -206,20 +206,26 @@ def workspaces_permitting(
 
 
 def workspace_refusal(agent_name: str, values: "Mapping[str, str] | None", names: "Iterable[str]") -> "str | None":
-    """Why this work does not belong in the workspace the agent is in - naming
-    the workspace, what it is set up for, and where the work does belong - or
-    None when it belongs."""
+    """Why this work belongs in another of the agent's workspaces - naming the
+    workspace it is in, what that is set up for, and where the work does
+    belong - or None when it may be done here.
+
+    A profile organises work; it never decides what an agent can do. So work
+    is redirected only when another of this agent's workspaces is set up for
+    it. When none is - the workspace that was for it was archived or removed,
+    or none was ever made - the agent still does it, where it is: closing a
+    workspace must never take a capability away."""
     names = tuple(names)
     here = active_workspace_type_for(agent_name, values)
     if here is None or here.permits(names):
         return None
     elsewhere = [t.label for t in workspaces_permitting(agent_name, values, names)]
-    move = (f" It belongs in: {', '.join(elsewhere)} - say 'go to the {elsewhere[0]} workspace'." if elsewhere
-            else " None of my workspaces includes it; the owner can add it in the Control Center "
-                 f"(workspace profile {here.workspace_id} ...).")
+    if not elsewhere:
+        return None
     return (
         f"That isn't work for the {here.label} workspace I'm in - it's set up for "
-        f"{', '.join(here.capabilities)}.{move}"
+        f"{', '.join(here.capabilities)}. It belongs in: {', '.join(elsewhere)} - "
+        f"say 'go to the {elsewhere[0]} workspace'."
     )
 
 

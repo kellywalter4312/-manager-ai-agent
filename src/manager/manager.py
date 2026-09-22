@@ -222,6 +222,11 @@ class ManagerAgent:
         # governed config and tools exist; absent, nothing is scoped.
         self._workspace_scope = None
         self._workspace_navigation = None
+        # The one handler every specialist's authorised capabilities run
+        # through - bound by the composition root, held here so a specialist
+        # registered later is equipped with the same one. None: specialists
+        # have only their own routes.
+        self.specialist_capabilities = None
 
     def bind_workspaces(self, *, scope, navigation) -> None:
         """Workspaces for every agent this Manager delegates to, not only its

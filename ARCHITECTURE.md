@@ -11119,3 +11119,140 @@ is not intended to build 3D models, not an oversight. A future campaign
 should check each capability's own stated intent before assuming this
 pattern applies, rather than mechanically adding every capability to
 every specialist.
+
+### 52.61 Final ecosystem closure - capability authority, owner-defined specialists, and four live-found defects
+
+**The question 52.60 left open, answered from the registry itself.** Is
+each capability `ManagerAgent` exposes Manager-only on purpose, or
+unreachable by a specialist through accidental wiring? Before this
+campaign there was no answer to read: `MANAGER_CAPABILITIES` said *what*
+each capability does, never *who may use it*, so every capability was
+de facto Manager-only and every specialist reach (voice, recordings,
+task board) was a hand-wired exception.
+
+**Recovery first.** The work began mid-flight: the laptop crashed during
+this campaign, leaving HEAD at `ccec6c4` with 11 modified and 3 new files
+uncommitted and `.git/index` zeroed (56 KB of NUL bytes, "bad signature
+0x00000000"). No object was written between the `ccec6c4` commit and the
+crash, so nothing had been staged - the index held only HEAD's tree. The
+working tree was snapshotted, the index rebuilt from HEAD (working files
+untouched, the corrupt original kept), `git fsck --full` clean; every
+recovered file compiled and was NUL-free, and the recovered work (below)
+was completed rather than redone.
+
+**Authority is a fact the capability states (recovered work).**
+`ManagerCapability.authority` is one of `grantable` (the default),
+`every_agent` (with `own_path` naming the agent-level route) or `manager`
+(which *must* state `authority_reason`, or the capability cannot be
+registered). `src/control_center/capability_access.py` - pure, names no
+capability, agent or workspace - answers "what may this agent use": the
+Manager, every live capability; any other agent, every `every_agent`
+capability plus each `grantable` one the owner granted
+(`capability_grant.<agent>` in the governed config). A grant is a fact
+about the grantee only, so it can never take a capability from the
+Manager or anyone else; a capability registered tomorrow is grantable
+the moment it exists. Of 50 registered: 23 grantable, 15 every-agent,
+12 Manager-only, each with its reason:
+
+| Manager-only | Reason (as registered) |
+|---|---|
+| `roster_report`, `participant_invitation` | coordinating agents is the orchestrator's role - a specialist that could list or invite peers would be a second Manager |
+| `personal_context`, `correct_memory` | they write the one canonical record of the person, which only the Manager writes; every specialist reads it |
+| `calendar`, `coach`, `read_back`, `temporal_derivation`, `milestone_recognition`, `personal_recurring_events`, `personal_guidance` | they work on the person's own calendar, commitments and records in the Manager's memory - run for a specialist they would start a disconnected copy |
+
+`read_back` was checked specifically because read-aloud must stay
+general: it reads back the person's *kept notes, schedule and tasks* only;
+general read-aloud of any supported content is `read_content`, grantable.
+
+`scripts/control_center.py::SpecialistCapabilities` is the one shared
+handler every specialist's authorised capabilities run through: it reads
+grants and the system-wide enable list at the moment of asking, runs the
+*identical* registered handler with a request built from the specialist's
+own name, memory, Brain and tools, gives it an empty roster, keeps
+crisis care first whichever agent is addressed, and - when an
+unauthorised capability claims a request - says which capability, who can
+do it, and the exact grant command. Owner-defined specialists
+(`GeneralSpecialist`, `agent create <key> <Name>|<area>[|grants]`) are
+data, not code: identity, own Brain from its own area, own memory, voice
+and Workspace, registered at every entry point by
+`register_defined_specialists`, rebuilt on a live reasoning switch, and
+removable. A workspace profile only redirects work to another of the
+agent's workspaces set up for it; with none, the work is still done -
+closing a workspace never removes a capability.
+
+**Four defects found only by driving the served system at runtime,
+repaired.**
+
+1. *A structural guard broken by the recovered work.* The recovered
+   handler built its own `participants = [...]` list in the entry point,
+   which `test_the_entry_point_holds_no_conversation_logic` forbids. It
+   now uses the file's existing `_agent_names(manager)` - the one roster
+   source - rather than a renamed variable that would only have evaded
+   the guard.
+2. *3D boxes lost their width.* `model3d._dimensions` tried
+   word-then-number first for every dimension word, so in "8 wide 0.3
+   tall 2 deep" `wide` took 0.3 and `tall` took 2: a bridge built 0.3
+   wide. Adjectives (`tall/high/thick/wide/deep/long`) take the number
+   *before* them, nouns (`height 6`, `radius of 1`) the number after;
+   each is now tried in its own order. Full Brain was affected too: the
+   probe's "hull 4 wide 1 tall" boat measured 3 x 1.7 x 1.5, now 4 x 4 x
+   1.5.
+3. *A specialist falsely said it remembered.* "Nova, remember that the
+   windmill project is due on Friday" answered "Got it - I've remembered
+   that", but `retain_what_was_asked_for` wrote every note into the
+   Manager's store ("it is Alfred the person is talking to" - untrue once
+   specialists are addressable), so Nova's own recall said she had
+   nothing. A plain note to an explicitly addressed specialist that
+   answered is now written through *its* governed `retain` as its own
+   explicit capture (the `record this` record shape: full confidence,
+   `captured_by`), because `SpecialistMemoryPolicy` rightly refuses
+   `user_context`; a fact about the person still goes to the canonical
+   record. No specialist policy was loosened.
+4. *The static export described a different system.* `export_ui`
+   registered owner-defined specialists but never equipped them, so a
+   granted capability was in the served page's snapshot and missing from
+   the export. It now equips them exactly as `control_center.build` does.
+
+Two honesty gaps closed in the same pass:
+
+- "Create a workspace called X", said to any agent, fell to
+  `general_assistance` (alphabetically first) and got a generic "I can't
+  reason about that" - with a model, a Brain free to claim it had made
+  one. Workspace creation is the owner's governed write
+  (`WorkspaceNavigationTool` deliberately offers only list/enter), so a
+  request of that shape - verb in command position; "I set up a new
+  workspace yesterday" stays a remark - is now answered with that rule
+  and the exact command, and `general_assistance` yields to it as it
+  already yields to five other specific capabilities.
+- `roster_report` had no `claims`, only four scored words, so "which
+  agents do you have?", "list your specialists", "who's on your team?"
+  went unanswered in Half Brain. It now recognises roster-question
+  shapes, never the bare words "agent" or "team" ("who is on the team at
+  my work", "what agents of change do" stay unclaimed).
+
+**Runtime evidence** (served system, `serve_ui.build_live_system` ->
+`control_center.build`; every governed path, memory, artifact and asset
+directory in a scratch sandbox; a file-system check after each run found
+no write outside it; no network, no metered call):
+
+| Check | Result |
+|---|---|
+| Alfred, ordinary conversation | lighthouse, teapot, shed, planter, tower: real glTF `.glb` artifacts, correct dimensions |
+| Specialist created from the Control Center | `agent create nova Nova\|3D modelling...` -> own identity ("I'm Nova - specialist: ..."), memory, voice, Workspace |
+| Ungranted | "That's create_3d_model, which I'm not authorised for. Alfred can do it now, or ... capabilities grant Nova create_3d_model" |
+| Granted | Nova's windmill `.glb` (2 x 4 x 2); Alfred's teapot immediately after - he keeps it |
+| Every-agent on a specialist | identity, time, recording start/stop, memory note -> recall "the windmill project is due on Friday" |
+| Manager-only on a specialist | roster -> "only Alfred does (... a second Manager). Ask Alfred."; Alfred answers the same question |
+| Shipped specialist (Arthur) | same honest refusal and grant path - no specialist-type list anywhere |
+| Workspaces | conversational create -> the governed rule; `workspace create garden ...` -> both agents move in and build there; archived -> Alfred still builds |
+| Restart | Nova and her grants reload; she builds the 8 x 0.3 x 2 bridge |
+| Revoke | live at once for Nova; Alfred still builds |
+| Full Brain (local probe provider) | Alfred and Nova each decompose "a 3D sailing boat" through their own Brain -> 2-part `.glb` |
+| Translation | granted and ungranted paths correct; both Alfred and Nova honestly provider-blocked (offline engine not enabled, no model) |
+| Export parity | served and exported snapshots list Nova's capabilities identically |
+
+**Tests.** `tests/test_capability_authorization_and_defined_specialists.py`:
+35 recovered + 10 new (workspace-creation honesty, roster by asking x3,
+dimension order, specialist note ownership x3, export parity);
+`tests/test_identity_resolution.py`'s claiming inventory gains
+`roster_report` with its reason.

@@ -75,6 +75,8 @@ from src.services.identity.voice_configuration import voice_facts  # noqa: E402
 from src.providers.media.image_techniques import bind_governed_values as bind_image_technique_values  # noqa: E402
 from src.services.artifacts.content import SHARED_FILE_PREFIX, artifact_ids_in, read_artifact_units  # noqa: E402
 from src.composition import reasoning_settings_fields, rebind_backends, rebind_reasoning  # noqa: E402
+from src.composition import build_defined_specialist, register_defined_specialists  # noqa: E402
+from src.agents.specialists import AGENT_DEFINITION_PREFIX, SpecialistDefinition, defined_specialists  # noqa: E402
 from src.services.artifacts.delivery import available_delivery_methods  # noqa: E402
 from src.services.artifacts.ingestion import IngestionError, ingest_supplied_file  # noqa: E402
 from src.agents.tools.media_production import MediaProductionTool  # noqa: E402
@@ -198,6 +200,9 @@ from src.services.identity.voice_preference import (  # noqa: E402
 )
 from src.services.memory.day import TimezoneError  # noqa: E402
 from src.services.profile.loader import load_profile  # noqa: E402
+from src.utils.logging import get_logger  # noqa: E402
+
+logger = get_logger(__name__)
 from src.services.profile.profile import ProfileError  # noqa: E402
 from src.services.schedule.loader import load_schedule  # noqa: E402
 from src.utils.logging import configure_logging  # noqa: E402
@@ -259,6 +264,17 @@ HELP = """
   review                   what Alfred has noticed about his own system
   capabilities             the real capability matrix - what Alfred can
                            actually do right now, and why not otherwise
+  capabilities access <agent>
+                           every capability and that agent's access to it:
+                           has it, granted, grantable, Manager-only (and why)
+  capabilities grant|revoke <agent> <name>[,<name>]
+                           authorise a specialist for a capability - never
+                           taken from the Manager or anyone else
+  agent list               every agent and what each may use
+  agent create <key> <Name>|<area>[|<capability>,<capability>]
+                           a new specialist for any area - its own identity,
+                           Brain, memory, voice and Workspace; no code change
+  agent remove <key>       withdraw a specialist the owner created
   provider                 every ecosystem category and its backends
   provider <category>      one category's detail: active, dependents, accounts
   provider <category> accounts
@@ -614,6 +630,14 @@ def _reasoning_mode_note(settings: Settings, backend: str) -> str:
     return ""
 
 
+def _rebind_specialist_capabilities(centre: "ControlCenter", runtime) -> None:
+    """A live switch reaches the specialists' authorised capabilities too -
+    their tools are rebuilt from the new runtime on next use."""
+    handler = getattr(centre.manager, "specialist_capabilities", None)
+    if handler is not None and hasattr(handler, "rebind_runtime"):
+        handler.rebind_runtime(runtime)
+
+
 def _apply_reasoning_live(centre: "ControlCenter", store) -> str:
     """Rebind the running session's reasoning in place from what the owner has
     governed (vendor, account, reasoning modes) - the same Manager,
@@ -627,6 +651,7 @@ def _apply_reasoning_live(centre: "ControlCenter", store) -> str:
             f" Not applied to this running session: {exc}. The running session is unchanged."
         )
     centre.rebind_runtime(runtime)
+    _rebind_specialist_capabilities(centre, runtime)
     return (
         f" Applied live: this running session now reasons through '{settings.provider}' "
         f"(Manager reasoning mode '{settings.brain}', specialists '{settings.specialist_brain}') "
@@ -657,6 +682,7 @@ def _apply_backends_live(centre: "ControlCenter") -> str:
             "The running session is unchanged."
         )
     centre.rebind_runtime(runtime)
+    _rebind_specialist_capabilities(centre, runtime)
     return " Applied live: this running session uses it now - the same conversation, memory and identity continue."
 
 
@@ -1110,12 +1136,18 @@ def bind_workspaces(runtime, manager) -> None:
     runtime.artifacts.bind_creation_context(lambda owner: workspace_artifact_metadata(owner, values()))
 
 
-def manager_tools(runtime, settings: Settings, config, agent_names=None) -> ToolSet:
+def manager_tools(runtime, settings: Settings, config, agent_names=None, owner: "str | None" = None) -> ToolSet:
     """Everything the Manager is equipped with, built from ``runtime``'s current
     backends. One construction, used by ``build`` at start and by a live
     backend rebind (``_apply_backends_live``) - a backend the owner switches in
     the Control Center reaches the running Manager through the identical tools
-    a fresh start would give him, never a second assembly."""
+    a fresh start would give him, never a second assembly.
+
+    ``owner`` names whose work the tools produce (the Manager when omitted):
+    a specialist authorised for a capability reaches the same tools, and what
+    they make is attributed to that specialist. A tool is still only reached
+    through a capability the agent is authorised for."""
+    owner = owner or runtime.identity.name
     bind_image_technique_values(_governed_image_values)
     return ToolSet([
             LiveInformationTool(runtime.live_info),
@@ -1177,7 +1209,7 @@ def manager_tools(runtime, settings: Settings, config, agent_names=None) -> Tool
                 # future specialist's own MediaProductionTool instance
                 # gets this identically, by its own owner_agent name).
                 artifacts=runtime.artifacts,
-                owner_agent=runtime.identity.name,
+                owner_agent=owner,
             ),
             # Phase 3: real, saved text documents ("create a report from
             # these findings") - a governed write boundary, the identical
@@ -1210,26 +1242,26 @@ def manager_tools(runtime, settings: Settings, config, agent_names=None) -> Tool
             # only its own name.
             ArtifactProductionTool(
                 runtime.artifacts, runtime.document_renderer, runtime.media.illustrator,
-                owner_agent=runtime.identity.name,
+                owner_agent=owner,
             ),
             # Post-Pre-Stage-9: fills the code_assistant extension point -
             # written code saved as a versioned artifact in the coding
             # workspace. Never writes or runs code itself.
-            CodeAssistantTool(runtime.artifacts, owner_agent=runtime.identity.name),
+            CodeAssistantTool(runtime.artifacts, owner_agent=owner),
             # Whole-ecosystem campaign: image transformation, enhancement,
             # reconstruction and comparison - an open technique registry read
             # from the governed config on every call, so a technique evolved in
             # this Control Center is live at once.
             ImageIntelligenceTool(
-                runtime.artifacts, owner_agent=runtime.identity.name, governed_values=_governed_image_values,
+                runtime.artifacts, owner_agent=owner, governed_values=_governed_image_values,
             ),
             # Genuine 3D content: parts assembled into a checked glTF mesh.
-            Model3DProductionTool(runtime.artifacts, owner_agent=runtime.identity.name),
+            Model3DProductionTool(runtime.artifacts, owner_agent=owner),
             # Translation routed to outputs - subtitles, a subtitled video,
             # translated speech, the live display - from shared media.
             TranslationOutputTool(
                 interpreter=getattr(runtime, "translation", None), transcriber=runtime.media.transcriber,
-                artifacts=runtime.artifacts, owner_agent=runtime.identity.name,
+                artifacts=runtime.artifacts, owner_agent=owner,
                 display=getattr(runtime, "translation_display", None),
             ),
             # Moving between the workspaces the owner created - one saved fact
@@ -1311,6 +1343,209 @@ def specialist_recording_handler(*, recording_sessions):
         return fn(request)
 
     return handle
+
+
+class SpecialistCapabilities:
+    """``handler(agent, task)`` for any specialist's authorised capabilities -
+    one shared object, bound to every specialist, deciding nothing per agent
+    by name.
+
+    At the moment of asking it reads the owner's governed choices: which
+    capabilities are enabled for the whole system (``capabilities enable|
+    disable``) and which this agent was granted (``capabilities grant``). Of
+    what this agent may use (``capability_access.reachable_capabilities``),
+    the capability whose own ``claims`` recognises the request runs - the
+    identical registered handler the Manager runs, given a request built from
+    *this agent's* name, memory, Brain and tools (whose output is attributed
+    to it). Nothing claimed means None: the agent does its own work.
+
+    Precedence, the same the Manager's own execute() has: a message that
+    speaks of ending one's life is answered with care first, whichever agent
+    was addressed; then an open confirmation or clarification this agent
+    raised is resolved; then claims. Word-overlap scoring is never used here,
+    so a grant cannot pull a specialist's own domain work away from it.
+
+    Capabilities an agent reaches through its own route (``own_path``: its
+    voice, recordings, task board, conversation floor, workspace movement)
+    are left to that route. Granting takes nothing from the Manager, who
+    keeps every capability, and a workspace neither grants nor removes one -
+    its profile only says where work belongs."""
+
+    def __init__(self, *, runtime, manager, channel=None, conversation=None) -> None:
+        self._runtime = runtime
+        self._manager = manager
+        self._channel = channel
+        self._conversation = conversation
+        self._tools: "dict[str, ToolSet]" = {}
+
+    def rebind_runtime(self, runtime) -> None:
+        """A live backend or reasoning switch: every specialist's tools are
+        rebuilt from the new runtime on next use."""
+        self._runtime = runtime
+        self._tools.clear()
+
+    def _live(self):
+        config = load_governed_config(DEFAULT_CONFIG_PATH)
+        return config, filtered_manager_capabilities(config)
+
+    def reachable(self, agent) -> "dict[str, object]":
+        from src.control_center.capability_access import reachable_capabilities
+
+        config, live = self._live()
+        return reachable_capabilities(agent.name, config.values, live, is_manager=False)
+
+    def authorised(self, agent) -> "tuple[str, ...]":
+        """What the owner granted this agent that is live now - its own
+        specialisation, as a spec declares it."""
+        from src.control_center.capability_access import granted_names
+
+        config, live = self._live()
+        return tuple(n for n in granted_names(agent.name, config.values) if n in live)
+
+    def unauthorised_reason(self, agent, task) -> "str | None":
+        """When a registered capability this agent may not use claims the
+        request: which one, who can do it, and how the owner grants it. Used
+        only where the agent would otherwise have no answer at all."""
+        from src.manager.capabilities import AUTHORITY_MANAGER
+
+        config, live = self._live()
+        reachable = self.reachable(agent)
+        claimed = next(
+            (c for c in sorted(live.values(), key=lambda c: c.name)
+             if c.name not in reachable and c.claims is not None and c.claims(task, _agent_names(self._manager))),
+            None,
+        )
+        if claimed is None:
+            return None
+        manager_name = self._manager.own_skills.name if self._manager.own_skills is not None else "the Manager"
+        if claimed.authority == AUTHORITY_MANAGER:
+            return (f"That's {claimed.name}, which only {manager_name} does ({claimed.authority_reason}). "
+                    f"Ask {manager_name}.")
+        return (f"That's {claimed.name}, which I'm not authorised for. {manager_name} can do it now, or the owner "
+                f"can authorise me in the Control Center: capabilities grant {agent.name} {claimed.name}")
+
+    def tools_for(self, agent) -> ToolSet:
+        tools = self._tools.get(agent.name)
+        if tools is None:
+            tools = manager_tools(
+                self._runtime, self._runtime.settings, load_governed_config(DEFAULT_CONFIG_PATH),
+                agent_names=lambda: _agent_names(self._manager), owner=agent.name,
+            )
+            self._tools[agent.name] = tools
+        return tools
+
+    def _converse_as(self, agent):
+        """The agent's own Brain, asked the Manager-shaped question a
+        capability asks - an Insight read as advice, or an honest no view."""
+        from src.manager.brain import BrainAction, BrainDecision
+
+        def converse(task, notes=()):
+            try:
+                insight = agent.brain.converse(task, tuple(notes))
+            except Exception as exc:  # noqa: BLE001 - a failure to think degrades, never crashes
+                return BrainDecision.no_view(reason=f"reasoning failed: {type(exc).__name__}", source=agent.name)
+            if insight.is_useful and insight.summary.strip():
+                return BrainDecision(action=BrainAction.REPORT, reason=insight.summary,
+                                     confidence=insight.confidence, source=insight.source or agent.name)
+            return BrainDecision.no_view(reason="no reasoning capability is configured", source=insight.source or agent.name)
+
+        return converse
+
+    def request_for(self, agent, task) -> "CapabilityRequest":
+        from src.manager.capabilities import CapabilityRequest
+
+        skills = self._manager.own_skills
+        runtime = self._runtime
+        conversation = self._conversation
+        channel = self._channel
+        translate = getattr(skills, "_translate", None) if skills is not None else None
+        return CapabilityRequest(
+            task=task, identity=agent,
+            # No roster: a specialist cannot list, invite or route to its
+            # peers - coordinating agents is the Manager's alone.
+            roster=lambda: (), own_name=agent.name,
+            own_capabilities=tuple(sorted(agent.spec.capabilities)),
+            user=skills.user if skills is not None else None,
+            tools=self.tools_for(agent),
+            converse=self._converse_as(agent),
+            recall=agent.memory.recall, forget=agent.memory.forget, retain=agent.retain,
+            celebration=getattr(agent, "celebration_reaction", None),
+            connections=runtime.connections,
+            calendar=agent.calendar,
+            history=(lambda: [f"{u.speaker}: {u.text}" for u in conversation.latest(int(load_governed_config(DEFAULT_CONFIG_PATH).get(
+                CAPABILITY_GENERAL_CONVERSATION, DEFAULT_CONVERSATION_HISTORY_LIMIT)))]
+                     if len(conversation) else []) if conversation is not None else None,
+            shared_files=(lambda: artifact_ids_in(
+                u.text for u in conversation.utterances if u.text.startswith(SHARED_FILE_PREFIX)
+            )) if conversation is not None else None,
+            activity_sessions=getattr(skills, "_activity_sessions", None),
+            discover_voices=(lambda: tuple(getattr(channel.speech, "available_voices", lambda: ())())) if channel is not None else None,
+            voice_facts=(lambda: voice_facts(channel.speech)) if channel is not None else None,
+            recording_sessions=runtime.recording_sessions,
+            governance_log=getattr(skills, "_governance_log", None),
+            assist=getattr(skills, "_assist", None),
+            translate=translate,
+        )
+
+    def __call__(self, agent, task):
+        from src.control_center.workspace_catalog import workspace_refusal
+        from src.manager.capabilities import OPEN_CONVERSATION
+        from src.core.contracts import TaskResult
+        from src.manager.guided_interaction import guided_interaction_response
+        from src.services.memory.guidance import crisis_signal
+
+        config, live = self._live()
+        if crisis_signal(task.description) and "personal_guidance" in live:
+            # Safety, not authority: care and a pointer to real help, from
+            # whichever agent the person was speaking to.
+            return live["personal_guidance"].handle(self.request_for(agent, task))
+        sessions = getattr(self._manager.own_skills, "_activity_sessions", None)
+        if sessions is not None and (
+            sessions.pending_confirmation(agent.name) is not None
+            or sessions.pending_clarification(agent.name) is not None
+        ):
+            resolved = guided_interaction_response(self.request_for(agent, task))
+            if resolved is not None:
+                return resolved
+        reachable = self.reachable(agent)
+        capability = next(
+            (c for c in sorted(reachable.values(), key=lambda c: c.name)
+             if not c.own_path and c.claims is not None and c is not OPEN_CONVERSATION
+             and c.claims(task, _agent_names(self._manager))),
+            None,
+        )
+        if capability is None:
+            return None
+        if not capability.anywhere:
+            refusal = workspace_refusal(agent.name, config.values, (capability.name, *sorted(capability.capabilities)))
+            if refusal:
+                return TaskResult.failure(task, agent.name, refusal)
+        return capability.handle(self.request_for(agent, task))
+
+
+def equip_specialist(agent, *, runtime, manager, channel) -> None:
+    """Give one specialist the routes every agent has - its own voice, its own
+    recordings, and its authorised capabilities through the Manager's one
+    shared handler. Used at start for every registered specialist and when the
+    owner creates one live, so both are equipped identically."""
+    # Every specialist chooses and configures its own voice through the same
+    # capability, against the same provider - read through the channel at the
+    # moment of asking, so a live provider switch is what it plans against.
+    if hasattr(agent, "bind_voice"):
+        agent.bind_voice(specialist_voice_handler(
+            discover_voices=lambda: tuple(getattr(channel.speech, "available_voices", lambda: ())()),
+            voice_facts=lambda: voice_facts(channel.speech),
+            translate=lambda: getattr(manager.own_skills, "_translate", None) if manager.own_skills is not None else None,
+        ))
+    # T-REC-03 follow-up: the identical shared RecordingSessionRegistry
+    # every agent's Start/Stop button already reaches, now also reachable
+    # by simply asking - "Arthur, start recording for X" - through the
+    # same governed capability the Manager has.
+    if hasattr(agent, "bind_recording"):
+        agent.bind_recording(specialist_recording_handler(recording_sessions=runtime.recording_sessions))
+    handler = getattr(manager, "specialist_capabilities", None)
+    if handler is not None and hasattr(agent, "bind_capabilities"):
+        agent.bind_capabilities(handler)
 
 
 def build(settings: Settings):
@@ -1470,22 +1705,18 @@ def build(settings: Settings):
         # The provider that actually speaks - read through the channel, so a
         # live provider switch is what the next voice request plans against.
         manager.own_skills.bind_voice_facts(lambda: voice_facts(channel.speech))
-    # Every specialist chooses and configures its own voice through the same
-    # capability, against the same provider - read through the channel at the
-    # moment of asking, so a live provider switch is what it plans against.
+    # Specialists the owner defined in the Control Center (``agent create``) -
+    # data, not code - registered beside the shipped ones on every start.
+    register_defined_specialists(runtime, manager, config.values, accounts=accounts)
+    # One shared handler for every specialist's authorised capabilities,
+    # held by the Manager so a specialist created or a backend switched
+    # later reaches the same one.
+    manager.specialist_capabilities = SpecialistCapabilities(
+        runtime=runtime, manager=manager, channel=channel, conversation=conversation,
+    )
     for agent in manager.registry.all_agents():
-        if hasattr(agent, "bind_voice"):
-            agent.bind_voice(specialist_voice_handler(
-                discover_voices=lambda: tuple(getattr(channel.speech, "available_voices", lambda: ())()),
-                voice_facts=lambda: voice_facts(channel.speech),
-                translate=lambda: getattr(manager.own_skills, "_translate", None) if manager.own_skills is not None else None,
-            ))
-        # T-REC-03 follow-up: the identical shared RecordingSessionRegistry
-        # every agent's Start/Stop button already reaches, now also reachable
-        # by simply asking - "Arthur, start recording for X" - through the
-        # same governed capability the Manager has.
-        if hasattr(agent, "bind_recording"):
-            agent.bind_recording(specialist_recording_handler(recording_sessions=runtime.recording_sessions))
+        if agent is not manager.own_skills:
+            equip_specialist(agent, runtime=runtime, manager=manager, channel=channel)
     return (
         runtime,
         manager,
@@ -1854,7 +2085,190 @@ def run_capability_registry_command(centre: "ControlCenter", rest: str) -> str:
             "Type 'reload' now to make it live in this session, or restart."
         )
 
-    return f"unknown capabilities action '{args[0]}'. Try: list, enable, disable"
+    if args[0] in ("grant", "revoke", "access"):
+        return run_capability_access_command(centre, args[0], args[1:])
+
+    return f"unknown capabilities action '{args[0]}'. Try: list, enable, disable, grant, revoke, access"
+
+
+def _registered_agent(centre: "ControlCenter", name: str):
+    """The registered agent a person named (any case), or None."""
+    wanted = " ".join(str(name or "").split()).lower()
+    for agent_name in _agent_names(centre.manager):
+        if agent_name.lower() == wanted:
+            return agent_name
+    return None
+
+
+def run_capability_access_command(centre: "ControlCenter", action: str, args: "list[str]") -> str:
+    """Which capabilities an agent may use - authorisation, never ownership.
+
+        capabilities access <agent>                 every capability, and this agent's access to it
+        capabilities grant <agent> <name>[,<name>]  authorise a specialist for grantable capabilities
+        capabilities revoke <agent> <name>[,<name>] withdraw a grant
+
+    The Manager holds every capability and needs no grant; a grant never
+    takes a capability from the Manager or from anyone else. Manager-only
+    capabilities are refused with the reason their registration states.
+    Saved in the governed config and live at once - the next request that
+    agent receives is decided by it - and every start uses it."""
+    from src.control_center.capability_access import access_rows, grant_refusal, granted_names, with_grants
+
+    if not args:
+        return f"usage: capabilities {action} <agent>" + (" <capability>[,<capability>]" if action != "access" else "")
+    agent = _registered_agent(centre, args[0])
+    if agent is None:
+        return f"no agent called '{args[0]}'. Registered: {', '.join(_agent_names(centre.manager))}"
+    manager_name = centre.manager.own_skills.name if centre.manager.own_skills is not None else None
+    config = load_governed_config(DEFAULT_CONFIG_PATH)
+    if action == "access":
+        rows = access_rows(agent, config.values, MANAGER_CAPABILITIES, filtered_manager_capabilities(config),
+                           is_manager=agent == manager_name)
+        order = ("has it", "granted", "grantable", "manager only", "disabled")
+        lines = [f"CAPABILITY ACCESS - {agent}" + (" (the Manager: system-level, every capability)" if agent == manager_name else ""), ""]
+        for state in order:
+            chosen = [r for r in rows if r.state == state]
+            if not chosen:
+                continue
+            lines.append(f"  {state.upper()} ({len(chosen)})")
+            lines.extend(f"    {r.name} - {r.detail}" for r in chosen)
+        if agent != manager_name:
+            lines += ["", f"grant with: capabilities grant {agent} <name>[,<name>]"]
+        return "\n".join(lines)
+    if len(args) < 2:
+        return f"usage: capabilities {action} <agent> <capability>[,<capability>]"
+    if agent == manager_name:
+        return (f"{agent} is the Manager and already holds every capability - nothing to {action}. "
+                "Use 'capabilities disable <name>' to turn one off for every agent.")
+    names = tuple(dict.fromkeys(n.strip().lower() for n in " ".join(args[1:]).split(",") if n.strip()))
+    current = list(granted_names(agent, config.values))
+    if action == "grant":
+        problems = [p for p in (grant_refusal(n, MANAGER_CAPABILITIES) for n in names) if p]
+        if problems:
+            return "FAILED: " + "; ".join(problems) + ". Nothing was granted."
+        added = [n for n in names if n not in current]
+        if not added:
+            return f"{agent} already has {', '.join(names)}."
+        updated = current + added
+    else:
+        missing = [n for n in names if n not in current]
+        if missing:
+            return f"{agent} was not granted {', '.join(missing)} - nothing was revoked. Granted: {', '.join(current) or 'nothing'}."
+        updated = [n for n in current if n not in names]
+    key, value = with_grants(agent, updated)
+    save_governed_config(config.with_value(key, value) if value else config.without_value(key), DEFAULT_CONFIG_PATH)
+    reread = granted_names(agent, load_governed_config(DEFAULT_CONFIG_PATH).values)
+    if list(reread) != updated:
+        return f"FAILED: wrote {agent}'s grants but the independent re-read did not match"
+    done = "Granted" if action == "grant" else "Revoked"
+    changed = added if action == "grant" else list(names)
+    return (
+        f"{done} {', '.join(changed)} {'to' if action == 'grant' else 'from'} {agent}. "
+        f"{agent} is now granted: {', '.join(updated) or 'nothing beyond what every agent has'}. "
+        f"{manager_name or 'The Manager'} keeps every capability. Saved - live now, and every start uses it."
+    )
+
+
+AGENT_ACTIONS = ("list", "create", "remove")
+
+
+def run_agent_command(centre: "ControlCenter", rest: str) -> str:
+    """The ecosystem's agents, managed from here:
+
+        agent list                                       every agent, and what each may use
+        agent create <key> <Name>|<area>[|<cap>,<cap>]   a new specialist - any area, no code
+        agent remove <key>                               withdraw a specialist the owner created
+
+    A created specialist gets its own identity, its own Brain reasoning about
+    its own area (over the one shared provider connection), its own memory,
+    its own voice, a Workspace, the conversation floor and every capability
+    every agent has - registered live and on every start. What else it may
+    do is granted (optionally at creation, ``|<cap>,<cap>``) and never taken
+    from the Manager. It can never coordinate other agents: that stays the
+    Manager's alone."""
+    parts = rest.split(None, 1)
+    action = parts[0].lower() if parts else "list"
+    manager = centre.manager
+    manager_name = manager.own_skills.name if manager.own_skills is not None else "the Manager"
+    if action == "list":
+        config = load_governed_config(DEFAULT_CONFIG_PATH)
+        live = filtered_manager_capabilities(config)
+        from src.control_center.capability_access import reachable_capabilities
+
+        defined = {d.name for d in defined_specialists(config.values)}
+        lines = ["AGENTS", ""]
+        for name in _agent_names(manager):
+            agent = manager.registry.get(name)
+            if name == manager_name:
+                lines.append(f"  {name} - the Manager: system-level, all {len(live)} enabled capabilities")
+                continue
+            reach = reachable_capabilities(name, config.values, live, is_manager=False)
+            granted = [n for n, c in reach.items() if getattr(c, "authority", "") == "grantable"]
+            origin = "created by the owner" if name in defined else "shipped"
+            lines.append(f"  {name} ({origin}) - {agent.spec.description[:80]}")
+            lines.append(f"      granted: {', '.join(sorted(granted)) or 'nothing yet'}; every agent's own: "
+                         f"{len(reach) - len(granted)} capabilities")
+        lines += ["", "create with: agent create <key> <Name>|<area of responsibility>[|<capability>,<capability>]"]
+        return "\n".join(lines)
+    if action not in AGENT_ACTIONS:
+        return "actions: " + ", ".join(AGENT_ACTIONS)
+    spec = parts[1].strip() if len(parts) > 1 else ""
+    key_raw, _sep, remainder = spec.partition(" ")
+    key = "_".join(key_raw.strip().lower().split())
+    if not key:
+        return f"usage: agent {action} <key>" + (" <Name>|<area of responsibility>[|<capability>,<capability>]" if action == "create" else "")
+    config = load_governed_config(DEFAULT_CONFIG_PATH)
+    config_key = AGENT_DEFINITION_PREFIX + key
+    if action == "remove":
+        existing = next((d for d in defined_specialists(config.values) if d.key == key), None)
+        if existing is None:
+            return f"no specialist the owner created with the key '{key}' - a shipped specialist is not removed here."
+        save_governed_config(config.without_value(config_key), DEFAULT_CONFIG_PATH)
+        manager.registry.unregister(existing.name)
+        return (f"Removed the specialist '{existing.name}' ({key}). Its memory is kept on disk, and its grants stay "
+                "saved in case it is created again. Saved - live now.")
+    # create
+    if config.get(config_key) is not None:
+        return f"a specialist with the key '{key}' already exists - remove it first, or choose another key."
+    name, bar, rest_spec = remainder.partition("|")
+    area, _bar2, caps = rest_spec.partition("|")
+    if not bar or not name.strip():
+        return "usage: agent create <key> <Name>|<area of responsibility>[|<capability>,<capability>]"
+    try:
+        definition = SpecialistDefinition(key=key, name=name, area=area)
+    except ValueError as exc:
+        return f"FAILED: {exc}"
+    if definition.name.lower() in {n.lower() for n in _agent_names(manager)}:
+        return f"FAILED: an agent called '{definition.name}' already exists - choose another name."
+    from src.control_center.capability_access import grant_refusal, with_grants
+
+    wanted = tuple(dict.fromkeys(c.strip().lower() for c in caps.split(",") if c.strip()))
+    problems = [p for p in (grant_refusal(n, MANAGER_CAPABILITIES) for n in wanted) if p]
+    if problems:
+        return "FAILED: " + "; ".join(problems) + ". Nothing was created."
+    try:
+        agent = build_defined_specialist(
+            centre.runtime, definition, user_knowledge=manager.own_skills.user_knowledge,
+            accounts=load_credential_store(DEFAULT_ACCOUNTS_PATH),
+        )
+    except Exception as exc:  # noqa: BLE001 - nothing is saved or registered when it cannot be built
+        return f"FAILED: could not build '{definition.name}': {type(exc).__name__}: {exc}. Nothing was created."
+    updated = config.with_value(config_key, definition.to_value())
+    if wanted:
+        grant, value = with_grants(definition.name, wanted)
+        updated = updated.with_value(grant, value)
+    save_governed_config(updated, DEFAULT_CONFIG_PATH)
+    reread = next((d for d in defined_specialists(load_governed_config(DEFAULT_CONFIG_PATH).values) if d.key == key), None)
+    if reread != definition:
+        return f"FAILED: wrote the specialist '{key}' but the independent re-read did not match"
+    manager.register_agent(agent)
+    equip_specialist(agent, runtime=centre.runtime, manager=manager, channel=centre.channel)
+    return (
+        f"Created the specialist '{definition.name}' ({key}) - area: {definition.area or 'general'}. "
+        f"Its own Brain, memory, voice and Workspace; granted: {', '.join(wanted) or 'nothing yet'}"
+        f" (capabilities grant {definition.name} <name>). {manager_name} keeps every capability. "
+        f"Talk to it by name: '{definition.name}, ...'. Saved - live now, and every start uses it."
+    )
 
 
 def run_provider_command(centre: "ControlCenter", rest: str) -> str:
@@ -2028,6 +2442,7 @@ def run_provider_command(centre: "ControlCenter", rest: str) -> str:
                 f"still reasons through '{previous}', and no choice was saved."
             )
         centre.rebind_runtime(runtime)
+        _rebind_specialist_capabilities(centre, runtime)
         config = load_governed_config(DEFAULT_CONFIG_PATH)
         save_governed_config(config.with_value(CHOSEN_LLM_BACKEND, backend), DEFAULT_CONFIG_PATH)
         return (
@@ -3106,6 +3521,14 @@ def classify_administrative_write(command: str) -> "tuple[bool, str]":
 
     if verb == "capabilities" and len(parts) >= 3 and parts[1].lower() in ("enable", "disable"):
         return True, f"{parts[1].lower()} the '{parts[2]}' capability"
+    if verb == "capabilities" and len(parts) >= 4 and parts[1].lower() in ("grant", "revoke"):
+        what = " ".join(parts[3:])
+        return True, (f"grant '{parts[2]}' the {what} capability" if parts[1].lower() == "grant"
+                      else f"revoke {what} from '{parts[2]}'")
+    if verb in ("agent", "agents") and len(parts) >= 3 and parts[1].lower() == "create":
+        return True, f"create a new specialist agent '{parts[2]}' - its own identity, Brain, memory and voice"
+    if verb in ("agent", "agents") and len(parts) >= 3 and parts[1].lower() == "remove":
+        return True, f"remove the specialist '{parts[2]}' the owner created (its memory is kept)"
 
     if verb == "provider" and len(parts) >= 4 and parts[2].lower() == "check":
         # The one provider action that leaves the machine: it asks the vendor
@@ -3252,7 +3675,10 @@ def _administrative_write_succeeded(verb: str, result: str) -> bool:
     if verb in ("services", "sites"):
         return text.startswith("declared ") or text.startswith("forgot ") or "' succeeded:" in text
     if verb == "capabilities":
-        return " is now enabled " in text or " is now disabled " in text
+        return (" is now enabled " in text or " is now disabled " in text
+                or ((text.startswith("Granted ") or text.startswith("Revoked ")) and " Saved - " in text))
+    if verb in ("agent", "agents"):
+        return (text.startswith("Created the specialist ") or text.startswith("Removed the specialist ")) and " Saved - " in text
     if verb == "ecosystem":
         return text.startswith("OK:")
     return False
@@ -3967,6 +4393,11 @@ def run_command(
                 lines.append(f"    {proposal.change.value}: {proposal.rationale}")
         return "\n".join(lines)
 
+    if verb in ("agent", "agents"):
+        result = run_agent_command(centre, rest)
+        _record_if_administrative_write(command, result, action_log_path)
+        return result
+
     if verb == "capabilities":
         if not rest:
             return render_capabilities(centre)
@@ -4076,6 +4507,7 @@ def _reload_session(centre: "ControlCenter", command: str, *, channel=None, conv
             print(f"reload failed, nothing changed: {exc}")
             return None
         centre.rebind_runtime(runtime)
+        _rebind_specialist_capabilities(centre, runtime)
         shown = ", ".join(f"{k}={v}" for k, v in overrides.items())
         print(
             f"Reloaded with this session's own override(s) ({shown}) - switched in place: the same "

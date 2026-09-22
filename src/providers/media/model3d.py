@@ -483,6 +483,9 @@ def _shape_in(clause: str) -> "tuple[str, re.Match] | None":
     return best
 
 
+_DIMENSION_ADJECTIVES = frozenset({"tall", "high", "thick", "wide", "deep", "long"})
+
+
 def _dimensions(clause: str, shape: Shape) -> "dict[str, float]":
     dims = dict(shape.defaults)
     triple = re.search(_NUMBER + r"\s*(?:x|×|by)\s*" + _NUMBER + r"\s*(?:x|×|by)\s*" + _NUMBER, clause)
@@ -491,7 +494,12 @@ def _dimensions(clause: str, shape: Shape) -> "dict[str, float]":
     for word, key in (("radius", "radius"), ("height", "height"), ("tall", "height"), ("high", "height"), ("thick", "height"),
                       ("width", "width"), ("wide", "width"), ("depth", "depth"), ("deep", "depth"), ("length", "width"),
                       ("long", "width"), ("tube", "tube"), ("thickness", "tube")):
-        found = re.search(r"\b" + word + r"\s+(?:of\s+)?" + _NUMBER, clause) or re.search(_NUMBER + r"\s*(?:units?\s+)?" + word + r"\b", clause)
+        # An adjective takes the number before it ("8 wide 0.3 tall"); a noun
+        # the number after it ("height 6", "radius of 1"). Trying the noun
+        # order first for an adjective read "8 wide 0.3 tall" as 0.3 wide.
+        after = re.search(r"\b" + word + r"\s+(?:of\s+)?" + _NUMBER, clause)
+        before = re.search(_NUMBER + r"\s*(?:units?\s+)?" + word + r"\b", clause)
+        found = (before or after) if word in _DIMENSION_ADJECTIVES else (after or before)
         if found and (key in dims or (key == "height" and shape.name == "box")):
             dims[key] = abs(float(found.group(1)))
     diameter = re.search(r"\bdiameter\s+(?:of\s+)?" + _NUMBER + r"|" + _NUMBER + r"\s*(?:units?\s+)?(?:across|diameter)\b", clause)

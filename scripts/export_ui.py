@@ -28,6 +28,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.composition import (  # noqa: E402
+    register_defined_specialists,
     build_channel,
     build_conversation,
     build_manager,
@@ -53,7 +54,11 @@ from src.services.evolution.governed_config import (  # noqa: E402
 from src.services.schedule.loader import load_schedule  # noqa: E402
 from src.utils.logging import configure_logging  # noqa: E402
 
-from scripts.control_center import filtered_manager_capabilities  # noqa: E402
+from scripts.control_center import (  # noqa: E402
+    SpecialistCapabilities,
+    equip_specialist,
+    filtered_manager_capabilities,
+)
 
 SHELL = Path(__file__).resolve().parent.parent / "ui" / "index.html"
 PLACEHOLDER = "__SNAPSHOT__"
@@ -121,13 +126,24 @@ def take_snapshot(settings: Settings) -> dict:
         schedule=load_schedule(settings.schedule_path),
         capabilities=capabilities,
     )
+    # The owner's own specialists, exactly as every other entry point
+    # registers them - a snapshot without them would describe a different
+    # system than the one the Control Center runs.
+    register_defined_specialists(runtime, manager, load_governed_config(DEFAULT_CONFIG_PATH).values, accounts=accounts)
     centre = ControlCenter(runtime, manager)
-
-    return snapshot(
-        centre,
-        conversation=build_conversation(manager),
-        channel=build_channel(runtime, manager),
+    conversation = build_conversation(manager)
+    channel = build_channel(runtime, manager)
+    # Equipped exactly as control_center.build equips them - otherwise a
+    # specialist's granted capabilities are missing from the export while the
+    # served page, reading the same grants, shows them.
+    manager.specialist_capabilities = SpecialistCapabilities(
+        runtime=runtime, manager=manager, channel=channel, conversation=conversation,
     )
+    for agent in manager.registry.all_agents():
+        if agent is not manager.own_skills:
+            equip_specialist(agent, runtime=runtime, manager=manager, channel=channel)
+
+    return snapshot(centre, conversation=conversation, channel=channel)
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -39,7 +39,7 @@ from src.services.audit.action_log import (
     utc_now as audit_utc_now,
 )
 from src.services.memory.audio_recording import build_recording_record
-from src.services.memory.capture import capture_intent
+from src.services.memory.capture import CAPTURED_KIND, CAPTURED_SOURCE, capture_intent
 from src.services.memory.memory import MemoryRecord
 from src.services.memory.personal_context import build_personal_context_record, extract_personal_context_candidate
 from src.services.memory.session import RETAINED_KIND, RETAINED_SOURCE, retention_requests
@@ -249,6 +249,7 @@ def exchange(
     retained = retain_what_was_asked_for(
         channel, conversation, request,
         handled_by_capability=turn.capability, handled_successfully=turn.succeeded,
+        addressed_to=to_agent if turn.handled_by == to_agent else None,
     )
     if retained and not turn.succeeded:
         turn = _acknowledge_successful_retention(turn, retained, only_asked_to_remember=_only_asked_to_remember(request))
@@ -412,6 +413,7 @@ def _acknowledge_successful_retention(
 def retain_what_was_asked_for(
     channel: Channel, conversation: Conversation, request: str,
     *, handled_by_capability: "str | None" = None, handled_successfully: bool = False,
+    addressed_to: "str | None" = None,
 ) -> "tuple[MemoryRecord, ...]":
     """Keep the things the person asked to be kept, if the policy allows.
 
@@ -430,10 +432,14 @@ def retain_what_was_asked_for(
     the fastest rate available - so nothing is persisted unless somebody asked
     for it in as many words.
 
-    The Manager's own store, through the Manager's own governed write path. It
-    is Alfred the person is talking to, so it is Alfred who remembers; a
-    specialist's memory is its own and is not reachable from here. The policy
-    is still the authority - a candidate it refuses is dropped.
+    The Manager's own store, through the Manager's own governed write path -
+    unless the person explicitly addressed a specialist who answered
+    (``addressed_to``). Then a plain note ("Nova, remember that the windmill
+    is due Friday") is that specialist's, written through its own governed
+    ``retain``: it said "I've remembered that", so it is the one that must be
+    able to recall it. A fact about the person stays in the one canonical
+    record the Manager writes and every specialist reads, whoever was asked.
+    The policy is still the authority - a candidate it refuses is dropped.
 
     Extraction knows nothing about rooms and this function knows nothing about
     admission. Neither could do the other's job.
@@ -458,11 +464,14 @@ def retain_what_was_asked_for(
     # personal_context capability already handled this very turn it has
     # written that record itself, so it is not written twice.
     candidates: list[MemoryRecord] = []
+    notes_for_specialist: list[MemoryRecord] = []
     agent_name = getattr(getattr(channel.manager, "own_skills", None), "name", "") or "manager"
+    specialist_retain = (retain_for(channel.manager, addressed_to)
+                         if addressed_to and addressed_to != agent_name else None)
     for note in requested:
         taught = extract_personal_context_candidate(note.content)
         if taught is None:
-            candidates.append(note)
+            (notes_for_specialist if specialist_retain is not None else candidates).append(note)
         elif not (handled_by_capability == "personal_context" and handled_successfully):
             candidates.append(build_personal_context_record(taught, agent_name=agent_name))
     candidates.extend(declared)
@@ -483,10 +492,24 @@ def retain_what_was_asked_for(
     if not requested and not declared and not capture_intent(request):
         candidates.extend(_brain_judged_retention(channel, conversation, request))
 
+    # A specialist does not keep user context - that is the Manager's (see
+    # SpecialistMemoryPolicy). What it keeps for an explicit request is its
+    # own explicit capture, the identical record "Arthur, record this for
+    # later" makes (capture.build_recording): full confidence, because a
+    # person asking is not a hunch, and who was asked as provenance.
+    notes_for_specialist = [
+        MemoryRecord(
+            content=note.content, kind=CAPTURED_KIND, tags={"recording", "remember"},
+            context={**(note.context or {}), "purpose": "remember", "confidence": 1.0,
+                     "source": CAPTURED_SOURCE, "captured_by": addressed_to},
+        )
+        for note in notes_for_specialist
+    ]
     retained: list[MemoryRecord] = []
-    for candidate in candidates:
+    for candidate, write in ([(c, channel.manager.retain) for c in candidates]
+                             + [(n, specialist_retain) for n in notes_for_specialist]):
         dated = _dated_if_recognisable(candidate)
-        verdict = channel.manager.retain(dated)
+        verdict = write(dated)
         if not verdict.allowed:
             logger.info("not retained: %s", verdict.reason)
         else:

@@ -333,6 +333,9 @@ class TestThisIsNotASecondRouter:
             "read_back",
             "read_content",
             "recall_memory", "record_this", "reopen_task", "revise_artifact", "revise_diagram",
+            # Final ecosystem closure: "which agents do you have?" is recognised
+            # by a roster-question shape, never the bare words "agent" or "team".
+            "roster_report",
             "select_voice",
             "small_talk", "start_recording", "stop_recording", "temporal_derivation", "transcribe_media", "translate", "translate_media", "update_task", "workspace_navigation",
         ]

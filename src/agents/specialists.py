@@ -371,3 +371,101 @@ SPECIALISTS: dict[str, SpecialistBuilder] = {
 def available_specialists() -> list[str]:
     """Every specialist key that can currently be built."""
     return sorted(SPECIALISTS)
+
+
+# ---------------------------------------------------------------------------
+# Specialists the owner defines: data, not code
+# ---------------------------------------------------------------------------
+#
+# SPECIALISTS above is for a specialist whose domain needs code (a mailbox).
+# Every other specialist - one nobody here predicted - is a definition the
+# owner saves through the Control Center (``agent create``): a name and an
+# area of responsibility, kept in the governed config beside every other
+# owner decision. Still never a file dropped into a folder: a definition is
+# an owner action, confirmed and audited like any other administrative write,
+# and what it may *do* is granted separately (``capabilities grant``).
+
+AGENT_DEFINITION_PREFIX = "agent_definition."
+
+
+@dataclass(frozen=True)
+class SpecialistDefinition:
+    """Who an owner-defined specialist is. Describes; never grants."""
+
+    key: str
+    name: str
+    area: str = ""
+    role: str = ""
+    description: str = ""
+
+    def __post_init__(self) -> None:
+        key = "_".join(str(self.key).strip().lower().split())
+        if not key or not key.replace("_", "").replace("-", "").isalnum():
+            raise ValueError(f"a specialist needs a plain key, got {self.key!r}")
+        if not " ".join(str(self.name).split()):
+            raise ValueError("a specialist needs a name")
+        object.__setattr__(self, "key", key)
+        object.__setattr__(self, "name", " ".join(str(self.name).split()))
+        for attr in ("area", "role", "description"):
+            object.__setattr__(self, attr, " ".join(str(getattr(self, attr) or "").split()))
+
+    def identity(self) -> SpecialistIdentity:
+        return SpecialistIdentity(
+            name=self.name,
+            role=self.role or (f"Specialist: {self.area}" if self.area else "Specialist"),
+            description=self.description,
+            area_of_responsibility=self.area,
+        )
+
+    def wiring(self) -> SpecialistWiring:
+        return SpecialistWiring(
+            key=self.key, identity=self.identity(), fallback_name=self.name,
+            fallback_domain=self.area or "general work for the person this system serves",
+        )
+
+    def to_value(self) -> str:
+        import json
+
+        return json.dumps({"name": self.name, "area": self.area, "role": self.role,
+                           "description": self.description}, sort_keys=True)
+
+
+def defined_specialists(values: "dict[str, str] | Any") -> "tuple[SpecialistDefinition, ...]":
+    """Every owner-defined specialist in the governed config, in key order. A
+    definition that cannot be read is skipped with a warning, never half-built."""
+    import json
+
+    found = []
+    for key, value in sorted((values or {}).items()):
+        if not str(key).startswith(AGENT_DEFINITION_PREFIX):
+            continue
+        try:
+            data = json.loads(value)
+            found.append(SpecialistDefinition(
+                key=str(key)[len(AGENT_DEFINITION_PREFIX):], name=data.get("name", ""), area=data.get("area", ""),
+                role=data.get("role", ""), description=data.get("description", ""),
+            ))
+        except (ValueError, TypeError, AttributeError) as exc:
+            logger.warning("skipping the specialist definition %s: %s", key, exc)
+    return tuple(found)
+
+
+def build_general_specialist(context: SpecialistContext) -> BaseAgent:
+    """Assemble an owner-defined specialist from its context: its own
+    identity, Brain, memory and tools, and read-only access to the person's
+    canonical context - the same equipment every specialist gets."""
+    from src.agents.general_specialist import GeneralSpecialist
+
+    identity = context.wiring.identity
+    if identity is None:
+        raise ValueError("an owner-defined specialist is built from its definition's identity")
+    agent = GeneralSpecialist(
+        identity,
+        brain=context.brain,
+        memory=context.memory(),
+        tools=context.tools,
+        calendar=context.calendar,
+        celebration=context.celebration,
+    )
+    agent.bind_user_knowledge(context.user_knowledge)
+    return agent
