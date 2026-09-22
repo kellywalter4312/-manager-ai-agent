@@ -138,6 +138,17 @@ class TestThroughTheServedSystem:
         assert report.genuinely_3d and report.meshes == 2
         assert model.latest.metadata["generator"] == "part_assembly"
 
+    def test_interaction_asked_for_is_answered_with_what_is_real_now(self, system):
+        """T-3D-02, repaired: the 3D workspace's viewer genuinely offers
+        drag-orbit, scroll-zoom, a fly-through toggle and a day/night
+        toggle now (ui/index.html's mountStage opts.interactive) - the
+        note must say so, never the old "not built yet" disclaimer."""
+        turn = _say(system, "Build an interactive 3D model I can fly through, with day and night modes: "
+                            "a white cylinder tower radius 0.6 height 3, a red cone lamp roof radius 0.7 height 0.5 on top of the tower")
+        assert "type=model3d" in turn.outcome
+        assert "drag to orbit" in turn.outcome and "day and night" in turn.outcome and "fly-through" in turn.outcome
+        assert "not built yet" not in turn.outcome
+
     def test_a_bare_subject_without_a_model_is_refused_and_nothing_saved(self, system):
         turn = _say(system, "Create a 3D teapot")
         assert "no reasoning model worked them out" in turn.outcome and "Shapes:" in turn.outcome

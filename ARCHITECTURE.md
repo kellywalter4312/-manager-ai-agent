@@ -10775,3 +10775,83 @@ synthesis in that style remain EXTERNAL AUTH REQUIRED - no
 proven correct against the vendor's own documented response shape; it has
 never been proven against a real account, and this campaign made no funded
 or metered call to change that.
+
+### 52.57 T-3D-02 repaired - the 3D workspace's viewer is genuinely interactive
+
+**The question.** §52.51's own finding: asking for an interactive 3D
+view/map now reaches `create_3d_model` and is answered honestly, but the
+honesty itself was the whole content of the answer - "controlling the
+camera, fly-throughs and day/night modes are not built yet." This campaign
+built the layer that message disclaimed, then corrected the message.
+
+**What was built, additive to the existing shared 3D-stage lifecycle
+(`ui/index.html`'s `mountStage`), never a new subsystem.**
+
+- `mountStage(container, stagesMap, key, hueRgb, sceneBuilder, opts)` gained
+  an optional 6th argument. `opts.interactive` is asked for by exactly one
+  caller - the `model3d` workspace panel's `wireModel3D()` - so every
+  decorative/ambient stage (Brain, Memory, the Room, the avatar's Digital
+  Human body, the workspace task-diagram) is byte-for-byte unaffected.
+- Real spherical-coordinate camera control around the model, seeded from
+  wherever the existing fixed/auto-fit camera already put it (turning this
+  on never moves the initial view): drag (`pointerdown`/`pointermove`/
+  `pointerup` on the real `<canvas>`) updates azimuth/elevation from real
+  pointer deltas; scroll (`wheel`) updates a zoom multiplier, clamped
+  0.35x-3.5x.
+- A fly-through toggle: while on, azimuth auto-advances from real elapsed
+  time (`THREE.Clock`), gated off under `prefers-reduced-motion` the same
+  honest way this file's ambient `animate()` already is - a manual drag
+  always still works under reduced motion (that's the person acting, not
+  ambient motion) and immediately takes the automated path over.
+- A day/night toggle: a real swap of the existing `AmbientLight`/two
+  `DirectionalLight`s' colour and intensity - never a CSS filter over the
+  canvas.
+- Two real buttons and a hint, added to the `model3d` panel's own markup
+  (`.model3d-controls`, `.model3d-hint`), wired the same way every other
+  workspace-panel control already is (`wireModel3D()`, reusing the running
+  WebGL stage exactly as a live poll already does - the canvas element
+  itself, and this new state, survive every 5-second refresh).
+- `create_3d_model`'s own honesty note (`src/manager/capabilities.py`) was
+  rewritten: the old "not built yet" disclaimer became a **false** claim
+  the moment the viewer could do these things, and leaving it would have
+  been the identical class of dishonesty this project's own verification
+  standard exists to catch, just pointed the other way. It now names the
+  real interaction and still draws the one honest remaining boundary: a
+  scripted, multi-waypoint tour with its own stops is not built.
+
+**Evidence - real, headless Microsoft Edge over CDP
+(`src/providers/browser/cdp_browser.py`, no Playwright/Node needed; see
+this session's own memory note on why), driving the actual served page
+against a real `LiveServer`, not a mock:**
+
+| Check | Result |
+|---|---|
+| Workspace opened, viewer mounted | Real WebGL canvas present, loading fallback cleared, 2 real control buttons found |
+| Manual drag-orbit | A real half-turn `PointerEvent` drag produced a large real rendered-pixel difference (offscreen-canvas pixel sum, diff 3404) - unmistakably the camera moving, not noise |
+| Scroll-zoom | A real `WheelEvent` produced an even larger real pixel difference |
+| Day/night | Button label/state flipped `day` -> `night`; the real rendered lighting changed (pixel diff) |
+| Fly-through | Button label/state flipped `on`; two pixel samples taken 1.2s apart while flying differed **with no further interaction** - the camera keeps moving on its own |
+| Console | 0 browser console errors across the whole session |
+| `create_3d_model`, end to end | "Build an interactive 3D model I can fly through, with day and night modes: ..." built a real GLB; the reply names drag-orbit, scroll-zoom, fly-through and day/night, never "not built yet" |
+| "Data-driven scenes such as a city" | Verified separately, content-generation side: 4 boxes placed as a row of buildings through the existing part-grammar - `genuinely_3d`, 4 meshes, 48 triangles. The grammar's own naming/relation-parsing richness for a scene like this was not this repair's subject and is unchanged |
+| Regression | full suite, both orders: **8099 passed / 8099 passed** (after fixing 3 architecture-guard tests whose literal `mountStage(...)` signature string, and a false-positive "model" substring match against the word "model3d" in a new comment, needed updating for the new, still-single, canonical signature - not a real regression) |
+
+**A production-data incident, disclosed in full.** The live-browser
+verification above initially built its `LiveSystem` from
+`Settings.from_env(env={}, artifacts_dir=...)` without also overriding
+`memory`/`profile_path` - which sandboxes the Control Center's own
+governed-config/credential paths but not the Manager's conversational
+Memory (`Settings.memory` defaults to `"persistent"`, reading real
+`data/memory/manager.json`). Three iterations of that script each drove a
+real browser into Alfred's real Workspace once, and the real
+`/workspace/enter` route (no dedup) recorded a real visit each time -
+inflating Alfred's real `workspace_session` visit counter from 24 to 27
+and overwriting its `last_entered` timestamp. Caught by this session's own
+`data/` mtime sweep; traced precisely (3 script runs, 3 POSTs); the harness
+itself refused the raw-Bash JSON correction as a shared-resource
+modification. The owner was asked and approved the fix: `visits` restored
+to 24 (exact), `last_entered` restored to the last other real activity
+found nearby, 2026-09-09T15:36:42Z (an evidenced approximation - the true
+prior value was overwritten and is not recoverable). No other production
+file was touched (confirmed by the same sweep); every later script in this
+campaign explicitly sandboxes `memory`/`profile_path`.

@@ -554,7 +554,7 @@ class TestNothingCanonicalChanged:
         shell = _shell()
         assert shell.count("function mountAvatarBody3D(container") == 1
         assert shell.count("function wireAvatarBody3D(){") == 1
-        assert shell.count("async function mountStage(container, stagesMap, key, hueRgb, sceneBuilder){") == 1
+        assert shell.count("async function mountStage(container, stagesMap, key, hueRgb, sceneBuilder, opts){") == 1
 
     def test_presence_still_drives_the_figure_from_the_live_snapshot(self):
         mount = _mount_avatar()

@@ -8783,9 +8783,16 @@ def create_3d_model_intent(task: Task, participants: Sequence[str] = ()) -> bool
     return bool(_MODEL3D_REQUEST.search(text)) and not re.match(r"^\s*(?:what|why|how|is|are|does|do)\b", text, re.IGNORECASE)
 
 
-# Interaction a person asks of a 3D result. The 3D workspace today shows one
-# model turning on its own: camera control, fly-throughs and lighting modes are
-# not built, and a request for them is told so rather than silently dropped.
+# Interaction a person asks of a 3D result. T-3D-02 (2026-09-21): the 3D
+# workspace only showed a model turning on its own, and camera control,
+# fly-throughs and lighting modes were told to the person as not built rather
+# than silently dropped. They are now real (the workspace's model viewer:
+# drag-orbit, scroll-zoom, a fly-through toggle, a day/night lighting toggle -
+# see ui/index.html's mountStage opts.interactive) - the note below now
+# points there truthfully instead of disclaiming it. What remains outside the
+# 3D workspace's own reach - a name typed into a request choosing where the
+# view opens, or a scripted multi-waypoint tour with stops - is still named
+# honestly rather than implied.
 _MODEL3D_INTERACTION = re.compile(
     r"\b(?:interactive|rotate|rotating|spin|zoom|orbit|pan|fly[\s-]?(?:through|over|by)|walk[\s-]?through|explore"
     r"|day\s*(?:and|/|&)\s*night|night\s+mode|day\s+mode|click\s+on|tour)\b",
@@ -8795,14 +8802,16 @@ _MODEL3D_INTERACTION = re.compile(
 
 def create_3d_model(request: CapabilityRequest) -> TaskResult:
     """Genuine 3D content for any subject (see ``_build_3d_model``), with an
-    honest word about any interaction asked for that the 3D workspace does not
-    offer yet."""
+    honest word about the real interaction the 3D workspace's viewer offers
+    once it is open."""
     result = _build_3d_model(request)
     if not _MODEL3D_INTERACTION.search(str(request.task.description or "")):
         return result
     note = (
-        " About the interaction you asked for: the 3D workspace shows a model turning on its own and lets you"
-        " download it as .glb; controlling the camera, fly-throughs and day/night modes are not built yet."
+        " About the interaction you asked for: open the 3D workspace to view it - drag to orbit the camera around it,"
+        " scroll to zoom, toggle a fly-through for a hands-free turn around it, and switch between day and night"
+        " lighting. It also turns on its own until you take the camera; you can download it as .glb. A scripted tour"
+        " with its own stops isn't built."
     )
     from dataclasses import replace as _replace
 

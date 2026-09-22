@@ -731,7 +731,7 @@ class TestBrainAndMemory3DStayHonest:
         identity, Brain and Memory - not three copies of the same ~40
         lines. Each surface supplies only its own scene builder."""
         shell = self._shell()
-        assert shell.count("async function mountStage(container, stagesMap, key, hueRgb, sceneBuilder){") == 1
+        assert shell.count("async function mountStage(container, stagesMap, key, hueRgb, sceneBuilder, opts){") == 1
         assert shell.count("function tick(){") == 1
         assert shell.count("function disposeStage(stagesMap, key){") == 1
         assert shell.count('function wireStages(attrKey, stagesMap, mountFn, tag){') == 1
@@ -873,7 +873,7 @@ class TestRoomCore3DStaysHonest:
 
     def test_the_room_core_reuses_the_shared_stage_lifecycle(self):
         shell = self._shell()
-        assert shell.count("async function mountStage(container, stagesMap, key, hueRgb, sceneBuilder){") == 1
+        assert shell.count("async function mountStage(container, stagesMap, key, hueRgb, sceneBuilder, opts){") == 1
         assert shell.count("function tick(){") == 1
         block = self._renderer_block()
         assert "return mountStage(container, room3DStages, key, ROOM_HUE" in block
@@ -1106,7 +1106,7 @@ class TestVisualEnvironmentRegistryStaysHonest:
         reason to duplicate either - re-verified after Phase 5's
         refactor touched all four mount*3D() callers."""
         shell = self._shell()
-        assert shell.count("async function mountStage(container, stagesMap, key, hueRgb, sceneBuilder){") == 1
+        assert shell.count("async function mountStage(container, stagesMap, key, hueRgb, sceneBuilder, opts){") == 1
         assert shell.count("function tick(){") == 1
         assert shell.count("function wireStages(attrKey, stagesMap, mountFn, tag){") == 1
 

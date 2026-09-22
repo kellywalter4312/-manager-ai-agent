@@ -632,7 +632,7 @@ class TestNothingCanonicalChanged:
         shell = _shell()
         assert shell.count("function mountAvatarBody3D(container") == 1
         assert shell.count("function wireAvatarBody3D(){") == 1
-        assert shell.count("async function mountStage(container, stagesMap, key, hueRgb, sceneBuilder){") == 1
+        assert shell.count("async function mountStage(container, stagesMap, key, hueRgb, sceneBuilder, opts){") == 1
 
     def test_no_python_module_learned_about_any_of_this(self):
         """The whole correction is presentation. The only Python file this
