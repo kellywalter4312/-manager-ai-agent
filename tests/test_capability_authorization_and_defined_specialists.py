@@ -455,6 +455,55 @@ class TestWhatASpecialistIsAskedToRememberIsItsOwn:
         assert any("windmill" in r.content for r in system.manager.memory.recall(limit=50))
 
 
+class TestAGrantedSpecialistReadsContentItself:
+    """read_content through Nova, end to end: a real repository document
+    shared through the upload route, read by Nova as Nova (never Alfred
+    behind the scenes), and refused honestly once revoked."""
+
+    def _shared(self, system):
+        import base64
+
+        _run(system, "agent create nova Nova|3D modelling")
+        status, body, _ = su.route_upload(
+            "Nova", "SOUL.md", "text/markdown",
+            base64.b64encode((REPO_ROOT / "SOUL.md").read_bytes()).decode(), "conversation", system,
+        )
+        assert status == 200 and json.loads(body)["readable_units"] > 10
+
+    def test_granted_nova_reads_the_named_part_as_herself(self, system):
+        self._shared(system)
+        _run(system, "capabilities grant Nova read_content")
+        ran_as = []
+        capability = MANAGER_CAPABILITIES["read_content"]
+        real = capability.handle
+        # Frozen dataclass: swapped and restored by hand to see who runs it.
+        object.__setattr__(capability, "handle", lambda request: ran_as.append(request.own_name) or real(request))
+        try:
+            turn = _say(system, "Nova, what does paragraph 10 say?", to="Nova")
+        finally:
+            object.__setattr__(capability, "handle", real)
+        assert turn.handled_by == "Nova" and turn.succeeded
+        assert "Report, do not act" in turn.outcome and "paragraph 10" in turn.outcome
+        assert ran_as == ["Nova"]
+
+    def test_revoked_nova_is_refused_and_nothing_reads_for_her(self, system):
+        self._shared(system)
+        _run(system, "capabilities grant Nova read_content")
+        _run(system, "capabilities revoke Nova read_content")
+        turn = _say(system, "Nova, what does paragraph 10 say?", to="Nova")
+        assert not turn.succeeded and "read_content, which I'm not authorised for" in turn.outcome
+        assert "Report, do not act" not in turn.outcome
+
+    def test_the_trail_credits_each_memory_write_to_whoever_kept_it(self, system):
+        """Found live: every delegated turn showed "Nova / Memory: 1 record
+        retained" - it was Alfred's own delegation note, not Nova's."""
+        _run(system, "agent create nova Nova|3D modelling")
+        turn = _say(system, "Nova, who are you?", to="Nova")
+        assert {s.actor for s in turn.steps if s.label == "Memory"} <= {_manager_name(system)}
+        turn = _say(system, "remember that the windmill project is due on Friday", to="Nova")
+        assert "Nova" in {s.actor for s in turn.steps if s.label == "Memory" and "asked to be remembered" in s.detail}
+
+
 class TestThreeDSubjects:
     def test_the_next_step_of_a_longer_request_is_not_the_subject(self, system):
         turn = _say(system, "make a 3D model of a chair: a box seat 1 wide 0.2 tall 1 deep, then a document")

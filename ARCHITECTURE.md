@@ -11256,3 +11256,33 @@ no write outside it; no network, no metered call):
 dimension order, specialist note ownership x3, export parity);
 `tests/test_identity_resolution.py`'s claiming inventory gains
 `roster_report` with its reason.
+
+### 52.62 read_content through a specialist, end to end - and whose memory the trail says grew
+
+**The gap 52.61 left.** Nova had been *granted* `read_content`, but no task
+had ever made her read anything. Closed over the real HTTP server
+(`LiveServer`, loopback only, every governed path and the action log
+sandboxed, provider `null`, any non-loopback connection refused and
+recorded - none was attempted).
+
+| Step | Real result |
+|---|---|
+| Before | `capabilities access Nova`: "read_content - not granted"; "Nova, read this document to me" -> "That's read_content, which I'm not authorised for ..." - never invoked |
+| Grant | `POST /command` twice (description + confirm token) -> "read_content - granted by the owner" |
+| Content | the repository's own `SOUL.md` shared with Nova via `POST /upload` (source conversation): document, 14 readable units |
+| Read | "Nova, read this document to me" -> the document from its title, bounded to one listening window |
+| Find | "what does paragraph 10 say?" -> the real Principles ("Report, do not act. ..."); "what does paragraph 12 say?" -> the real Policy values ("... max_opportunities_reported: 5 ...") |
+| Explain | "explain what paragraph 12 means" -> not read_content by design (explaining is the Brain's); Half Brain says honestly it needs a model |
+| Who ran it | every invocation instrumented: `own_name='Nova'`, identity a `GeneralSpecialist`, empty roster, Nova's own memory; Alfred's own skills executed **0** times; no agent added; Nova's identity, Brain and memory objects unchanged |
+| Revoke | the same two requests -> honest refusal naming `read_content`; not invoked; Alfred did not run it instead |
+| Restart | `capability_grant.nova: read_content` persisted; after rebuild Nova reads paragraph 10 again, as Nova |
+
+**One defect this exposed, repaired.** Every delegated turn's trail read
+"Nova / Memory: 1 record(s) retained" - yet Nova's store had not changed:
+the record was Alfred's own `delegation_outcome` note. `trail.py` summed
+every agent's growth and labelled it with whoever answered;
+`exchange._acknowledge_successful_retention` did the reverse since 52.61,
+labelling a note Nova kept as Alfred's. Both now credit each write to the
+agent whose memory actually grew (`_memory_writes`; `captured_by`).
+Regression tests: `TestAGrantedSpecialistReadsContentItself` (3) - the
+attribution test fails with the fix reverted.

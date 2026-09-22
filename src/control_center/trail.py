@@ -228,12 +228,16 @@ def observe(
         )
 
     recalled, written = _memory_delta(manager, before)
-    if written:
+    # Each write is shown as the agent whose memory it went into - a delegated
+    # turn's record is often the Manager's own note that he delegated, and
+    # crediting it to the specialist who answered would say it learned
+    # something it did not.
+    for writer, count in _memory_writes(manager, before).items():
         steps.append(
             TrailStep(
                 label="Memory",
-                detail=f"{written} record(s) retained",
-                actor=handled_by,
+                detail=f"{count} record(s) retained",
+                actor=writer,
             )
         )
 
@@ -379,21 +383,23 @@ def _memory_delta(manager: ManagerAgent, before: dict[str, int]) -> tuple[int, i
     memory view; a conversation trail wants the fact that something was
     learned, not the text of it.
     """
-    written = 0
-    after = {
-        agent.name: _memory_size(getattr(agent, "memory", None))
-        for agent in manager.registry.all_agents()
-        if getattr(agent, "memory", None) is not None
-    }
-    after[_manager_name(manager)] = _memory_size(manager.memory)
-
-    for name, count in after.items():
-        written += max(0, count - before.get(name, 0))
-
     # Recall is not counted here. The agents recall through their own brains,
     # and reporting a number this module cannot actually observe would be
     # exactly the fabrication the Control Center must not commit.
-    return 0, written
+    return 0, sum(_memory_writes(manager, before).values())
+
+
+def _memory_writes(manager: ManagerAgent, before: dict[str, int]) -> dict[str, int]:
+    """How many records each agent's own memory gained while this request
+    ran - only the agents whose memory actually grew, the Manager first."""
+    after = {_manager_name(manager): _memory_size(manager.memory)}
+    after.update({
+        agent.name: _memory_size(getattr(agent, "memory", None))
+        for agent in manager.registry.all_agents()
+        if getattr(agent, "memory", None) is not None and agent.name not in after
+    })
+    grown = {name: count - before.get(name, 0) for name, count in after.items()}
+    return {name: delta for name, delta in grown.items() if delta > 0}
 
 
 def _result_detail(result: TaskResult) -> str:

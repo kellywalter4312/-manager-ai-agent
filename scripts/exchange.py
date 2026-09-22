@@ -383,15 +383,22 @@ def _acknowledge_successful_retention(
       outcome contradicts a trail still reading "not accepted: failed"
       immediately above it.
     """
+    # Shown as whoever actually kept it: a note given to a specialist is that
+    # specialist's own capture (``captured_by``); everything else the Manager's.
+    kept_by: dict[str, int] = {}
+    for record in retained:
+        writer = (record.context or {}).get("captured_by") or turn.manager or turn.handled_by
+        kept_by[writer] = kept_by.get(writer, 0) + 1
     steps = tuple(
         replace(step, detail="accepted (see note below)") if step.label == "Assessed" else step
         for step in turn.steps
-    ) + (
+    ) + tuple(
         TrailStep(
             label="Memory",
-            detail=f"{len(retained)} record(s) retained - what was asked to be remembered",
-            actor=turn.manager or turn.handled_by,
-        ),
+            detail=f"{count} record(s) retained - what was asked to be remembered",
+            actor=writer,
+        )
+        for writer, count in kept_by.items()
     )
     remembered = "; ".join(record.content for record in retained)
     if only_asked_to_remember:
