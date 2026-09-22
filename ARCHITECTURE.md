@@ -10674,3 +10674,34 @@ distinctive fake secrets were hunted through every surface.
   not removed without the owner's approval.
 - Real vendor answers need real, funded keys and the owner's authorisation to
   reach them.
+
+### 52.55 V-DATA-01 closed - the `reservablething` fixture account removed
+
+**The question.** §52.54 left one item for the owner: production
+`data/credentials/accounts.json` held a single account for `reservablething`,
+the 2026-09-11 CON-03 verification fixture, a service that no longer exists.
+The owner authorised its removal on 2026-09-22. Nothing else was in scope.
+
+**What was done.** Removed through the existing operator tool rather than a
+hand edit to the JSON, so the same code path any real revocation uses was
+exercised:
+
+```
+PYTHONPATH=. python scripts/ecosystem_cli.py revoke-account reservablething testaccount
+```
+
+**Evidence.**
+
+| Check | Result |
+|---|---|
+| Before | `accounts reservablething` -> `[*] reservablething/testaccount` |
+| After | `data/credentials/accounts.json` = `{"accounts": [], "active": {}}` - the same empty-store shape `load_credential_store` already documents as a valid, error-free start, not a special case |
+| Scope | `git status`/mtime sweep of `data/`: only `accounts.json` changed; no other production credential or account touched |
+| Source diff | none - `data/credentials/accounts.json` is git-ignored (`data/*` plus an explicit rule), so this is a production-data change, not a code change |
+| Regression | full suite re-run after the change, both orders: **8083 passed / 8083 passed** |
+| Left alone | the stale `connection.reservablething` string in `data/evolution/state.json` (a cached snapshot label, not a credential or account) - out of the authorised scope, and already recorded under CON-03 as a benign, cosmetic leftover of a raw registry save bypassing the governance layer |
+
+**Outcome.** V-DATA-01 closed. No further items are open under section V, and
+none of the other owner-facing items in `REQUIREMENT_LEDGER.md` changed
+status - they remain HARDWARE, EXTERNAL (vendor funding/auth), or PROVIDER
+LIMIT, none of which this cleanup touches.
