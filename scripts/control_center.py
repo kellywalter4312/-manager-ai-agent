@@ -718,6 +718,7 @@ def render_voice_providers(channel) -> str:
         lines.append(f"  voices: {len(facts.voices)}")
         lines.append(f"  speaks: {', '.join(facts.spoken_languages) or 'nothing reported'}")
         lines.append(f"  accents: {', '.join(facts.accents()) or 'none reported'}")
+        lines.append(f"  styles: {', '.join(facts.styles) or 'none reported'}")
         lines.append(
             "  a voice can speak another language (keeping its accent): "
             + ("yes" if facts.across_languages else "no - each voice speaks only its own language")
@@ -3852,16 +3853,17 @@ def run_command(
             # above for the effective-voice override lookup.
             options = tuple(discover_fn()) if callable(discover_fn) else ()
             if options:
-                lines.append("  discovered options (language/accent/locale/gender, where reported):")
+                lines.append("  discovered options (language/accent/locale/gender/style, where reported):")
                 for option in options:
                     facts = ", ".join(
                         f"{label}={value}"
                         for label, value in (
                             ("language", option.language), ("accent", option.accent),
                             ("locale", option.locale), ("gender", option.gender),
+                            ("style", option.style),
                         )
                         if value
-                    ) or "no language/accent/locale/gender reported"
+                    ) or "no language/accent/locale/gender/style reported"
                     lines.append(f"    {option.name} ({option.provider}): {facts}")
             from src.services.identity.voice_configuration import voice_setting_for as _setting
 

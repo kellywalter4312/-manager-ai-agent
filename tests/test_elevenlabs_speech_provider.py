@@ -156,6 +156,93 @@ class TestDiscoveryIsReal:
         # A labels-only voice never gets a fabricated language.
         assert options[0].language is None
 
+    def test_gender_is_read_from_labels_on_a_labels_only_voice(self, monkeypatch):
+        """Found while repairing U-VOICE-05: this field was never read at
+        all, on either branch - every ElevenLabs voice reported gender=None
+        regardless of what the vendor's own labels said, silently breaking
+        plan_voice's gender filter for this provider."""
+        voices = fake_voices_client(
+            voices=[
+                SimpleNamespace(
+                    voice_id="v1", name="Labeled Voice", verified_languages=None,
+                    labels={"accent": "british", "gender": "female"},
+                ),
+            ]
+        )
+        speech = adapter(monkeypatch, voices=voices)
+        assert speech.available_voices()[0].gender == "female"
+
+    def test_gender_is_also_read_on_a_multilingual_verified_languages_voice(self, monkeypatch):
+        """The same real ``labels`` dict, previously read only in the
+        labels-only branch - a verified-languages voice lost its gender
+        entirely."""
+        italian = SimpleNamespace(language="it", accent="italian", locale="it-IT")
+        voices = fake_voices_client(
+            voices=[
+                SimpleNamespace(
+                    voice_id="v1", name="Multilingual Voice",
+                    labels={"gender": "male"}, verified_languages=[italian],
+                ),
+            ]
+        )
+        speech = adapter(monkeypatch, voices=voices)
+        assert speech.available_voices()[0].gender == "male"
+
+    def test_the_descriptive_label_is_the_reported_style(self, monkeypatch):
+        """ElevenLabs' own real, vendor-reported per-voice label for manner
+        of speaking - the same ``labels`` dict already trusted for accent
+        and gender, read the identical honest way: never invented, never
+        applied to a voice that does not carry it."""
+        voices = fake_voices_client(
+            voices=[
+                SimpleNamespace(
+                    voice_id="v1", name="Calm Voice", verified_languages=None,
+                    labels={"descriptive": "Calm", "gender": "female"},
+                ),
+                SimpleNamespace(
+                    voice_id="v2", name="Plain Voice", verified_languages=None,
+                    labels=None,
+                ),
+            ]
+        )
+        speech = adapter(monkeypatch, voices=voices)
+        options = speech.available_voices()
+        assert options[0].style == "calm"
+        # A voice with no descriptive label gets no fabricated style.
+        assert options[1].style is None
+
+
+class TestSpeakingStylesAreReportedTruthfully:
+    """U-VOICE-05: the provider's real, discoverable style capability, not
+    a fixed catalogue this module invents and not a field that exists
+    without being wired to anything."""
+
+    def test_no_voices_means_no_styles_reported(self, monkeypatch):
+        speech = adapter(monkeypatch, voices=fake_voices_client(voices=[]))
+        assert speech.speaking_styles() == ()
+
+    def test_voices_with_no_descriptive_label_report_no_styles(self, monkeypatch):
+        voices = fake_voices_client(
+            voices=[SimpleNamespace(voice_id="v1", name="A", verified_languages=None, labels={"accent": "british"})]
+        )
+        speech = adapter(monkeypatch, voices=voices)
+        assert speech.speaking_styles() == ()
+
+    def test_real_descriptive_labels_are_reported_deduplicated_and_sorted(self, monkeypatch):
+        voices = fake_voices_client(
+            voices=[
+                SimpleNamespace(voice_id="v1", name="A", verified_languages=None, labels={"descriptive": "Calm"}),
+                SimpleNamespace(voice_id="v2", name="B", verified_languages=None, labels={"descriptive": "confident"}),
+                SimpleNamespace(voice_id="v3", name="C", verified_languages=None, labels={"descriptive": "calm"}),
+            ]
+        )
+        speech = adapter(monkeypatch, voices=voices)
+        assert speech.speaking_styles() == ("calm", "confident")
+
+    def test_a_catalog_failure_reports_no_styles_never_raises(self, monkeypatch):
+        speech = adapter(monkeypatch, voices=fake_voices_client(raises=RuntimeError("account suspended")))
+        assert speech.speaking_styles() == ()
+
     def test_a_catalog_failure_returns_empty_never_raises(self, monkeypatch):
         voices = fake_voices_client(raises=RuntimeError("account suspended"))
         speech = adapter(monkeypatch, voices=voices)

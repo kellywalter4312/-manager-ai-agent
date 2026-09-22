@@ -10705,3 +10705,73 @@ PYTHONPATH=. python scripts/ecosystem_cli.py revoke-account reservablething test
 none of the other owner-facing items in `REQUIREMENT_LEDGER.md` changed
 status - they remain HARDWARE, EXTERNAL (vendor funding/auth), or PROVIDER
 LIMIT, none of which this cleanup touches.
+
+### 52.56 U-VOICE-05 repaired - a provider's real speaking-style capability, wired
+
+**The question.** §52.53 left U-VOICE-05 PARTIAL: style joined language,
+accent, variant and pace as a governed voice dimension, but no real provider
+adapter ever populated it, and a satisfied style request never actually
+changed which voice spoke - a field validated, never wired. This campaign's
+brief was explicit: do not merely add a field or make a test pass; prove the
+whole chain, Control Center through runtime through restart.
+
+**What was found, inspecting `elevenlabs_speech_provider.py` - the one real
+provider with a genuine per-voice style fact (ElevenLabs' own `labels`
+dict).**
+
+- `speaking_styles()` did not exist, so `voice_facts()`'s own `ask(...)`
+  fallback silently reported ElevenLabs as having no styles at all - false:
+  ElevenLabs' voice library labels many of its voices `descriptive` ("calm",
+  "confident", ...), the identical real `labels` dict this adapter already
+  trusted for `accent`.
+- **A second, unrelated real defect found alongside it while reading the
+  same method:** `labels.get("gender")` was never read on *either* branch of
+  `available_voices()` - every ElevenLabs voice reported `gender=None`
+  regardless of what the vendor's own labels said. `plan_voice`'s gender
+  filter (`"The {provider} voice provider reports no {gender} voice"`) and
+  `_keep_gender`'s continuity across accent/variant changes were both
+  silently broken for this provider the whole time. Fixed in the same pass,
+  the same `labels` dict already open.
+
+**The repair, additive across the existing architecture, no new subsystem.**
+
+- `VoiceOption` gained a `style` field - a per-voice fact, exactly like
+  `accent`/`gender`, never a provider-wide value.
+- `ElevenLabsSpeechAdapter.available_voices()` now reads `labels["gender"]`
+  and `labels["descriptive"]` on both branches (labels-only and
+  verified-languages); `speaking_styles()` reports the real, sorted,
+  deduplicated set - empty, honestly, on an account with no descriptive
+  labels or a catalogue failure.
+- `plan_voice` (`voice_configuration.py`) now actually selects a matching
+  voice for a style request - but **only when the active provider's own
+  voices carry the fact per-voice** (`style_bearing`). A provider that
+  validates style as a flat capability with no per-voice attribution (no
+  local engine has one) is left exactly as before: accepted, voice
+  unchanged - the distinction between "ElevenLabs' real shape" and "a
+  hypothetical global style knob" is preserved rather than collapsed.
+- `voice_for_settings` carries a stored style setting to a new provider's
+  real voices the same way accent/variant already do, when that provider
+  can satisfy it.
+- **Control Center exposure, previously silent in two places despite
+  `VoiceFacts.styles` already existing:** `voice providers` now prints a
+  `styles:` line beside accents/paces; the per-agent `voice <agent>`
+  discovered-options listing now includes `style=...` per voice beside
+  language/accent/locale/gender.
+
+**Evidence.**
+
+| Check | Result |
+|---|---|
+| Real vendor shape, mocked SDK (no key exists anywhere on this machine) | `descriptive`/`gender` read correctly on both branches; `speaking_styles()` real, sorted, deduplicated, empty on failure |
+| `plan_voice`, style-bearing provider (4-voice ElevenLabs-shaped fake) | style-only, style+gender both select the real matching voice id; an unmet combination is refused naming the style that failed |
+| `plan_voice`, flat-capability provider (Kokoro/Windows-shaped fake) | provably unchanged - the pre-existing test (`calm` accepted, `voice` left exactly as `current`) still passes unmodified |
+| **Live, real, non-mocked runtime** - installed Windows and Kokoro engines, sandboxed config paths (production `data/` confirmed untouched by mtime sweep) | `voice providers` truthfully prints `styles: none reported` for both real engines; `voice Alfred style calm` is honestly refused live; switching `windows` -> `kokoro` live both work |
+| Restart | a fresh process rebuild reading the same persisted sandbox config kept the `kokoro` choice and the same truthful `styles: none reported` line |
+| Regression | full suite, both orders: **8097 passed / 8097 passed** (14 new tests) |
+
+**Left external.** ElevenLabs' own real per-voice style selection and genuine
+synthesis in that style remain EXTERNAL AUTH REQUIRED - no
+`ELEVENLABS_API_KEY` exists anywhere on this machine. The mechanism is
+proven correct against the vendor's own documented response shape; it has
+never been proven against a real account, and this campaign made no funded
+or metered call to change that.

@@ -192,6 +192,15 @@ class ElevenLabsSpeechAdapter(SpeechAdapter):
         for v in response.voices:
             if not v.voice_id or not v.name:
                 continue
+            # Voice-level facts - read once per voice, independent of which
+            # verified language entry (if any) is being expanded below. Both
+            # were previously read only in the labels-only branch, which
+            # meant a multilingual voice with verified_languages silently
+            # lost its gender and never carried a style at all - found and
+            # fixed alongside U-VOICE-05, the same real ``labels`` dict.
+            labels = getattr(v, "labels", None) or {}
+            gender = str(labels.get("gender") or "").strip().lower() or None
+            style = str(labels.get("descriptive") or "").strip().lower() or None
             verified = getattr(v, "verified_languages", None) or ()
             if verified:
                 for entry in verified:
@@ -202,13 +211,14 @@ class ElevenLabsSpeechAdapter(SpeechAdapter):
                             language=language or None,
                             accent=str(entry.accent).strip() if entry.accent else None,
                             locale=str(entry.locale).strip() if entry.locale else None,
+                            gender=gender, style=style,
                         )
                     )
             else:
-                labels = getattr(v, "labels", None) or {}
                 accent = str(labels.get("accent") or "").strip() or None
                 options.append(
-                    VoiceOption(voice_id=v.voice_id, name=v.name, provider=self.name, accent=accent)
+                    VoiceOption(voice_id=v.voice_id, name=v.name, provider=self.name,
+                                accent=accent, gender=gender, style=style)
                 )
         return tuple(options)
 
@@ -219,6 +229,17 @@ class ElevenLabsSpeechAdapter(SpeechAdapter):
     def spoken_languages(self) -> "tuple[str, ...]":
         """The languages the account's voices are verified to speak, as ElevenLabs reports them."""
         return tuple(sorted({o.language for o in self.available_voices() if o.language}))
+
+    def speaking_styles(self) -> "tuple[str, ...]":
+        """The speaking-style labels this account's voices are genuinely
+        tagged with - ElevenLabs' own ``labels["descriptive"]`` per voice
+        ("calm", "confident", "excited", ...), the same real label dict
+        ``available_voices`` already reads ``accent``/``gender`` from.
+        Never a fixed catalogue this module invents: an account whose
+        voices carry no descriptive label reports none, honestly, the
+        same as a local engine with no styles at all.
+        """
+        return tuple(sorted({o.style for o in self.available_voices() if o.style}))
 
     def voice_in_use(self, voice: VoiceProfile | None) -> "str | None":
         """The ElevenLabs voice id ``synthesize`` will actually use for ``voice``."""

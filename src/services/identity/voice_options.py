@@ -143,6 +143,12 @@ class VoiceOption:
     accent: "str | None" = None
     locale: "str | None" = None
     gender: "str | None" = None
+    # A manner-of-speaking label this specific voice is reported to carry
+    # (ElevenLabs' own ``labels["descriptive"]`` - "calm", "confident",
+    # ...), never inferred from a name and never invented for a provider
+    # that reports none. See voice_configuration.py's own module docstring
+    # for how this differs from a provider-wide style capability list.
+    style: "str | None" = None
 
     def __post_init__(self) -> None:
         if not str(self.voice_id).strip():

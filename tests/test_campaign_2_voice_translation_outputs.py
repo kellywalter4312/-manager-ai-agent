@@ -424,6 +424,10 @@ class TestControlCenterVoiceCommands:
 
         providers = run("voice providers")
         assert "active: scripted" in providers and "speaks: english, italian" in providers and "paces: slow, normal, fast" in providers
+        # U-VOICE-05: a provider's real style capability (or its honest
+        # absence) is now shown here too, the same as accents and paces -
+        # this scripted fixture reports none, truthfully.
+        assert "styles: none reported" in providers
         assert run("voice Alfred language german").startswith("FAILED") and "It speaks: English, Italian" in run("voice Alfred language german")
         assert "Chiara" in run("voice Alfred language italian")
         # this provider's voices speak only their own language: no British accent in Italian

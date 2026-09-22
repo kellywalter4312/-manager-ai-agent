@@ -114,6 +114,16 @@ def voice_for_settings(
                   and (not language or canonical_language(v.language) == language)]
         if native:
             return sorted(native, key=lambda v: v.voice_id)[0]
+    style = voice_setting_for(agent_key, "style", recall=recall)
+    if style:
+        # Only when the new provider's own voices carry the fact per-voice
+        # (see plan_voice's own "style_bearing" note) - a provider that
+        # cannot attribute a style to a specific voice has nothing here to
+        # match against, and falls through to accent/no-carry below.
+        with_style = [v for v in options if style_of(v) == style
+                      and (not language or canonical_language(v.language) == language)]
+        if with_style:
+            return sorted(with_style, key=lambda v: v.voice_id)[0]
     accent = voice_setting_for(agent_key, "accent", recall=recall)
     if not accent:
         return None
@@ -231,6 +241,15 @@ def _accent_matches(option: VoiceOption, wanted: str) -> bool:
     return wanted in {x for x in (accent_of(option), canonical_language(option.language)) if x}
 
 
+def style_of(option: VoiceOption) -> "str | None":
+    """The speaking-style label this specific voice is reported to carry
+    (ElevenLabs' own per-voice ``descriptive`` label), or None when the
+    provider reports none for it - never guessed from ``facts.styles``,
+    which is only the provider-wide set of names that exist somewhere in
+    its catalogue."""
+    return option.style.lower() if option.style else None
+
+
 @dataclass(frozen=True)
 class VoicePlan:
     ok: bool
@@ -281,6 +300,24 @@ def plan_voice(
         candidates = [v for v in candidates if (v.gender or "").lower() == gender.lower()] or []
         if not candidates:
             return VoicePlan(False, f"The {provider} voice provider reports no {gender} voice.")
+    # Some providers report a style as a fact of a specific voice
+    # (ElevenLabs' own per-voice "descriptive" label) rather than a
+    # runtime knob any voice can take on - narrow to a real matching
+    # voice only when at least one of this provider's voices actually
+    # carries the fact. A provider that validated the style above but
+    # reports it with no per-voice attribution (none of the local
+    # engines do either) is left to keep whichever voice the other
+    # dimensions below select, honestly changing nothing about *which*
+    # voice speaks.
+    style_bearing = style and any(v.style for v in facts.voices)
+    if style_bearing:
+        with_style = [v for v in candidates if style_of(v) == wanted_style]
+        if not with_style:
+            return VoicePlan(
+                False,
+                f"The {provider} voice provider has no {gender + ' ' if gender else ''}voice in a {style} style.",
+            )
+        candidates = with_style
     chosen = current
     if variant:
         native = [v for v in candidates if canonical_language(v.language) == target_language and variant_of(v) == variant]
@@ -323,7 +360,7 @@ def plan_voice(
             chosen = current
         else:
             return VoicePlan(False, f"The {provider} voice provider has no voice that speaks {spoken.title()}.")
-    elif gender:
+    elif gender or style_bearing:
         chosen = sorted(candidates, key=lambda v: v.voice_id)[0]
     parts = []
     if chosen is not None and (current is None or chosen.voice_id != current.voice_id):
