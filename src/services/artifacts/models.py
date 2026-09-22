@@ -195,6 +195,38 @@ class VoiceRecordingContent:
 
 
 @dataclass(frozen=True)
+class VideoRecordingContent:
+    """A real, user-directed screen or camera recording's canonical
+    content - the purpose it was given and which real device captured
+    it (``"screen"``/``"camera"``) - T-REC-03's own addition, the
+    identical content-vs-rendition split ``VoiceRecordingContent`` above
+    already establishes, applied to the video half of the same real
+    browser-capture mechanism. Never the captured video itself, which is
+    a rendition."""
+
+    purpose: str
+    source: str = "screen"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "purpose", " ".join(str(self.purpose or "").split()) or "general")
+        source = str(self.source or "").strip().lower()
+        object.__setattr__(self, "source", source if source in ("screen", "camera") else "screen")
+
+    def to_json(self) -> str:
+        return json.dumps({"purpose": self.purpose, "source": self.source})
+
+    @classmethod
+    def from_json(cls, data: str) -> "VideoRecordingContent":
+        try:
+            payload = json.loads(data)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"not valid video recording content JSON: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("video recording content JSON must be an object")
+        return cls(purpose=str(payload.get("purpose", "")), source=str(payload.get("source", "screen")))
+
+
+@dataclass(frozen=True)
 class SuppliedFileContent:
     """A file the *user* handed Alfred - a PDF, a document, an image, a
     recording, a video - never something Alfred produced. Its canonical

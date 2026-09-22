@@ -1,5 +1,18 @@
-"""A real, user-directed microphone recording - an actual audio artifact,
-never text pretending to be one.
+"""A real, user-directed browser recording - an actual audio or video
+artifact, never text pretending to be one.
+
+**T-REC-03 (2026-09-22): broadened from audio alone to screen and camera
+capture.** All three are the identical real request shape this module
+already existed to recognise apart from ``capture.py`` - an explicit,
+deterministic request to capture *live media*, distinguished from each
+other only by which device the frontend's own ``getUserMedia``/
+``getDisplayMedia`` call actually opens (see ``ui/index.html``'s
+``startRecording``). One recognition module, one ``RecordingSessionRegistry``
+lifecycle (``recording_session.py``, now carrying a ``kind``), one pair of
+governed Memory categories (``audio_recording``/``video_recording`` -
+screen and camera share the second, distinguished by
+``context["source"]``) - never three parallel systems for what is, at
+every layer beneath the actual device request, the same mechanism.
 
 **Kept apart from "record this" (``capture.py``) on purpose.** That module
 recognises an explicit request to capture *words already said* as a durable
@@ -52,6 +65,10 @@ from src.services.memory.memory import MemoryRecord
 
 DEFAULT_RECORDING_PURPOSE = "general"
 AUDIO_RECORDING_KIND = "audio_recording"
+# Screen and camera capture share one governed Memory category - both are
+# "a real video the browser captured", distinguished by context["source"]
+# ("screen"/"camera") rather than a third/fourth parallel category.
+VIDEO_RECORDING_KIND = "video_recording"
 
 # Chosen specifically so none of these are also substrings capture.py's own
 # _CAPTURE_FOR/_CAPTURE_PLAIN would match ("record this"/"keep this") -
@@ -59,7 +76,7 @@ AUDIO_RECORDING_KIND = "audio_recording"
 # uses a verb ("capture", "start", "begin") capture.py's own markers never
 # use. That is what lets both modules claim their own request shape without
 # one phrase ever satisfying both.
-_START_MARKERS: tuple[str, ...] = (
+_AUDIO_START_MARKERS: tuple[str, ...] = (
     "start recording", "start a recording", "start an audio recording",
     "start a voice recording", "start voice recording", "begin recording",
     "begin a recording", "begin an audio recording", "record audio",
@@ -69,11 +86,33 @@ _START_MARKERS: tuple[str, ...] = (
     "start a voice memo", "capture this for", "capture what i'm saying",
     "capture what i am saying", "capture my voice",
 )
+# T-REC-03: the identical deterministic, marker-by-shape recognition the
+# audio markers above already use, named specifically enough ("my screen",
+# "this screen") that they never collide with a plain "record" no kind is
+# named for - an unqualified "start recording" stays audio, exactly as it
+# always has.
+_SCREEN_START_MARKERS: tuple[str, ...] = (
+    "record my screen", "record the screen", "record this screen",
+    "start recording my screen", "start recording the screen",
+    "start a screen recording", "start screen recording",
+    "begin a screen recording", "begin screen recording",
+    "capture my screen", "capture the screen", "share and record my screen",
+)
+_CAMERA_START_MARKERS: tuple[str, ...] = (
+    "record my camera", "record from my camera", "record with my camera",
+    "start recording my camera", "start a camera recording", "start camera recording",
+    "begin a camera recording", "begin camera recording",
+    "record a video of myself", "start a video recording",
+    "start video recording", "make a video recording",
+)
+_START_MARKERS: tuple[str, ...] = _AUDIO_START_MARKERS + _SCREEN_START_MARKERS + _CAMERA_START_MARKERS
 _STOP_MARKERS: tuple[str, ...] = (
     "stop recording", "stop the recording", "stop this recording",
     "end recording", "end the recording", "finish recording",
     "finish the recording", "stop the audio recording",
-    "stop the voice recording",
+    "stop the voice recording", "stop the screen recording",
+    "stop screen recording", "stop the camera recording",
+    "stop camera recording", "stop the video recording", "stop video recording",
 )
 _CANCEL_MARKERS: tuple[str, ...] = (
     "cancel recording", "cancel the recording", "cancel this recording",
@@ -107,8 +146,24 @@ def _marker_present(text: str, markers: tuple[str, ...]) -> bool:
 
 
 def start_recording_intent(text: str) -> bool:
-    """The ``claims=`` predicate for beginning a new audio recording."""
+    """The ``claims=`` predicate for beginning a new recording - audio,
+    screen or camera; ``recording_kind_of`` says which."""
     return _marker_present(text, _START_MARKERS)
+
+
+def recording_kind_of(text: str) -> str:
+    """Which real capture an explicit start-recording request named -
+    ``"screen"``, ``"camera"``, or the honest default ``"audio"`` when
+    neither was named (an unqualified "start recording" has always meant
+    the microphone, and still does). Checked before the plain audio
+    markers so a phrase that happens to satisfy both a screen/camera
+    marker and a looser audio one (there are none today, but a future
+    marker could) resolves to the more specific kind named."""
+    if _marker_present(text, _SCREEN_START_MARKERS):
+        return "screen"
+    if _marker_present(text, _CAMERA_START_MARKERS):
+        return "camera"
+    return "audio"
 
 
 def stop_recording_intent(text: str) -> bool:
@@ -191,6 +246,14 @@ def match_recordings_by_topic(
     )
 
 
+# capture kind -> (memory kind, tag prefix, the noun a description uses)
+_KIND_FACTS: "dict[str, tuple[str, str]]" = {
+    "audio": (AUDIO_RECORDING_KIND, "Voice"),
+    "screen": (VIDEO_RECORDING_KIND, "Screen"),
+    "camera": (VIDEO_RECORDING_KIND, "Camera"),
+}
+
+
 def build_recording_record(
     *,
     purpose: str,
@@ -199,6 +262,7 @@ def build_recording_record(
     duration_seconds: "float | int | None" = None,
     mime_type: str = "",
     rendition_format: str = "",
+    capture_kind: str = "audio",
 ) -> MemoryRecord:
     """One candidate recording-reference record for a real, already-
     saved artifact - the identical builder role ``build_task_record``/
@@ -207,7 +271,12 @@ def build_recording_record(
     offered to.
 
     ``artifact_id`` must already name a real, registered artifact - this
-    function does not create one, and never invents an id.
+    function does not create one, and never invents an id. ``capture_kind``
+    (``"audio"``/``"screen"``/``"camera"``) decides which governed category
+    this lands in (screen and camera share ``video_recording``,
+    distinguished by ``context["source"]``) and which noun describes it -
+    T-REC-03's own addition, an unrecognised kind falls back to ``"audio"``
+    honestly rather than raising.
     """
     purpose_clean = " ".join(str(purpose or "").split()) or DEFAULT_RECORDING_PURPOSE
     duration_text = (
@@ -215,19 +284,31 @@ def build_recording_record(
         if isinstance(duration_seconds, (int, float)) and duration_seconds
         else ""
     )
-    tag = f"audio_recording:{artifact_id}"
+    memory_kind, noun = _KIND_FACTS.get(str(capture_kind or "").lower(), _KIND_FACTS["audio"])
+    source = str(capture_kind or "").lower() if str(capture_kind or "").lower() in _KIND_FACTS else "audio"
+    tag = f"{memory_kind}:{artifact_id}"
     return MemoryRecord(
-        content=f"Voice recording for {purpose_clean}{duration_text}",
-        kind=AUDIO_RECORDING_KIND,
-        tags={"audio_recording", tag},
+        content=f"{noun} recording for {purpose_clean}{duration_text}",
+        kind=memory_kind,
+        tags={memory_kind, tag},
         context={
-            "fact_type": "audio_recording",
+            "fact_type": memory_kind,
+            "source": source,
             "artifact_id": artifact_id,
             "purpose": purpose_clean,
             "duration_seconds": duration_seconds,
             "mime_type": mime_type,
             "rendition_format": rendition_format,
             "created_by": created_by,
+            # Full confidence, the identical reasoning capture.py's own
+            # build_recording already documents: a real, user-directed
+            # recording that genuinely happened is not a tentative
+            # observation - it is exactly what it says it is. Read by
+            # SpecialistMemoryPolicy's own confidence gate (T-REC-03: found
+            # missing here even after admitting the category itself, which
+            # is why no specialist's recording was ever actually retained
+            # before this repair, silently defaulting to 0.0 and refused).
+            "confidence": 1.0,
             # Honest, not fabricated: no transcription engine is
             # configured in this project yet (see this module's own
             # docstring on why recording and transcription stay separate

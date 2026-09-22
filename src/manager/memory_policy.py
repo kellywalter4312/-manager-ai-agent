@@ -164,6 +164,13 @@ class MemoryCategory(str, Enum):
     # recording plainly changes what the Manager can retrieve, play
     # back and reference next time.
     AUDIO_RECORDING = "audio_recording"
+    # T-REC-03 (2026-09-22): the identical admission the audio recording
+    # category above already earns, for a real screen or camera capture
+    # (getDisplayMedia/a video-capable getUserMedia) - distinguished from
+    # AUDIO_RECORDING because the artifact is a video, and from each other
+    # (screen vs. camera) by context["source"] rather than a third/fourth
+    # parallel category for what is otherwise the identical shape of fact.
+    VIDEO_RECORDING = "video_recording"
 
     @property
     def label(self) -> str:
@@ -180,6 +187,7 @@ class MemoryCategory(str, Enum):
             "calendar_item": "CALENDAR",
             "experience": "EXPERIENCE",
             "audio_recording": "AUDIO RECORDING",
+            "video_recording": "VIDEO RECORDING",
         }[self.value]
 
     @property
@@ -248,6 +256,13 @@ class MemoryCategory(str, Enum):
                 "artifact holding the audio - never the audio bytes "
                 "themselves, and never ordinary conversation retained "
                 "automatically."
+            ),
+            "video_recording": (
+                "That a real, user-directed screen or camera recording "
+                "exists (context['source'] says which), its purpose/"
+                "context, and a reference to the actual artifact holding "
+                "the video - never the video bytes themselves, and never "
+                "ordinary conversation retained automatically."
             ),
         }[self.value]
 

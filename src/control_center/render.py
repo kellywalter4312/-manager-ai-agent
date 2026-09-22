@@ -695,7 +695,7 @@ def render_recordings(item: "RecordingAgentView | None", columns: int | None = N
     out.append(f"  {item.agent}")
     if item.session is not None:
         detail = f" - {item.session['error']}" if item.session.get("error") else ""
-        out.append(f"    current session: {item.session['state']} ({item.session['purpose']}){detail}")
+        out.append(f"    current session: {item.session.get('kind', 'audio')} - {item.session['state']} ({item.session['purpose']}){detail}")
     if not item.items:
         out.append("    no saved recordings yet")
     else:

@@ -90,6 +90,14 @@ class RecordingSession:
     handle. Frozen like every other contract in this project: a caller
     that wants a new state calls a registry method, which produces (and
     stores) a new one rather than mutating this in place.
+
+    ``kind`` names which real capture this is - ``"audio"`` (a
+    microphone), ``"screen"`` (``getDisplayMedia``) or ``"camera"``
+    (a video-capable ``getUserMedia``) - T-REC-03's own addition. The
+    lifecycle above is identical for all three: Python still never
+    touches any of them, and this registry still only remembers which
+    one is in progress. Defaults to ``"audio"`` so every caller written
+    before this field existed keeps working unchanged.
     """
 
     agent_key: str
@@ -98,6 +106,7 @@ class RecordingSession:
     requested_at: str = ""
     artifact_id: "str | None" = None
     error: str = ""
+    kind: str = "audio"
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -107,6 +116,7 @@ class RecordingSession:
             "requested_at": self.requested_at,
             "artifact_id": self.artifact_id,
             "error": self.error,
+            "kind": self.kind,
         }
 
 
@@ -130,7 +140,7 @@ class RecordingSessionRegistry:
         with self._lock:
             return self._sessions.get(str(agent_key))
 
-    def request(self, agent_key: str, purpose: str) -> RecordingSession:
+    def request(self, agent_key: str, purpose: str, kind: str = "audio") -> RecordingSession:
         """A real "start recording [for X]" was heard. Replaces whatever
         session (if any) already existed for this agent - a fresh request
         always supersedes a stale prior one, the same "the newest real
@@ -138,29 +148,34 @@ class RecordingSessionRegistry:
         follow."""
         session = RecordingSession(
             agent_key=str(agent_key), state=RecordingState.REQUESTED,
-            purpose=purpose, requested_at=_now_iso(),
+            purpose=purpose, requested_at=_now_iso(), kind=str(kind or "audio"),
         )
         with self._lock:
             self._sessions[str(agent_key)] = session
         return session
 
-    def mark_recording(self, agent_key: str, purpose: "str | None" = None) -> RecordingSession:
+    def mark_recording(
+        self, agent_key: str, purpose: "str | None" = None, kind: "str | None" = None,
+    ) -> RecordingSession:
         """The frontend confirms genuine capture has actually begun -
         the real user gesture only a browser can make. Works whether or
         not a natural-language "start recording" preceded it: a person
         is equally entitled to just press the real Start control with
         no prior request, and this must not refuse that. When a session
-        was already REQUESTED (with its own purpose), that purpose is
-        kept unless ``purpose`` explicitly overrides it; when nothing
-        was requested, a fresh RECORDING session is opened directly.
+        was already REQUESTED (with its own purpose/kind), that purpose/
+        kind is kept unless the caller explicitly overrides it; when
+        nothing was requested, a fresh RECORDING session is opened
+        directly with whatever the frontend's own real
+        getUserMedia/getDisplayMedia call actually used.
         """
         with self._lock:
             key = str(agent_key)
             existing = self._sessions.get(key)
             resolved_purpose = purpose or (existing.purpose if existing is not None else "general")
+            resolved_kind = kind or (existing.kind if existing is not None else "audio")
             updated = RecordingSession(
                 agent_key=key, state=RecordingState.RECORDING,
-                purpose=resolved_purpose,
+                purpose=resolved_purpose, kind=str(resolved_kind),
                 requested_at=existing.requested_at if existing is not None else _now_iso(),
             )
             self._sessions[key] = updated
@@ -177,7 +192,7 @@ class RecordingSessionRegistry:
                 return False
             self._sessions[key] = RecordingSession(
                 agent_key=key, state=RecordingState.STOP_REQUESTED,
-                purpose=existing.purpose, requested_at=existing.requested_at,
+                purpose=existing.purpose, requested_at=existing.requested_at, kind=existing.kind,
             )
             return True
 
@@ -187,9 +202,10 @@ class RecordingSessionRegistry:
             existing = self._sessions.get(key)
             purpose = existing.purpose if existing is not None else "general"
             requested_at = existing.requested_at if existing is not None else _now_iso()
+            kind = existing.kind if existing is not None else "audio"
             self._sessions[key] = RecordingSession(
                 agent_key=key, state=RecordingState.SAVING,
-                purpose=purpose, requested_at=requested_at,
+                purpose=purpose, requested_at=requested_at, kind=kind,
             )
 
     def mark_saved(self, agent_key: str, artifact_id: str) -> RecordingSession:
@@ -198,9 +214,10 @@ class RecordingSessionRegistry:
             existing = self._sessions.get(key)
             purpose = existing.purpose if existing is not None else "general"
             requested_at = existing.requested_at if existing is not None else _now_iso()
+            kind = existing.kind if existing is not None else "audio"
             session = RecordingSession(
                 agent_key=key, state=RecordingState.SAVED,
-                purpose=purpose, requested_at=requested_at, artifact_id=str(artifact_id),
+                purpose=purpose, requested_at=requested_at, artifact_id=str(artifact_id), kind=kind,
             )
             self._sessions[key] = session
             return session
@@ -211,9 +228,10 @@ class RecordingSessionRegistry:
             existing = self._sessions.get(key)
             purpose = existing.purpose if existing is not None else "general"
             requested_at = existing.requested_at if existing is not None else _now_iso()
+            kind = existing.kind if existing is not None else "audio"
             session = RecordingSession(
                 agent_key=key, state=RecordingState.FAILED,
-                purpose=purpose, requested_at=requested_at, error=str(reason),
+                purpose=purpose, requested_at=requested_at, error=str(reason), kind=kind,
             )
             self._sessions[key] = session
             return session
@@ -231,7 +249,7 @@ class RecordingSessionRegistry:
             ):
                 return False
             self._sessions[key] = RecordingSession(
-                agent_key=key, state=RecordingState.CANCELLED,
+                agent_key=key, state=RecordingState.CANCELLED, kind=existing.kind,
                 purpose=existing.purpose, requested_at=existing.requested_at,
             )
             return True

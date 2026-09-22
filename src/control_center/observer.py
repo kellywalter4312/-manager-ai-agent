@@ -810,25 +810,25 @@ class ControlCenter:
         return tuple(views)
 
     def recordings(self) -> tuple[RecordingAgentView, ...]:
-        """Every registered agent's own real, saved audio recordings and
-        its current live recording session - discovered from the
-        registry exactly as ``workspaces()`` already is, never a fixed
-        list naming Alfred. Unlike ``workspaces()``, this is never
-        gated behind a declared interface feature: recording is a
+        """Every registered agent's own real, saved audio/screen/camera
+        recordings and its current live recording session - discovered
+        from the registry exactly as ``workspaces()`` already is, never
+        a fixed list naming Alfred. Unlike ``workspaces()``, this is
+        never gated behind a declared interface feature: recording is a
         governed *capability*, not a surface a screen renders
         differently per agent, so every agent gets an honest answer -
         empty when nothing has ever been recorded.
 
-        Reads the identical governed Memory category
-        (``MemoryCategory.AUDIO_RECORDING``) and the identical shared
-        ``RecordingSessionRegistry`` (``runtime.recording_sessions``) a
-        served page's own snapshot reads and the same routes
-        (``scripts/serve_ui.py``'s ``POST /recording/*``) write -
-        the same backend source of truth, so Control Center and the
-        frontend never disagree about whether a recording is in
-        progress or what has been saved. Read-only: starting/stopping/
-        cancelling stays conversational (``start_recording``/
-        ``stop_recording``/``cancel_recording`` in
+        Reads both governed Memory categories (``MemoryCategory.
+        AUDIO_RECORDING``/``VIDEO_RECORDING`` - T-REC-03) and the
+        identical shared ``RecordingSessionRegistry``
+        (``runtime.recording_sessions``) a served page's own snapshot
+        reads and the same routes (``scripts/serve_ui.py``'s
+        ``POST /recording/*``) write - the same backend source of
+        truth, so Control Center and the frontend never disagree about
+        whether a recording is in progress or what has been saved.
+        Read-only: starting/stopping/cancelling stays conversational
+        (``start_recording``/``stop_recording``/``cancel_recording`` in
         ``src/manager/capabilities.py``), never from this screen.
         """
         views: list[RecordingAgentView] = []
@@ -836,7 +836,13 @@ class ControlCenter:
             memory = self._memory_for(view.name)
             recall = memory.recall if memory is not None else None
             records = (
-                recall(kind=MemoryCategory.AUDIO_RECORDING.value, limit=100)
+                sorted(
+                    (
+                        *recall(kind=MemoryCategory.AUDIO_RECORDING.value, limit=100),
+                        *recall(kind=MemoryCategory.VIDEO_RECORDING.value, limit=100),
+                    ),
+                    key=lambda record: record.created_at, reverse=True,
+                )
                 if recall is not None else ()
             )
             items = tuple(
@@ -848,6 +854,7 @@ class ControlCenter:
                     rendition_format=str((record.context or {}).get("rendition_format") or ""),
                     transcription_status=str((record.context or {}).get("transcription_status") or "not_available"),
                     describe=describe_recording(record),
+                    kind=str((record.context or {}).get("source") or "audio"),
                 )
                 for record in records
             )

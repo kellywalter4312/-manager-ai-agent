@@ -65,6 +65,20 @@ class SpecialistMemoryCategory(str, Enum):
     # the identical concept (and kind) the Manager's own tasks use, like
     # RECORDING above.
     TASK = "user_task"
+    # T-REC-03 (2026-09-22), found while building screen/camera capture:
+    # the Real Audio Recording/Capture checkpoint (§52.4x) added
+    # MemoryCategory.AUDIO_RECORDING for the Manager, but never its
+    # specialist counterpart - so a real, genuinely-captured recording for
+    # an equipped specialist saved its artifact successfully (the artifact
+    # store has no per-agent category gate) while the *reference* to it was
+    # silently refused by this policy, the identical "agent-generic on
+    # purpose" claim ui/index.html's own recording widget already makes
+    # for every agent quietly not holding for the memory half. Admitted
+    # here the same way RECORDING/TASK already are: the identical concept
+    # (and kind) the Manager's own categories use, never a specialist-only
+    # reinterpretation of what a recording is.
+    AUDIO_RECORDING = "audio_recording"
+    VIDEO_RECORDING = "video_recording"
 
     @property
     def label(self) -> str:
@@ -74,6 +88,8 @@ class SpecialistMemoryCategory(str, Enum):
             "domain_preference": "DOMAIN PREFERENCE",
             "recording": "RECORDED FOR LATER",
             "user_task": "ON THIS AGENT'S TASK BOARD",
+            "audio_recording": "AUDIO RECORDING",
+            "video_recording": "VIDEO RECORDING",
         }[self.value]
 
     @property
@@ -98,6 +114,18 @@ class SpecialistMemoryCategory(str, Enum):
             "user_task": (
                 "A piece of work the owner explicitly put on this agent's own "
                 "Workspace task board - a request, never routine history."
+            ),
+            "audio_recording": (
+                "That a real, user-directed microphone recording exists for "
+                "this agent, its purpose, and a reference to the actual "
+                "artifact holding the audio - never the audio bytes "
+                "themselves."
+            ),
+            "video_recording": (
+                "That a real, user-directed screen or camera recording "
+                "exists for this agent (context['source'] says which), its "
+                "purpose, and a reference to the actual artifact holding the "
+                "video - never the video bytes themselves."
             ),
         }[self.value]
 

@@ -185,7 +185,7 @@ from src.manager.proactive_experience import deliver_experience  # noqa: E402
 from src.services.artifacts.content import SHARED_FILE_PREFIX, read_artifact_units  # noqa: E402
 from src.services.evolution.governed_config import load_governed_config  # noqa: E402
 from src.services.artifacts.ingestion import IngestionError, MAX_SUPPLIED_FILE_BYTES, ingest_supplied_file  # noqa: E402
-from src.services.artifacts.models import VoiceRecordingContent  # noqa: E402
+from src.services.artifacts.models import VideoRecordingContent, VoiceRecordingContent  # noqa: E402
 from src.services.artifacts.registration import register_new_artifact  # noqa: E402
 from src.services.identity.presence import (  # noqa: E402
     PresenceState,
@@ -431,6 +431,15 @@ def _route_artifact_file(path: str, system: LiveSystem) -> tuple[int, bytes, str
         return 404, b"the rendered file is missing on disk", "text/plain; charset=utf-8"
 
     content_type = _RENDITION_CONTENT_TYPES.get(extension, "application/octet-stream")
+    # T-REC-03: "webm" is an ambiguous container - a real MediaRecorder
+    # produces both audio-only voice recordings and audio+video screen/
+    # camera ones under the identical extension (_recording_extension's
+    # own fallback). The default above is audio/webm; a video_recording
+    # artifact's own declared type is the one honest place to tell the
+    # two apart, so its "webm" rendition is served under the content
+    # type a <video> element actually needs to play it.
+    if extension == "webm" and artifact.type == "video_recording":
+        content_type = "video/webm"
     return 200, file_path.read_bytes(), content_type
 
 
@@ -886,20 +895,27 @@ def _recording_extension(mime_type: object) -> str:
     return _RECORDING_EXTENSIONS.get(base, "webm")
 
 
-def route_recording_started(agent: object, purpose: object, system: LiveSystem) -> tuple[int, bytes, str]:
+_RECORDING_KINDS = ("audio", "screen", "camera")
+
+
+def route_recording_started(
+    agent: object, purpose: object, system: LiveSystem, kind: object = None,
+) -> tuple[int, bytes, str]:
     """Decide what to answer for `POST /recording/started`. No socket
     involved.
 
     The one real acknowledgement a served page calls once a genuine user
-    gesture has actually opened a browser microphone stream - never
-    called speculatively, and never a claim this route itself verifies
-    (it cannot reach into a browser to check; it takes the caller's word
-    for the same reason `route_experience` already does for "this was
-    genuinely presented"). Works whether or not a natural-language
-    "start recording" preceded it - see
+    gesture has actually opened a browser microphone/screen/camera
+    stream - never called speculatively, and never a claim this route
+    itself verifies (it cannot reach into a browser to check; it takes
+    the caller's word for the same reason `route_experience` already
+    does for "this was genuinely presented"). Works whether or not a
+    natural-language "start recording" preceded it - see
     `RecordingSessionRegistry.mark_recording`'s own docstring for why a
     person pressing a real Start control with nothing said first must
-    not be refused.
+    not be refused. ``kind`` (T-REC-03) names which real device the
+    frontend actually opened - unrecognised or absent falls back to
+    "audio" honestly, never guessed from anything else.
     """
     if not isinstance(agent, str) or not agent.strip():
         return (
@@ -914,8 +930,9 @@ def route_recording_started(agent: object, purpose: object, system: LiveSystem) 
             "application/json; charset=utf-8",
         )
     purpose_value = str(purpose).strip() if isinstance(purpose, str) and purpose.strip() else None
+    kind_value = str(kind).strip().lower() if isinstance(kind, str) and kind.strip().lower() in _RECORDING_KINDS else None
     with system.lock:
-        session = system.runtime.recording_sessions.mark_recording(agent, purpose_value)
+        session = system.runtime.recording_sessions.mark_recording(agent, purpose_value, kind_value)
     return (
         200,
         json.dumps({"agent": agent, "session": session.to_dict()}).encode("utf-8"),
@@ -925,7 +942,7 @@ def route_recording_started(agent: object, purpose: object, system: LiveSystem) 
 
 def route_recording_save(
     agent: object, purpose: object, audio_base64: object, mime_type: object,
-    duration_seconds: object, system: LiveSystem,
+    duration_seconds: object, system: LiveSystem, kind: object = None,
 ) -> tuple[int, bytes, str]:
     """Decide what to answer for `POST /recording/save`. No socket
     involved.
@@ -934,10 +951,14 @@ def route_recording_save(
     artifact (`register_new_artifact`, the identical shared helper every
     other real, produced artifact in this project already uses to write
     content.json plus one real rendition) and, alongside it, a real
-    Memory reference under `MemoryCategory.AUDIO_RECORDING`, through
-    `retain_for`'s own governed path - never the raw audio itself, which
-    stays exactly where the artifact store already keeps every other
-    media artifact's bytes.
+    Memory reference under `MemoryCategory.AUDIO_RECORDING`/
+    `VIDEO_RECORDING` (T-REC-03: screen and camera share the latter,
+    distinguished by `source`), through `retain_for`'s own governed
+    path - never the raw audio/video itself, which stays exactly where
+    the artifact store already keeps every other media artifact's
+    bytes. ``kind`` names which real device the frontend actually
+    captured from - unrecognised or absent falls back to the live
+    session's own kind, then honestly to "audio".
 
     The artifact write is the source of truth for "this recording is
     genuinely saved" - a Memory-policy refusal (vanishingly unlikely for
@@ -992,13 +1013,29 @@ def route_recording_save(
     duration_value = duration_seconds if isinstance(duration_seconds, (int, float)) else None
 
     with system.lock:
+        # The live session's own kind is the authoritative record of which
+        # real device this capture actually used (set when the frontend's
+        # getUserMedia/getDisplayMedia call opened it) - the explicit
+        # ``kind`` argument only overrides it when the session itself
+        # somehow disagrees or is absent, never guessed from the mime type.
+        existing_session = system.runtime.recording_sessions.get(agent)
+        kind_value = str(kind).strip().lower() if isinstance(kind, str) and kind.strip().lower() in _RECORDING_KINDS else None
+        capture_kind = kind_value or (existing_session.kind if existing_session is not None else "audio")
         system.runtime.recording_sessions.mark_saving(agent)
+        if capture_kind in ("screen", "camera"):
+            artifact_type = "video_recording"
+            title = f"{capture_kind.title()} recording ({purpose_value})"
+            content_bytes = VideoRecordingContent(purpose=purpose_value, source=capture_kind).to_json().encode("utf-8")
+        else:
+            artifact_type = "voice_recording"
+            title = f"Voice recording ({purpose_value})"
+            content_bytes = VoiceRecordingContent(purpose=purpose_value).to_json().encode("utf-8")
         artifact = register_new_artifact(
             system.runtime.artifacts,
-            type="voice_recording",
+            type=artifact_type,
             owner_agent=agent,
-            title=f"Voice recording ({purpose_value})",
-            content_bytes=VoiceRecordingContent(purpose=purpose_value).to_json().encode("utf-8"),
+            title=title,
+            content_bytes=content_bytes,
             rendition_format=extension,
             rendition_bytes=audio_bytes,
         )
@@ -1009,6 +1046,7 @@ def route_recording_save(
             duration_seconds=duration_value,
             mime_type=str(mime_type or ""),
             rendition_format=extension,
+            capture_kind=capture_kind,
         )
         verdict = retain(record)
         session = system.runtime.recording_sessions.mark_saved(agent, artifact.artifact_id)
@@ -1602,15 +1640,23 @@ class SnapshotHandler(BaseHTTPRequestHandler):
         elif self.path == "/recording/started":
             agent = payload.get("agent") if isinstance(payload, dict) else None
             purpose = payload.get("purpose") if isinstance(payload, dict) else None
-            status, body, content_type = route_recording_started(agent, purpose, self.server.system)
+            # T-REC-03: which real device the frontend actually opened -
+            # "audio"/"screen"/"camera". Absent or unrecognised falls back
+            # to "audio" honestly inside the route itself.
+            kind = payload.get("kind") if isinstance(payload, dict) else None
+            status, body, content_type = route_recording_started(agent, purpose, self.server.system, kind)
         elif self.path == "/recording/save":
             agent = payload.get("agent") if isinstance(payload, dict) else None
             purpose = payload.get("purpose") if isinstance(payload, dict) else None
+            # Still named "audio_base64" on the wire for every capture kind -
+            # audio, screen and camera alike - the same base64 payload shape
+            # regardless of which real device produced the bytes.
             audio_base64 = payload.get("audio_base64") if isinstance(payload, dict) else None
             mime_type = payload.get("mime_type") if isinstance(payload, dict) else None
             duration_seconds = payload.get("duration_seconds") if isinstance(payload, dict) else None
+            kind = payload.get("kind") if isinstance(payload, dict) else None
             status, body, content_type = route_recording_save(
-                agent, purpose, audio_base64, mime_type, duration_seconds, self.server.system
+                agent, purpose, audio_base64, mime_type, duration_seconds, self.server.system, kind
             )
         elif self.path == "/recording/cancel":
             agent = payload.get("agent") if isinstance(payload, dict) else None

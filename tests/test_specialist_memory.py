@@ -107,34 +107,44 @@ class TestTheSpecialistPolicyIsSeparate:
 
     def test_it_has_its_own_categories(self):
         assert POLICY.category_names == (
+            "audio_recording",
             "domain_lesson",
             "domain_pattern",
             "domain_preference",
             "recording",
             "user_task",
+            "video_recording",
         )
 
-    def test_there_are_exactly_five(self):
+    def test_there_are_exactly_seven(self):
         """Stage 12 added RECORDING - the same explicit "record this
         [for X]" capture Alfred has, available to an equipped specialist
         too (capture.py's own docstring: "shared by every agent that
         captures, never duplicated per agent"). Post-Pre-Stage-9 added TASK:
-        every agent owns a Workspace task board."""
-        assert len(SpecialistMemoryCategory) == 5
+        every agent owns a Workspace task board. T-REC-03 (2026-09-22)
+        added AUDIO_RECORDING and VIDEO_RECORDING: a real, genuinely
+        captured recording's *artifact* already saved for any equipped
+        specialist (the artifact store has no per-agent category gate),
+        while the reference to it was silently refused here - found while
+        building screen/camera capture, fixed the same "agent-generic on
+        purpose" way RECORDING/TASK already are."""
+        assert len(SpecialistMemoryCategory) == 7
 
-    def test_no_category_overlaps_the_managers_except_the_shared_recording_concept(self):
+    def test_no_category_overlaps_the_managers_except_the_shared_recording_concepts(self):
         """Every category still means something exclusive to its own
-        vocabulary, with one deliberate exception: RECORDING is the
-        identical concept in both - an explicit capture request - applied
-        to each agent's own separate store. Stage 12 asks for this
-        symmetry explicitly ("do not create separate Alfred and
-        specialist implementations"), so the two vocabularies sharing
-        this one name is by design, not a naming collision."""
+        vocabulary, with deliberate exceptions: RECORDING, and now
+        AUDIO_RECORDING/VIDEO_RECORDING, are the identical concept in
+        both - an explicit capture request - applied to each agent's own
+        separate store. Stage 12 asks for this symmetry explicitly ("do
+        not create separate Alfred and specialist implementations"), so
+        the two vocabularies sharing these names is by design, not a
+        naming collision."""
         specialist = set(POLICY.category_names)
         manager = set(ManagerMemoryPolicy().category_names)
-        # user_task joined recording post-Pre-Stage-9: a task on an agent's own
-        # board is the identical concept in both, kept in each agent's own store.
-        assert specialist & manager == {"recording", "user_task"}
+        # user_task joined recording post-Pre-Stage-9; audio_recording/
+        # video_recording joined with T-REC-03 - each names a fact real
+        # for both a manager and a specialist, kept in each agent's own store.
+        assert specialist & manager == {"recording", "user_task", "audio_recording", "video_recording"}
 
     @pytest.mark.parametrize("manager_kind", list(MANAGER_CATEGORIES))
     def test_a_manager_category_is_refused(self, manager_kind):

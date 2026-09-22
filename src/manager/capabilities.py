@@ -208,6 +208,7 @@ from src.services.memory.audio_recording import (
     extract_recording_query,
     list_recordings_intent,
     match_recordings_by_topic,
+    recording_kind_of,
     start_recording_intent,
     stop_recording_intent,
 )
@@ -4437,25 +4438,28 @@ RECORD_THIS = ManagerCapability(
 
 
 def start_recording(request: CapabilityRequest) -> TaskResult:
-    """Recognise an explicit "start recording [for X]" request and open a
-    real recording session for this agent - never a capture itself,
-    which only a browser can perform. The session this creates is what
-    lets the Workspace/Agents UI honestly show "ready to record for
+    """Recognise an explicit "start recording [for X]" request - audio,
+    screen or camera, ``recording_kind_of`` says which - and open a real
+    recording session for this agent - never a capture itself, which
+    only a browser can perform. The session this creates is what lets
+    the Workspace/Agents UI honestly show "ready to record for
     research" rather than a person having to separately explain the
     purpose to a Start button.
     """
     if request.recording_sessions is None:
         return TaskResult.failure(
             request.task, request.own_name,
-            "I don't have a way to record audio right now.",
+            "I don't have a way to record right now.",
         )
     purpose = extract_recording_purpose(request.task.description)
-    request.recording_sessions.request(request.own_name, purpose)
+    kind = recording_kind_of(request.task.description)
+    request.recording_sessions.request(request.own_name, purpose, kind=kind)
+    noun = {"screen": "screen", "camera": "camera"}.get(kind, "")
     return TaskResult.success(
         request.task, request.own_name,
-        f"Ready to record for {purpose} - use the Recording control to begin, "
+        f"Ready to record {(noun + ' ') if noun else ''}for {purpose} - use the Recording control to begin, "
         "or say 'stop recording' once you are done.",
-        payload={"handled_by": "start_recording", "purpose": purpose},
+        payload={"handled_by": "start_recording", "purpose": purpose, "kind": kind},
     )
 
 
@@ -4547,12 +4551,17 @@ CANCEL_RECORDING = ManagerCapability(
 
 
 def list_recordings(request: CapabilityRequest) -> TaskResult:
-    """List this agent's own saved recordings, or answer whether one
-    matching a named topic/purpose exists - the identical "bare view vs.
-    named argument" shape ``list_tasks`` already uses, over the
-    governed ``AUDIO_RECORDING`` Memory category rather than the actual
+    """List this agent's own saved recordings - audio, screen and
+    camera alike - or answer whether one matching a named topic/purpose
+    exists - the identical "bare view vs. named argument" shape
+    ``list_tasks`` already uses, over the governed ``AUDIO_RECORDING``/
+    ``VIDEO_RECORDING`` Memory categories rather than the actual
     artifact store (retrieval by real, searchable metadata - the actual
-    audio stays exactly where the artifact store already keeps it).
+    audio/video stays exactly where the artifact store already keeps
+    it). ``recall`` takes one ``kind`` per call, so both categories are
+    asked for and merged, newest first - a person asking "what
+    recordings do I have" must see every kind, not only the first one
+    someone happened to query.
     """
     if request.recall is None:
         return TaskResult.failure(
@@ -4561,7 +4570,13 @@ def list_recordings(request: CapabilityRequest) -> TaskResult:
         )
 
     topic = extract_recording_query(request.task.description)
-    pool = request.recall(kind=MemoryCategory.AUDIO_RECORDING.value, limit=200)
+    pool = sorted(
+        (
+            *request.recall(kind=MemoryCategory.AUDIO_RECORDING.value, limit=200),
+            *request.recall(kind=MemoryCategory.VIDEO_RECORDING.value, limit=200),
+        ),
+        key=lambda record: record.created_at, reverse=True,
+    )
     if topic:
         matches = match_recordings_by_topic(pool, topic)
         if not matches:

@@ -54,6 +54,7 @@ from src.services.memory.audio_recording import (
     extract_recording_query,
     list_recordings_intent,
     match_recordings_by_topic,
+    recording_kind_of,
     start_recording_intent,
     stop_recording_intent,
 )
@@ -64,6 +65,7 @@ from scripts.serve_ui import (
     MANAGEMENT_VERBS,
     _RECORDING_EXTENSIONS,
     _recording_extension,
+    route,
     route_recording_cancel,
     route_recording_clear,
     route_recording_failed,
@@ -593,19 +595,22 @@ class TestSnapshotExposure:
         assert len(alfred["recordings"]) == 1
         assert alfred["recording_session"]["state"] == "saved"
 
-    def test_a_specialists_own_recording_never_leaks_into_alfreds_snapshot(self, tmp_path):
-        """A genuine, honest architectural boundary, not a bug: a
-        specialist's own governed policy (SpecialistMemoryCategory) is
-        deliberately separate from the Manager's (MemoryCategory) and
-        does not yet admit AUDIO_RECORDING - see
-        src/agents/memory_policy.py's own docstring ("the only kinds of
-        thing a specialist retains about its own work"). The real
-        artifact still saves (the audio is genuinely persisted); only
-        the searchable Memory *reference* is honestly refused for this
-        agent today, exactly the "extensible without being pre-built"
-        boundary this capability is required to leave open, never
-        silently forced open by widening a specialist's own policy as
-        a side effect of this feature."""
+    def test_a_specialists_own_recording_is_isolated_to_its_own_snapshot(self, tmp_path):
+        """T-REC-03 (2026-09-22): this test previously asserted the
+        opposite - that a specialist's Memory *reference* was refused -
+        and called that "a genuine, honest architectural boundary, not
+        a bug". It was a bug: SpecialistMemoryCategory simply never
+        admitted AUDIO_RECORDING, contradicting the recording widget's
+        own "agent-generic on purpose" comment and
+        ControlCenter.recordings()'s own "every agent gets an honest
+        answer" docstring - no test had ever actually exercised a
+        specialist's save to notice the two disagreed. Fixed by
+        admitting AUDIO_RECORDING/VIDEO_RECORDING to
+        SpecialistMemoryCategory (see T-REC-03 in
+        REQUIREMENT_LEDGER.md). What this test still genuinely proves,
+        unchanged: isolation - the specialist's own recording reference
+        lives in the specialist's own store and never leaks into
+        Alfred's snapshot, or vice versa."""
         runtime, manager, channel, conversation = real_system(tmp_path)
         centre = ControlCenter(runtime, manager)
         system = LiveSystem(
@@ -622,16 +627,17 @@ class TestSnapshotExposure:
         )
         payload = json.loads(body)
         assert status == 200
-        assert runtime.artifacts.get(payload["artifact_id"]) is not None  # the real audio saved regardless
-        assert payload["memory_saved"] is False
+        assert runtime.artifacts.get(payload["artifact_id"]) is not None
+        assert payload["memory_saved"] is True, payload.get("memory_reason")
 
         data = snapshot(centre)
         alfred = next(a for a in data["agents"] if a["name"] == manager.own_skills.name)
+        # Isolation, unchanged: Alfred's own snapshot never shows a
+        # recording the specialist made.
         assert alfred["recordings"] == []
         specialist = next(a for a in data["agents"] if a["name"] == specialist_name)
-        # No Memory reference exists for this agent today - an honest
-        # empty list, never a fabricated one.
-        assert specialist["recordings"] == []
+        assert len(specialist["recordings"]) == 1
+        assert specialist["recordings"][0]["purpose"] == "mailbox notes"
 
     def test_snapshot_module_still_holds_no_memory_or_registry_import(self):
         """The architecture-boundary guard this file's own changes must
@@ -683,6 +689,176 @@ class TestAgentIndependence:
         route_recording_save(name, "research", FAKE_AUDIO_B64, "audio/webm", 5.0, system)
         specialist_memory = memory_for(manager, specialist_name)
         assert specialist_memory.recall(kind="audio_recording", limit=10) == ()
+
+    def test_a_specialist_can_genuinely_save_and_remember_its_own_recording(self, tmp_path):
+        """T-REC-03: found while building screen/camera capture - a
+        specialist's real recording *artifact* already saved
+        successfully (the artifact store has no per-agent category
+        gate), but the governed Memory *reference* to it was silently
+        refused (SpecialistMemoryCategory never admitted
+        "audio_recording"), contradicting this module's own "agent-
+        generic on purpose" claim. No test ever exercised
+        route_recording_save for a specialist before this one - fixed
+        by admitting AUDIO_RECORDING/VIDEO_RECORDING to
+        SpecialistMemoryCategory the same way RECORDING/TASK already
+        are."""
+        runtime, manager, channel, conversation = real_system(tmp_path)
+        system = LiveSystem(
+            runtime=runtime, manager=manager, channel=channel, conversation=conversation,
+            centre=ControlCenter(runtime, manager), lock=threading.Lock(),
+        )
+        specialist_name = next(
+            a.name for a in manager.registry.all_agents() if a.name != manager.own_skills.name
+        )
+        status, body, _ = route_recording_save(specialist_name, "field notes", FAKE_AUDIO_B64, "audio/webm", 8.0, system)
+        assert status == 200
+        import json
+
+        payload = json.loads(body)
+        assert payload["memory_saved"] is True, payload.get("memory_reason")
+        specialist_memory = memory_for(manager, specialist_name)
+        records = specialist_memory.recall(kind="audio_recording", limit=10)
+        assert len(records) == 1
+        assert records[0].context["artifact_id"] == payload["artifact_id"]
+        # Still owned by the specialist, still never leaking into Alfred's own store.
+        assert manager.memory.recall(kind="audio_recording", limit=10) == ()
+
+
+# ---------------------------------------------------------------------------
+# 9b. T-REC-03: screen and camera capture - the identical real mechanism,
+# distinguished only by which device the frontend actually opened.
+# ---------------------------------------------------------------------------
+
+
+class TestScreenAndCameraCapture:
+    def _system(self, runtime, manager, channel, conversation):
+        centre = ControlCenter(runtime, manager)
+        return LiveSystem(
+            runtime=runtime, manager=manager, channel=channel, conversation=conversation,
+            centre=centre, lock=threading.Lock(),
+        )
+
+    def test_screen_phrasings_are_recognised_and_kind_resolved(self):
+        for phrase in ("record my screen", "start a screen recording", "capture the screen"):
+            assert start_recording_intent(phrase), phrase
+            assert recording_kind_of(phrase) == "screen", phrase
+
+    def test_camera_phrasings_are_recognised_and_kind_resolved(self):
+        for phrase in ("record my camera", "start a camera recording", "make a video recording"):
+            assert start_recording_intent(phrase), phrase
+            assert recording_kind_of(phrase) == "camera", phrase
+
+    def test_an_unqualified_start_is_still_audio(self):
+        """The default before this repair, unchanged - a bare "start
+        recording" has always meant the microphone."""
+        assert recording_kind_of("start recording") == "audio"
+        assert recording_kind_of("start recording for research") == "audio"
+
+    def test_start_recording_capability_opens_the_right_kind_of_session(self, tmp_path):
+        runtime, manager, channel, conversation = real_system(tmp_path)
+        name = manager.own_skills.name
+        exchange(channel, conversation, "start a screen recording for the demo", addressed=name)
+        session = runtime.recording_sessions.get(name)
+        assert session is not None and session.kind == "screen" and session.purpose == "demo"
+
+    def test_a_screen_save_creates_a_video_recording_artifact_with_the_right_source(self, tmp_path):
+        runtime, manager, channel, conversation = real_system(tmp_path)
+        system = self._system(runtime, manager, channel, conversation)
+        name = manager.own_skills.name
+        route_recording_started(name, "demo", system, "screen")
+        status, body, _ = route_recording_save(name, "demo", FAKE_AUDIO_B64, "video/webm;codecs=vp9", 6.0, system, "screen")
+        assert status == 200
+        import json
+
+        payload = json.loads(body)
+        artifact = runtime.artifacts.get(payload["artifact_id"])
+        assert artifact.type == "video_recording"
+        from src.services.artifacts.models import VideoRecordingContent
+
+        content = VideoRecordingContent.from_json(Path(artifact.latest.content_path).read_text(encoding="utf-8"))
+        assert content.source == "screen" and content.purpose == "demo"
+        records = manager.memory.recall(kind="video_recording", limit=10)
+        assert len(records) == 1
+        assert records[0].context["source"] == "screen"
+        assert "Screen recording" in records[0].content
+
+    def test_a_camera_save_is_tagged_camera_not_screen(self, tmp_path):
+        runtime, manager, channel, conversation = real_system(tmp_path)
+        system = self._system(runtime, manager, channel, conversation)
+        name = manager.own_skills.name
+        route_recording_started(name, "selfie note", system, "camera")
+        status, body, _ = route_recording_save(name, "selfie note", FAKE_AUDIO_B64, "video/webm", 3.0, system, "camera")
+        assert status == 200
+        import json
+
+        payload = json.loads(body)
+        artifact = runtime.artifacts.get(payload["artifact_id"])
+        assert artifact.type == "video_recording"
+        records = manager.memory.recall(kind="video_recording", limit=10)
+        assert records[0].context["source"] == "camera"
+        assert "Camera recording" in records[0].content
+
+    def test_the_session_kind_is_authoritative_even_if_save_is_called_with_none(self, tmp_path):
+        """The frontend always resends kind on save today, but the route
+        must not silently default to audio if the live session already
+        knows better - the session set at start-of-capture is the real
+        fact."""
+        runtime, manager, channel, conversation = real_system(tmp_path)
+        system = self._system(runtime, manager, channel, conversation)
+        name = manager.own_skills.name
+        route_recording_started(name, "demo", system, "screen")
+        status, body, _ = route_recording_save(name, "demo", FAKE_AUDIO_B64, "video/webm", 6.0, system)
+        import json
+
+        payload = json.loads(body)
+        artifact = runtime.artifacts.get(payload["artifact_id"])
+        assert artifact.type == "video_recording"
+
+    def test_a_video_recordings_webm_rendition_is_served_as_video_not_audio(self, tmp_path):
+        """Found alongside T-REC-03: _RENDITION_CONTENT_TYPES hardcoded
+        "webm" -> "audio/webm" - correct before this repair, when only
+        voice recordings ever produced one, but wrong the moment a
+        screen/camera capture (also a real, genuine MediaRecorder webm
+        container) could too. A <video> element served that content
+        type would not know to render a picture."""
+        runtime, manager, channel, conversation = real_system(tmp_path)
+        system = self._system(runtime, manager, channel, conversation)
+        name = manager.own_skills.name
+        route_recording_started(name, "demo", system, "screen")
+        status, body, _ = route_recording_save(name, "demo", FAKE_AUDIO_B64, "video/webm", 6.0, system, "screen")
+        import json
+
+        artifact_id = json.loads(body)["artifact_id"]
+        status, _, content_type = route(f"/artifact/{artifact_id}.webm", system)
+        assert status == 200 and content_type == "video/webm"
+
+        # An ordinary voice recording's own "webm" rendition is unaffected.
+        route_recording_started(name, "voice memo", system, "audio")
+        status, body, _ = route_recording_save(name, "voice memo", FAKE_AUDIO_B64, "audio/webm", 2.0, system, "audio")
+        voice_artifact_id = json.loads(body)["artifact_id"]
+        status, _, content_type = route(f"/artifact/{voice_artifact_id}.webm", system)
+        assert status == 200 and content_type == "audio/webm"
+
+    def test_list_recordings_includes_both_audio_and_video(self, tmp_path):
+        runtime, manager, channel, conversation = real_system(tmp_path)
+        system = self._system(runtime, manager, channel, conversation)
+        name = manager.own_skills.name
+        route_recording_started(name, "voice memo", system, "audio")
+        route_recording_save(name, "voice memo", FAKE_AUDIO_B64, "audio/webm", 2.0, system, "audio")
+        route_recording_started(name, "demo", system, "screen")
+        route_recording_save(name, "demo", FAKE_AUDIO_B64, "video/webm", 6.0, system, "screen")
+        outcome = exchange(channel, conversation, "list my recordings", addressed=name).outcome
+        assert "voice memo" in outcome.lower() and "demo" in outcome.lower()
+
+    def test_control_center_recordings_view_reports_the_real_kind(self, tmp_path):
+        runtime, manager, channel, conversation = real_system(tmp_path)
+        system = self._system(runtime, manager, channel, conversation)
+        name = manager.own_skills.name
+        route_recording_started(name, "demo", system, "screen")
+        route_recording_save(name, "demo", FAKE_AUDIO_B64, "video/webm", 6.0, system, "screen")
+        centre = ControlCenter(runtime, manager)
+        view = next(v for v in centre.recordings() if v.agent == name)
+        assert view.items[0].kind == "screen"
 
 
 # ---------------------------------------------------------------------------
@@ -764,14 +940,14 @@ class TestFrontendConnection:
         assert "navigator.mediaDevices.getUserMedia" in script
         assert "new MediaRecorder(" in script
         # Never a fake timer standing in for real capture.
-        block = script.split("async function startRecording(agentName, purpose){", 1)[1].split("\n  }", 1)[0]
+        block = script.split("async function startRecording(agentName, purpose, kind){", 1)[1].split("\n  }", 1)[0]
         assert "setTimeout" not in block
 
     def test_recording_is_never_routed_through_speechsynthesis(self):
         """The one real TTS call in this file (ambient voice's own
         speak()) must never be confused with, or substituted for, a
         real microphone capture."""
-        block = _script().split("async function startRecording(agentName, purpose){", 1)[1].split("\n  }", 1)[0]
+        block = _script().split("async function startRecording(agentName, purpose, kind){", 1)[1].split("\n  }", 1)[0]
         assert "speechSynthesis" not in block
         assert "SpeechRecognition" not in block
 
@@ -783,9 +959,18 @@ class TestFrontendConnection:
         assert "a.recordings" in script
 
     def test_playback_points_at_the_real_artifact_route_never_a_blob_url(self):
+        """T-REC-03: the saved-recording URL is now built once (`src`)
+        and reused for both the <audio> and <video> player, rather than
+        two separate literal ``src="artifact/..."`` templates - still
+        the real artifact route, never a blob URL, just built once."""
         block = _script().split("function recordingWidget(a){", 1)[1].split("\n  }", 1)[0]
-        assert 'src="artifact/' in block
+        assert "`artifact/${esc(r.artifact_id)}" in block
         assert "URL.createObjectURL" not in block
+
+    def test_a_screen_or_camera_recording_plays_back_in_a_video_element(self):
+        block = _script().split("function recordingWidget(a){", 1)[1].split("\n  }", 1)[0]
+        assert "<video" in block and 'class="rec-item-video"' in block
+        assert '(r.kind === "screen" || r.kind === "camera")' in block
 
     def test_stop_and_cancel_actually_release_the_microphone_stream(self):
         script = _script()
@@ -814,3 +999,65 @@ class TestFrontendConnection:
         src = SERVE_UI.read_text(encoding="utf-8")
         for path in ("/recording/started", "/recording/save", "/recording/cancel", "/recording/failed", "/recording/clear"):
             assert f'"{path}"' in src
+
+
+# ---------------------------------------------------------------------------
+# 13. T-REC-03: two real bugs found only by driving a genuine, headless,
+# fake-device getUserMedia/getDisplayMedia capture through this widget in a
+# real browser (src/providers/browser/cdp_browser.py) - neither was
+# reachable from source review or from the Python-side test suite, since
+# both are pure frontend JS behaviour a real MediaRecorder blob exposes.
+# ---------------------------------------------------------------------------
+
+
+class TestLiveVerifiedFrontendBugs:
+    def test_blobtobase64_splits_on_the_base64_marker_not_every_comma(self):
+        """A real video MediaRecorder's own mimeType routinely contains a
+        comma of its own ("video/webm;codecs=vp9,opus") - the previous
+        `.split(",")[1]` cut the real payload off at THAT comma and kept
+        only "opus;base64" as the "base64" string: 11 garbage characters
+        instead of a real recording, and a 400 from /recording/save.
+        Found live, driving a real getUserMedia(video) capture through
+        the actual Start/Stop buttons - blob.size was correct (153307
+        bytes) but the base64 sent was 11 characters. No audio mimeType
+        this project uses contains a comma, which is exactly why this
+        was never seen before video capture existed."""
+        script = _script()
+        block = script.split("function blobToBase64(blob){", 1)[1].split("\n  }", 1)[0]
+        assert '.split(";base64,")[1]' in block
+        assert '.split(",")[1]' not in block
+
+    def test_a_stop_requested_recorder_does_not_await_a_stop_event_that_already_fired(self):
+        """recorder.stop() on an already-inactive MediaRecorder never
+        fires a fresh "stop" event - awaiting one unconditionally would
+        hang stopRecordingAndSave forever. Found alongside the base64
+        bug while tracing a live camera capture that never reached
+        "Saved."."""
+        block = _script().split("async function stopRecordingAndSave(agentName, purpose){", 1)[1].split("\n  }", 1)[0]
+        assert '.state === "inactive"' in block
+        assert "Promise.resolve()" in block
+
+    def test_stop_and_cancel_both_guard_against_reentrant_calls_from_a_video_tracks_own_ended_event(self):
+        """A screen/camera track's own "ended" event (fired when the
+        person uses the browser's own "Stop sharing" UI, AND fired by
+        this page's own `track.stop()` inside stopRecordingAndSave/
+        cancelRecording) must never re-enter stopRecordingAndSave while
+        the first call is still cleaning up - without the `stopping`
+        guard, cancelling a screen/camera recording could silently save
+        it instead of discarding it, and a track ending mid-stop could
+        start a second, concurrent save attempt."""
+        script = _script()
+        start_block = script.split("async function startRecording(agentName, purpose, kind){", 1)[1].split("\n  }", 1)[0]
+        assert "!active.stopping" in start_block
+        stop_block = script.split("async function stopRecordingAndSave(agentName, purpose){", 1)[1].split("\n  }", 1)[0]
+        assert "active.stopping" in stop_block
+        cancel_block = script.split("async function cancelRecording(agentName){", 1)[1].split("\n  }", 1)[0]
+        assert "active.stopping = true" in cancel_block
+
+    # A real headless-Chromium capture (--use-fake-device-for-media-stream)
+    # driven through these exact Start/Stop buttons, for both "screen" and
+    # "camera", each producing a real >100KB video/webm blob, a correct-
+    # length base64 payload, a 200 from /recording/save, and a real <video>
+    # element with a working src, is recorded as live evidence in
+    # REQUIREMENT_LEDGER.md/ARCHITECTURE.md (T-REC-03) rather than run here
+    # as a slow, environment-dependent test.

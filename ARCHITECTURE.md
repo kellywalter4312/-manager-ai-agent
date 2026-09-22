@@ -10855,3 +10855,113 @@ found nearby, 2026-09-09T15:36:42Z (an evidenced approximation - the true
 prior value was overwritten and is not recoverable). No other production
 file was touched (confirmed by the same sweep); every later script in this
 campaign explicitly sandboxes `memory`/`profile_path`.
+
+### 52.58 T-REC-03 repaired - screen and camera capture, and two real bugs
+found only by driving it live
+
+**The question.** §52.51's own finding: neither screen capture nor camera-
+video capture existed (photo-only camera input, no `getDisplayMedia` at
+all) - "not implemented", not external. This campaign built both as an
+additive dimension of the existing Real Audio Recording/Capture system,
+never a second capture mechanism.
+
+**Why one system, not three.** `RecordingSession`/`RecordingSessionRegistry`
+(`src/services/identity/recording_session.py`) already modelled exactly
+the fact a screen/camera capture also needs - what a real, user-directed
+browser recording is doing right now - so it gained one field, `kind`
+(`"audio"`/`"screen"`/`"camera"`), threaded through every state transition,
+rather than a parallel registry. `src/services/memory/audio_recording.py`
+(kept its historical name; broadened its own docstring to say so) gained
+screen/camera start markers and `recording_kind_of()`, alongside the
+existing audio ones - one recognition module for one real request shape
+("capture live media"), not three. `build_recording_record` gained a
+`capture_kind` parameter, branching only the memory `kind`
+(`video_recording` - screen and camera *share* this one category,
+distinguished by `context["source"]`, never a fourth parallel category)
+and the noun in its own content string. The artifact side mirrors this:
+`type="video_recording"` and a new `VideoRecordingContent` parallel
+`voice_recording`/`VoiceRecordingContent`, reusing the one
+`register_new_artifact` every other artifact type already goes through.
+
+**A real, confirmed cross-agent gap found while generalising this system,
+fixed in the same pass.** `SpecialistMemoryCategory`
+(`src/agents/memory_policy.py`) never admitted `AUDIO_RECORDING` at all -
+only `MemoryCategory` (the Manager's own) did. A specialist's real
+recording *artifact* already saved successfully (the artifact store has
+no per-agent category gate); only the governed Memory *reference* was
+silently refused, contradicting the recording widget's own "agent-generic
+on purpose" comment (`ui/index.html`) and `ControlCenter.recordings()`'s
+own "every agent gets an honest answer" docstring. No test had ever
+actually exercised `route_recording_save` for a specialist to notice the
+two disagreed - one existing test (`test_a_specialists_own_recording_...`)
+had documented the refusal as "a genuine, honest architectural boundary,
+not a bug." It was a bug. Fixed by admitting `AUDIO_RECORDING`/
+`VIDEO_RECORDING` to `SpecialistMemoryCategory` the same way `RECORDING`/
+`TASK` already are - and, found one layer deeper while proving the fix
+with a real test, `build_recording_record` never set
+`context["confidence"]` at all, which `SpecialistMemoryPolicy`'s own
+confidence gate (unconditional, on every category) silently reads as 0.0
+and refuses below its 0.5 threshold. Fixed the identical way
+`capture.py`'s own text-capture builder already does: `"confidence": 1.0`,
+a real user-directed recording being exactly what it says it is, never a
+tentative observation.
+
+**A second real bug, found only by driving a genuine capture in a real
+browser - invisible to source review and to every Python-side test.**
+`blobToBase64` (`ui/index.html`) built a recording's base64 payload with
+`String(reader.result).split(",")[1]` - correct for every audio mimeType
+this project uses, all comma-free, and so never once wrong in this
+project's history until a real video capture existed. A real video
+MediaRecorder's own mimeType routinely contains a comma of its own
+(`"video/webm;codecs=vp9,opus"`), so the real payload was cut off at that
+comma: 11 garbage characters sent instead of a ~150KB recording, and a
+400 from `/recording/save` for every single screen/camera save. Live-
+traced (`blob.size` correct, `audioBase64.length` 11) with a real headless
+Microsoft Edge and Chromium's own `--use-fake-device-for-media-stream` (a
+real synthetic device the browser itself provides, not a JS-level mock).
+Fixed by splitting on the data URL format's own fixed `";base64,"`
+marker instead, immune to however many commas the media type before it
+contains.
+
+**A third, defensive fix found while tracing the second bug.** A screen
+share can be stopped from the browser's own chrome ("Stop sharing"), not
+only this page's own Stop button - a video track's `"ended"` event is the
+one honest signal that happened, so `startRecording` listens for it and
+calls `stopRecordingAndSave`. That call's own
+`stream.getTracks().forEach(t => t.stop())` line is exactly what makes a
+track fire `"ended"` - without a re-entrancy guard, `stopRecordingAndSave`
+could call itself while still mid-cleanup, and the recursive call's own
+`await` on a `'stop'` event that had already fired once would never
+resolve, hanging silently. A `stopping` flag, set before either
+`stopRecordingAndSave` or `cancelRecording` touches the tracks, closes
+this for both (cancelling a screen/camera recording must never be
+silently turned into a save by its own track-stop side effect either).
+
+**Frontend surfaces, all real, none previously existing.** A kind selector
+(`.rec-kind-select`) beside the existing purpose input; `getDisplayMedia`/
+video-capable `getUserMedia` in `startRecording`; video-capable
+`MediaRecorder` mimeType candidates; a real `<video>` player for a saved
+screen/camera item (every recording rendered as `<audio>` before this,
+which would still play the sound but show no picture at all); and a real
+`video/webm` `Content-Type` on playback (`scripts/serve_ui.py`'s
+`_RENDITION_CONTENT_TYPES` hardcoded `"webm" -> "audio/webm"`, correct
+before this repair when only voice recordings ever produced one, wrong
+the moment a screen/camera capture could too - fixed by reading the
+artifact's own declared type when the extension alone is ambiguous).
+
+**Evidence.**
+
+| Check | Result |
+|---|---|
+| Focused | 77/77 `tests/test_audio_recording.py` (14 new) |
+| Specialist cross-agent fix | A real specialist's `route_recording_save` now returns `memory_saved: true`; the reference lives in the specialist's own store, isolated from Alfred's, exactly as `RECORDING`/`TASK` already are |
+| `blobToBase64` fix, `webm` Content-Type fix | Pinned as frontend-source regression guards (`TestLiveVerifiedFrontendBugs`) so a future edit cannot silently reintroduce either |
+| **Real, non-mocked, headless-Chromium capture** - camera | `--use-fake-device-for-media-stream`, real Start/Stop buttons: 103256-byte real `video/webm` blob, correct-length base64, 200 from `/recording/save`, real `<video>` element, fetched rendition begins `1a 45 df a3` (the genuine WebM/EBML magic number) with `Content-Type: video/webm`, `ControlCenter.recordings()` reports `kind="camera"` |
+| **Real, non-mocked, headless-Chromium capture** - screen | Identical proof, `getDisplayMedia`: 96286-byte real blob, same WebM signature, `kind="screen"` |
+| Console | 0 browser console errors across both captures |
+| Regression | full suite, both orders: **8115 passed / 8115 passed** |
+
+**Left as an honest boundary, not a defect.** Screen-share audio capture
+depends on what the OS/browser combination genuinely offers - requested
+(`audio: true` alongside `video: true`) and silently dropped where
+unsupported, never worked around or fabricated.

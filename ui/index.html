@@ -691,6 +691,8 @@
     border:1px solid rgba(var(--ac,125,216,232),.24);border-radius:5px;
     color:var(--ink);font:inherit;padding:8px 10px}
   .rec-purpose-input::placeholder{color:var(--ink-4)}
+  .rec-kind-select{background:rgba(10,16,24,.55);border:1px solid rgba(var(--ac,125,216,232),.24);
+    border-radius:5px;color:var(--ink);font:inherit;padding:8px 10px}
   .rec-btn{cursor:pointer;font:inherit;border-radius:5px;padding:8px 14px;
     border:1px solid rgba(var(--ac,125,216,232),.4);background:rgba(10,16,24,.6);
     color:var(--ink-2);transition:background .2s,border-color .2s}
@@ -705,6 +707,7 @@
     border-radius:6px;padding:8px 10px}
   .rec-item-desc{font-size:var(--t-meta);color:var(--ink-3)}
   .rec-item-audio{width:100%;height:32px}
+  .rec-item-video{max-width:260px;max-height:160px;border-radius:6px;display:block}
 
   /* Last in the hierarchy, and quiet on purpose: what this agent is made
      of, under the environment rather than inside it. */
@@ -2162,14 +2165,18 @@
   // call happens in wireRecordingControls() below, inside a real click
   // handler - the one thing only a browser, in response to a genuine
   // user gesture, can do.
+  const RECORDING_KIND_NOUNS = {audio: "audio", screen: "screen", camera: "camera"};
+
   function recordingWidget(a){
     const session = a.recording_session;
     const state = session ? session.state : "ready";
     const purpose = session ? session.purpose : "";
+    const kind = session ? (session.kind || "audio") : "audio";
+    const kindNoun = RECORDING_KIND_NOUNS[kind] || "audio";
 
     const statusLine = (() => {
-      if(state === "requested") return `Ready to record for "${esc(purpose)}" - press Start.`;
-      if(state === "recording") return `<span class="rec-live-dot"></span>Recording for "${esc(purpose)}" - <span class="rec-timer" data-rec-agent="${esc(a.name)}">0:00</span>`;
+      if(state === "requested") return `Ready to record ${kindNoun} for "${esc(purpose)}" - press Start.`;
+      if(state === "recording") return `<span class="rec-live-dot"></span>Recording ${kindNoun} for "${esc(purpose)}" - <span class="rec-timer" data-rec-agent="${esc(a.name)}">0:00</span>`;
       if(state === "stop_requested") return "Stopping…";
       if(state === "saving") return "Saving the recording…";
       if(state === "saved") return "Saved.";
@@ -2189,19 +2196,36 @@
       if(state === "saved" || state === "failed" || state === "cancelled"){
         return `<button class="rec-btn rec-clear" data-rec-agent="${esc(a.name)}">Dismiss</button>`;
       }
-      // ready or requested - a real purpose field alongside Start, so a
-      // person who clicks Start with nothing said first still gets to
-      // name one, and a natural-language "start recording for X" pre-
-      // fills it rather than being overridden.
+      // ready or requested - a real purpose field and a real kind
+      // selector (T-REC-03) alongside Start, so a person who clicks
+      // Start with nothing said first still gets to name both, and a
+      // natural-language "start [a screen/camera] recording for X"
+      // pre-fills them rather than being overridden.
       return `<input class="rec-purpose-input" type="text" placeholder="Purpose (optional)"
           value="${esc(purpose)}" data-rec-agent="${esc(a.name)}">
+        <select class="rec-kind-select" data-rec-agent="${esc(a.name)}">
+          <option value="audio"${kind === "audio" ? " selected" : ""}>Audio</option>
+          <option value="screen"${kind === "screen" ? " selected" : ""}>Screen</option>
+          <option value="camera"${kind === "camera" ? " selected" : ""}>Camera</option>
+        </select>
         <button class="rec-btn rec-start" data-rec-agent="${esc(a.name)}">Start Recording</button>`;
     })();
 
-    const saved = (a.recordings || []).map(r => `<div class="rec-item">
+    // T-REC-03: a screen/camera recording is genuinely video - a <video>
+    // element, not the <audio> tag every recording used before this
+    // repair, which would still play the sound but show no picture at
+    // all. r.kind (from context["source"], honestly "audio" for a
+    // pre-existing record with none) decides which.
+    const saved = (a.recordings || []).map(r => {
+      const src = `artifact/${esc(r.artifact_id)}.${esc(r.rendition_format)}`;
+      const player = (r.kind === "screen" || r.kind === "camera")
+        ? `<video class="rec-item-video" controls preload="none" src="${src}"></video>`
+        : `<audio class="rec-item-audio" controls preload="none" src="${src}"></audio>`;
+      return `<div class="rec-item">
         <div class="rec-item-desc">${esc(r.describe)}</div>
-        <audio class="rec-item-audio" controls preload="none" src="artifact/${esc(r.artifact_id)}.${esc(r.rendition_format)}"></audio>
-      </div>`).join("");
+        ${player}
+      </div>`;
+    }).join("");
 
     return `<div class="rec-widget">
       <div class="rec-status">${statusLine}</div>
@@ -5584,11 +5608,16 @@
   // stacking a fresh interval on every five-second refreshFromLive re-render.
   let recordingTimerStarted = false;
 
-  function recordingMimeType(){
+  // T-REC-03: the identical real-codec-probing shape as before, just two
+  // candidate lists instead of one - audio for a microphone capture,
+  // video for a screen/camera one (both carry an opus audio track where
+  // the browser supports it, since a screen/camera recording is rarely
+  // silent).
+  function recordingMimeType(kind){
     if(!window.MediaRecorder) return null;
-    const candidates = [
-      "audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "audio/mp4", "audio/aac",
-    ];
+    const candidates = (kind === "screen" || kind === "camera")
+      ? ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm", "video/mp4"]
+      : ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "audio/mp4", "audio/aac"];
     for(const c of candidates){
       try{ if(MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(c)) return c; }
       catch(e){ /* keep trying the next candidate */ }
@@ -5616,7 +5645,17 @@
   function blobToBase64(blob){
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
-      reader.onloadend = () => resolve(String(reader.result || "").split(",")[1] || "");
+      // Found live, driving a real screen/camera capture (T-REC-03):
+      // a video MediaRecorder's own mimeType routinely contains a comma
+      // of its own ("video/webm;codecs=vp9,opus") - splitting the whole
+      // data URL on EVERY comma, as this used to, cut the real payload
+      // off at that comma and kept only "opus;base64" as the "base64"
+      // string, silently producing 11 garbage characters instead of the
+      // real recording and a 400 from the save route. The literal
+      // ";base64," marker is the one fixed boundary the data URL format
+      // itself guarantees, immune to however many commas the media type
+      // before it contains.
+      reader.onloadend = () => resolve(String(reader.result || "").split(";base64,")[1] || "");
       reader.onerror = () => reject(reader.error);
       reader.readAsDataURL(blob);
     });
@@ -5640,23 +5679,52 @@
     await refreshFromLive();
   }
 
-  // The one real user-gesture-triggered microphone request in this
-  // file. Browsers - iOS Safari in particular - require getUserMedia to
-  // be called synchronously inside a real click handler, never
-  // speculatively ahead of one; this is that handler.
-  async function startRecording(agentName, purpose){
-    if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder){
-      await reportRecordingFailed(agentName, "this browser does not support audio recording");
+  // The one real user-gesture-triggered device request in this file -
+  // a microphone (getUserMedia audio), a screen (getDisplayMedia,
+  // T-REC-03) or a camera (getUserMedia video+audio, T-REC-03).
+  // Browsers - iOS Safari in particular - require getUserMedia (and,
+  // by the identical rule, getDisplayMedia) to be called synchronously
+  // inside a real click handler, never speculatively ahead of one;
+  // this is that handler. ``kind`` defaults to "audio" so every
+  // existing caller (natural-language "start recording", the plain
+  // Start button) keeps its original behaviour unchanged.
+  async function startRecording(agentName, purpose, kind){
+    kind = (kind === "screen" || kind === "camera") ? kind : "audio";
+    if(!window.MediaRecorder){
+      await reportRecordingFailed(agentName, "this browser does not support recording");
       return;
     }
     let stream;
     try{
-      stream = await navigator.mediaDevices.getUserMedia({audio: true});
+      if(kind === "screen"){
+        if(!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia){
+          await reportRecordingFailed(agentName, "this browser does not support screen recording");
+          return;
+        }
+        // audio: true asks for the tab/system audio the browser can
+        // offer alongside the picture - honoured where supported,
+        // silently dropped where it is not (a real, honest browser
+        // limitation, never worked around here).
+        stream = await navigator.mediaDevices.getDisplayMedia({video: true, audio: true});
+      } else if(kind === "camera"){
+        if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+          await reportRecordingFailed(agentName, "this browser does not support camera recording");
+          return;
+        }
+        stream = await navigator.mediaDevices.getUserMedia({video: true, audio: true});
+      } else {
+        if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+          await reportRecordingFailed(agentName, "this browser does not support audio recording");
+          return;
+        }
+        stream = await navigator.mediaDevices.getUserMedia({audio: true});
+      }
     }catch(e){
-      await reportRecordingFailed(agentName, "microphone access was denied or unavailable");
+      const noun = kind === "screen" ? "screen" : kind === "camera" ? "camera" : "microphone";
+      await reportRecordingFailed(agentName, `${noun} access was denied or unavailable`);
       return;
     }
-    const mimeType = recordingMimeType();
+    const mimeType = recordingMimeType(kind);
     let recorder;
     try{
       recorder = mimeType ? new MediaRecorder(stream, {mimeType}) : new MediaRecorder(stream);
@@ -5668,39 +5736,66 @@
     const chunks = [];
     recorder.addEventListener("dataavailable", (e) => { if(e.data && e.data.size) chunks.push(e.data); });
     recorder.addEventListener("error", () => { reportRecordingFailed(agentName, "the recording failed unexpectedly"); });
+    // A screen share can be stopped from the browser's OWN chrome (the
+    // "Stop sharing" bar), not only this page's Stop button - the
+    // track ending on its own is the one honest signal that happened,
+    // so it is treated exactly like pressing Stop here. Guarded by
+    // `stopping` (not just `activeRecorders[agentName]` existing):
+    // stopRecordingAndSave's own `stream.getTracks().forEach(t => t.stop())`
+    // call is exactly what makes a track fire "ended", and without this
+    // guard that recursively re-entered stopRecordingAndSave on itself -
+    // a second, concurrent call whose own `recorder.addEventListener(
+    // "stop", ...)` promise could never resolve (the real 'stop' event
+    // had already fired once), hanging forever with the first call's own
+    // save silently never completing either. Found live, driving a real
+    // getDisplayMedia/camera stream, not from source alone.
+    stream.getVideoTracks().forEach(track => track.addEventListener("ended", () => {
+      const active = activeRecorders[agentName];
+      if(active && active.recorder === recorder && !active.stopping) stopRecordingAndSave(agentName, purpose);
+    }));
     activeRecorders[agentName] = {
-      recorder, chunks, stream, startedAt: Date.now(), mimeType: recorder.mimeType || mimeType || "",
+      recorder, chunks, stream, kind, startedAt: Date.now(), mimeType: recorder.mimeType || mimeType || "",
+      stopping: false,
     };
     recorder.start();
-    await postRecordingRoute("recording/started", {agent: agentName, purpose: purpose || undefined});
+    await postRecordingRoute("recording/started", {agent: agentName, purpose: purpose || undefined, kind});
     await refreshFromLive();
   }
 
   async function stopRecordingAndSave(agentName, purpose){
     const active = activeRecorders[agentName];
-    if(!active){ await refreshFromLive(); return; }
-    const stopped = new Promise((resolve) => { active.recorder.addEventListener("stop", resolve, {once: true}); });
+    if(!active || active.stopping){ if(!active) await refreshFromLive(); return; }
+    active.stopping = true;
+    // A recorder already inactive (stopped by some other path) will
+    // never fire a fresh "stop" event - waiting for one would hang this
+    // call forever, exactly the failure a video track's own "ended"
+    // listener could otherwise cause here before the `stopping` guard
+    // above existed.
+    const stopped = active.recorder.state === "inactive"
+      ? Promise.resolve()
+      : new Promise((resolve) => { active.recorder.addEventListener("stop", resolve, {once: true}); });
     try{ active.recorder.stop(); }catch(e){ /* already stopped - the stream is still cleaned up below */ }
     await stopped;
     active.stream.getTracks().forEach(t => t.stop());
     delete activeRecorders[agentName];
 
     const durationSeconds = (Date.now() - active.startedAt) / 1000;
-    const blob = new Blob(active.chunks, {type: active.mimeType || "audio/webm"});
+    const defaultMime = (active.kind === "screen" || active.kind === "camera") ? "video/webm" : "audio/webm";
+    const blob = new Blob(active.chunks, {type: active.mimeType || defaultMime});
     if(!blob.size){
       await reportRecordingFailed(agentName, "the recording was empty - nothing was captured");
       return;
     }
     let audioBase64;
     try{ audioBase64 = await blobToBase64(blob); }
-    catch(e){ await reportRecordingFailed(agentName, "could not read the captured audio"); return; }
+    catch(e){ await reportRecordingFailed(agentName, "could not read the captured recording"); return; }
 
     try{
       await fetch("recording/save", {
         method: "POST", headers: {"Content-Type": "application/json"},
         body: JSON.stringify({
           agent: agentName, purpose: purpose || undefined, audio_base64: audioBase64,
-          mime_type: blob.type, duration_seconds: durationSeconds,
+          mime_type: blob.type, duration_seconds: durationSeconds, kind: active.kind || "audio",
         }),
       });
     }catch(e){
@@ -5713,6 +5808,11 @@
   async function cancelRecording(agentName){
     const active = activeRecorders[agentName];
     if(active){
+      // Set before stopping tracks, the same reason stopRecordingAndSave
+      // sets it first - a video track's own "ended" listener must never
+      // mistake this cancel for a reason to save the recording it was
+      // just told to discard.
+      active.stopping = true;
       try{ active.recorder.stop(); }catch(e){}
       try{ active.stream.getTracks().forEach(t => t.stop()); }catch(e){}
       delete activeRecorders[agentName];
@@ -5740,7 +5840,8 @@
       btn.addEventListener("click", () => {
         const agent = btn.dataset.recAgent;
         const input = stage.querySelector(`.rec-purpose-input[data-rec-agent="${CSS.escape(agent)}"]`);
-        startRecording(agent, input ? input.value.trim() : "");
+        const kindSelect = stage.querySelector(`.rec-kind-select[data-rec-agent="${CSS.escape(agent)}"]`);
+        startRecording(agent, input ? input.value.trim() : "", kindSelect ? kindSelect.value : "audio");
       });
     });
     stage.querySelectorAll(".rec-stop").forEach(btn => {

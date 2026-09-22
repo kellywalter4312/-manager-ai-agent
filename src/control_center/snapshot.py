@@ -252,6 +252,7 @@ def _recordings(recordings: Any) -> dict[str, Any]:
                 "rendition_format": r.rendition_format,
                 "transcription_status": r.transcription_status,
                 "describe": r.describe,
+                "kind": r.kind,
             }
             for r in recordings.items
         ],

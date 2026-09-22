@@ -299,18 +299,22 @@ class WorkspaceAgentView:
 
 @dataclass(frozen=True)
 class RecordingItemView:
-    """One real, saved audio recording, read-only - the identical
-    governed ``MemoryCategory.AUDIO_RECORDING`` record
-    (``src/services/memory/audio_recording.py``) both a conversational
-    answer and a served page's own snapshot already read.
-    ``artifact_id`` names the real, persistent artifact holding the
-    actual audio (``src/services/artifacts/store.py``) - never the
-    bytes themselves, which stay exactly where the artifact store
-    already keeps them; playback reaches them through the existing
-    ``GET /artifact/<id>.<format>`` route, unchanged. ``describe`` is
-    the one shared rendering so this, a served page, and a
-    conversational answer never describe the same recording two
-    different ways."""
+    """One real, saved audio/screen/camera recording, read-only - the
+    identical governed ``MemoryCategory.AUDIO_RECORDING``/
+    ``VIDEO_RECORDING`` record (``src/services/memory/audio_recording.py``)
+    both a conversational answer and a served page's own snapshot
+    already read. ``artifact_id`` names the real, persistent artifact
+    holding the actual audio/video (``src/services/artifacts/store.py``) -
+    never the bytes themselves, which stay exactly where the artifact
+    store already keeps them; playback reaches them through the
+    existing ``GET /artifact/<id>.<format>`` route, unchanged.
+    ``describe`` is the one shared rendering so this, a served page, and
+    a conversational answer never describe the same recording two
+    different ways. ``kind`` (T-REC-03: ``"audio"``/``"screen"``/
+    ``"camera"``, read from ``context["source"]``, defaulting to
+    ``"audio"`` for a pre-existing record with none) is what lets a
+    served page choose a ``<video>`` or ``<audio>`` player without
+    guessing from the file extension alone."""
 
     record_id: str
     artifact_id: str
@@ -319,6 +323,7 @@ class RecordingItemView:
     rendition_format: str
     transcription_status: str
     describe: str
+    kind: str = "audio"
 
 
 @dataclass(frozen=True)

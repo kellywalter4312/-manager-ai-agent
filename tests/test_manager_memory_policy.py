@@ -116,8 +116,12 @@ class TestTheCategoriesAreExplicit:
         capture ("record this for X" - a note), while this one names a
         real audio artifact - different requests even though both end
         up governed, and either one changes what the Manager can
-        retrieve and reference next time in a way the other does not."""
-        assert len(MemoryCategory) == 12
+        retrieve and reference next time in a way the other does not.
+        T-REC-03 (2026-09-22) added a ninth, VIDEO_RECORDING - the
+        identical fact for a real screen or camera capture, deliberately
+        sharing one category between the two (distinguished by
+        context["source"]) rather than adding a third/fourth."""
+        assert len(MemoryCategory) == 13
 
     def test_the_categories_are_the_agreed_ones(self):
         assert POLICY.category_names == (
@@ -133,6 +137,7 @@ class TestTheCategoriesAreExplicit:
             "recording",
             "user_context",
             "user_task",
+            "video_recording",
         )
 
     def test_every_category_explains_what_belongs_in_it(self):
