@@ -11022,3 +11022,100 @@ The remaining gap for PDF-10/RD-05 is exactly what the ledger already
 said it was - an owner-declared, owner-authorized connection - and this
 campaign invented no new one, consistent with its own instruction not to
 build around a deliberate governance boundary.
+
+### 52.60 Broad ecosystem verification - a real multi-step task through
+Alfred himself, and N-08 (a specialist recording gap the same shape as
+T-REC-03's own)
+
+**The question.** A second, much wider campaign brief: does Alfred
+genuinely carry an open-ended, multi-capability task through the real
+ecosystem himself (never a new TaskAgent), and do the architectural
+pillars this project has always held - provider independence, 3D
+generality, workspace mobility, device abstraction, Control Center as
+access-not-exclusivity, universal content, specialist agents doing real
+work - still hold under fresh inspection, without redoing verification
+this ledger already carries with real evidence.
+
+**What was already true, confirmed rather than rebuilt.** Reconnaissance
+across `src/manager/cognition.py` (Half/Full Brain, unchanged, honest by
+construction), `src/manager/objective_loop.py` (a real, tested,
+already-wired multi-step "pursue an objective" loop - see below), the 3D
+generation architecture (`src/providers/media/model3d.py`'s open shape
+registry, no hardcoded subjects, already general before this session's
+own T-3D-02 added the missing interactive *viewing* layer on top of it),
+`WORKSPACE_NAVIGATION` (generic to any agent, wired through
+`ManagerAgent.take_action` for a delegated specialist), `read_content`
+(genuinely format-agnostic, honestly refuses a live URL rather than
+silently failing), the language table in `voice_options.py` (open,
+non-exhaustive), the Memory category architecture (no hardcoded
+`python_memory`/`school_memory`, generalized categories throughout, the
+same ones this session's own T-REC-03 work extended), and the
+"experience"/environment architecture (provider-selected, no hardcoded
+push-notification or IoT-device assumption) all confirm the architecture
+this brief asks for already exists and was not built around any of the
+brief's own named examples.
+
+**Genuine, live, runtime proof of end-to-end multi-capability task
+execution - the brief's own core question.** `Channel.ask` (every real
+channel's one path) funnels through `observe()`
+(`src/control_center/trail.py`), which runs `pursue_objective` for any
+*unaddressed* request - the same function Control Center's own trail
+uses, no second orchestrator. Without a funded LLM, this was proven with
+a scripted provider standing in for Full Brain's own progress judgement
+(`ManagerBrain.assess_objective`), the identical technique this
+project's own `tests/test_agentic_objective_loop.py` already uses for
+its 30+ tests. One unaddressed message - "prepare a multi-part briefing
+package" - with a 3-step script:
+
+| Step | Real result |
+|---|---|
+| 1 | A real `model3d` artifact was genuinely created (`create_3d_model`, a lighthouse, owned by Alfred) |
+| 2 | A real recording session was genuinely opened (`start_recording`, kind `audio`, purpose "briefing") |
+| 3 | The objective was judged complete; the loop's own final answer was returned unchanged |
+
+Two genuinely different real capabilities, invoked by one open-ended
+request, through the ordinary conversational path - not a Control Center
+feature, not a demo, not a second orchestrator. This is real evidence a
+passing unit test alone does not provide.
+
+**N-08, found by asking the same question T-REC-03 already asked once.**
+T-REC-03 (this campaign's prior repair) found that `SpecialistMemoryCategory`
+never admitted recording references despite the frontend/Control-Center
+both documenting recording as "agent-generic on purpose." Asking the
+identical question about the *conversational* layer found a second,
+adjacent hole: `start_recording`/`stop_recording`/`cancel_recording`/
+`list_recordings` are registered only in `MANAGER_CAPABILITIES`, with no
+wiring into `CognitiveAgent`'s conversational floor the way
+`voice_reply`/`personal_context_reply`/`workspace_task_reply` already
+are for their own capabilities - live-confirmed: "start recording for
+field notes" addressed to a specialist fell straight through to that
+specialist's own domain fallback ("no language model is configured for
+me"), never reaching the recording capability at all.
+
+**The repair**, the identical established pattern (`bind_voice`/
+`voice_reply`, mirrored exactly): `CognitiveAgent.bind_recording`/
+`recording_reply`, and a `specialist_recording_handler` factory
+(`scripts/control_center.py`, mirroring `specialist_voice_handler`),
+wired at the real composition root for every agent that has it -
+calling the *same* Manager capability functions, never a second
+recording system.
+
+**Evidence.**
+
+| Check | Result |
+|---|---|
+| Live, real | "start recording for field notes" -> Arthur: a real session opens, `agent_key == "Arthur"`, purpose captured; Alfred's own session untouched |
+| | "cancel the recording" -> Arthur: genuinely cancelled |
+| | "what recordings do i have" -> Arthur: correctly empty |
+| Focused | 4 new tests, `tests/test_audio_recording.py::TestAgentIndependence` |
+| Regression | full suite, both orders: **8116 passed / 8116 passed** |
+
+**Left honestly unresolved.** Other Manager-only capabilities
+(`create_3d_model`, `read_content`, `create_artifact`, ...) were not
+swept for the identical gap this round - none of them is documented
+anywhere as "agent-generic" the way recording explicitly was, so their
+Manager-only scope may correctly reflect that a specialist like Arthur
+is not intended to build 3D models, not an oversight. A future campaign
+should check each capability's own stated intent before assuming this
+pattern applies, rather than mechanically adding every capability to
+every specialist.

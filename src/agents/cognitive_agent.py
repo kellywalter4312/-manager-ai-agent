@@ -124,6 +124,17 @@ class CognitiveAgent(BaseAgent):
         if voiced is not None:
             return voiced
 
+        # "Arthur, start recording for field notes" / "stop recording":
+        # found live, driving exactly this phrasing, this fell through to
+        # this agent's own domain fallback instead - the frontend's
+        # Start/Stop buttons and SpecialistMemoryCategory both already
+        # treat recording as agent-generic (T-REC-03), but nothing routed
+        # the natural-language request there. The one governed recording
+        # capability every agent shares, never a second recording system.
+        recorded = self.recording_reply(task)
+        if recorded is not None:
+            return recorded
+
         # What the person has taught, asked of any specialist: answered from
         # the one canonical view of the person this agent is granted
         # read-only - never a copy, never its own store - and with no model.
@@ -167,6 +178,26 @@ class CognitiveAgent(BaseAgent):
         person's explicit choice (Control Center ``voice <agent> <voice>``)
         still wins over the agent's own, exactly as it does for the Manager."""
         handler = getattr(self, "_voice_handler", None)
+        return handler(self, task) if callable(handler) else None
+
+    def bind_recording(self, handler) -> None:
+        """This agent's own real recording capability: a callable
+        ``handler(agent, task) -> TaskResult | None`` given by the
+        composition root, which runs the same governed
+        start/stop/cancel/list_recordings capabilities the Manager has,
+        with this agent's own name, own memory and the one shared
+        ``RecordingSessionRegistry`` every agent's session already lives
+        in - never a second recording system. Held as a plain callable
+        for the identical layering reason ``bind_voice`` already is."""
+        self._recording_handler = handler
+
+    def recording_reply(self, task: Task) -> "TaskResult | None":
+        """This agent starting, stopping, cancelling or listing its own
+        recordings, or None for anything else (and when no handler was
+        given) - the browser's Start/Stop buttons already reach this
+        agent's own session regardless; this is what lets the identical
+        request work when simply said or typed instead."""
+        handler = getattr(self, "_recording_handler", None)
         return handler(self, task) if callable(handler) else None
 
     def bind_user_knowledge(self, user_knowledge) -> None:

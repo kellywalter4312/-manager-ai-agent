@@ -723,6 +723,43 @@ class TestAgentIndependence:
         # Still owned by the specialist, still never leaking into Alfred's own store.
         assert manager.memory.recall(kind="audio_recording", limit=10) == ()
 
+    def test_a_specialist_can_start_stop_and_list_recordings_by_simply_asking(self, tmp_path):
+        """Found during the broader ecosystem-verification campaign
+        (2026-09-22): the recording widget's Start/Stop buttons and
+        SpecialistMemoryCategory both already treat recording as
+        agent-generic, but "Arthur, start recording for X" fell straight
+        through to Arthur's own domain fallback - nothing routed the
+        natural-language request to start_recording/stop_recording/
+        cancel_recording/list_recordings for a specialist at all, the
+        identical missing-wiring shape voice_reply/personal_context_reply/
+        workspace_task_reply already exist to close for their own
+        capabilities. Fixed with the identical pattern: CognitiveAgent
+        gained bind_recording/recording_reply, and the real composition
+        root (scripts.control_center.build - what real_system() below
+        actually calls) wires it for every agent that has it, alongside
+        bind_voice, using the exact same start_recording/stop_recording/
+        cancel_recording/list_recordings functions the Manager itself
+        uses - never a second recording system."""
+        runtime, manager, channel, conversation = real_system(tmp_path)
+        name = manager.own_skills.name
+        specialist_name = next(
+            a.name for a in manager.registry.all_agents() if a.name != name
+        )
+
+        started = exchange(channel, conversation, "start recording for field notes", addressed=specialist_name)
+        assert "Ready to record" in started.outcome
+        session = runtime.recording_sessions.get(specialist_name)
+        assert session is not None and session.agent_key == specialist_name and session.purpose == "field notes"
+        # Alfred's own session is untouched - the identical isolation the
+        # artifact/Memory side of this repair already proves.
+        assert runtime.recording_sessions.get(name) is None
+
+        cancelled = exchange(channel, conversation, "cancel the recording", addressed=specialist_name)
+        assert "Cancelled" in cancelled.outcome
+
+        listed = exchange(channel, conversation, "what recordings do i have", addressed=specialist_name)
+        assert "no saved recordings" in listed.outcome.lower()
+
 
 # ---------------------------------------------------------------------------
 # 9b. T-REC-03: screen and camera capture - the identical real mechanism,

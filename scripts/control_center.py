@@ -1267,6 +1267,52 @@ def specialist_voice_handler(*, discover_voices, voice_facts, translate):
     return handle
 
 
+def specialist_recording_handler(*, recording_sessions):
+    """``handler(agent, task)`` for a specialist's own real recording
+    session: the same start/stop/cancel/list_recordings capabilities the
+    Manager has, run with that agent's own name and own memory (its
+    governed ``retain``/``recall``) against the one shared
+    ``RecordingSessionRegistry`` every agent's session already lives in -
+    T-REC-03's own "agent-generic on purpose" recording widget, and the
+    audio/video Memory categories ``SpecialistMemoryCategory`` now
+    admits, finally reachable by simply asking rather than only through
+    the page's own Start/Stop buttons. Built here, in the composition
+    root, so a specialist holds only a callable and never imports the
+    orchestrator's code."""
+    from src.manager.capabilities import (
+        CapabilityRequest,
+        cancel_recording,
+        cancel_recording_intent,
+        list_recordings,
+        list_recordings_intent,
+        start_recording,
+        start_recording_intent,
+        stop_recording,
+        stop_recording_intent,
+    )
+
+    def handle(agent, task):
+        text = task.description
+        if start_recording_intent(text):
+            fn = start_recording
+        elif stop_recording_intent(text):
+            fn = stop_recording
+        elif cancel_recording_intent(text):
+            fn = cancel_recording
+        elif list_recordings_intent(text):
+            fn = list_recordings
+        else:
+            return None
+        request = CapabilityRequest(
+            task=task, identity=agent, roster=lambda: (), own_name=agent.name,
+            own_capabilities=tuple(sorted(agent.spec.capabilities)),
+            recall=agent.memory.recall, recording_sessions=recording_sessions,
+        )
+        return fn(request)
+
+    return handle
+
+
 def build(settings: Settings):
     """Assemble the system exactly as the other entry points do.
 
@@ -1434,6 +1480,12 @@ def build(settings: Settings):
                 voice_facts=lambda: voice_facts(channel.speech),
                 translate=lambda: getattr(manager.own_skills, "_translate", None) if manager.own_skills is not None else None,
             ))
+        # T-REC-03 follow-up: the identical shared RecordingSessionRegistry
+        # every agent's Start/Stop button already reaches, now also reachable
+        # by simply asking - "Arthur, start recording for X" - through the
+        # same governed capability the Manager has.
+        if hasattr(agent, "bind_recording"):
+            agent.bind_recording(specialist_recording_handler(recording_sessions=runtime.recording_sessions))
     return (
         runtime,
         manager,
