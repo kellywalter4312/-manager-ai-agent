@@ -11862,3 +11862,60 @@ total). Focused re-run of capability authorisation, grants, Control Center
 truth, creative media, AI media generation, knowledge/research and
 specialist registry/conversation: 302 passed. Full suite: see the ledger
 row. Production `data/` untouched.
+
+### 52.69 Phase 6 (Real-World Services & Transactions) proven against a real HTTP service, end to end (2026-09-23, continued)
+
+**What was missing, and it was evidence rather than code.** Every prior proof
+of the connected-action path - `tests/test_natural_language_live_connection_
+integration.py`, CON-05, X-CONN-01/02 - stubs `urllib.request.urlopen`. That
+is a deliberate and correct choice for the suite: `tests/conftest.py`'s
+`_no_network` fixture blocks every outbound socket, **including 127.0.0.1**,
+for the whole pytest session, so a genuine HTTP call cannot happen inside it.
+The consequence is that the one thing a transaction phase most needs to show -
+that a real request, carrying the real stored credential, genuinely leaves the
+process and is received by a real server - had never actually been
+demonstrated. It is now.
+
+**Method.** A real `http.server` on 127.0.0.1 (never the internet, no vendor,
+nothing metered) exposing one safe read and one consequential write, driven
+outside pytest through the real Control Center and the real conversational
+path. Isolation follows the standing hazard this project already recorded:
+redirecting the Control Center's five `DEFAULT_*` names is *not* enough -
+`DEFAULT_SERVICES_PATH`/`DEFAULT_SITES_PATH` are relative and resolve against
+the repo root, and the credential store and action log have their own module
+paths - so all of them are redirected on their owning modules as well, and
+production `data/` is fingerprinted before and after.
+
+**Result: 14/14 checks passed, twice, with no code change. No defect found.**
+
+| Check | Real evidence |
+|---|---|
+| Declared through the Control Center, persisted | `services bookdesk declare http://127.0.0.1:<port> read_slots:GET:/slots:open,book_slot:POST:/book:auth` -> real registry entry |
+| The already-running session does *not* see it | `connections.names == ['null']` - the documented construction-time snapshot, honest rather than silently stale |
+| A rebuild does | `connections.names == ['bookdesk']` |
+| A safe operation genuinely reaches the service | "check my connected account: read the slots" -> `{"slots": ["09:00", "11:30", "16:00"]}` - the real server's own response |
+| A consequential operation with no credential is refused | "The 'bookdesk' connection is not authorized yet." - nothing reached the server |
+| A credential added through the Control Center says what it did and did not do | "Persisted only - not yet active on this running process. Type 'reload' now to make it live" |
+| The consequential operation asks first | "'book_slot' on 'bookdesk' will change something on the real service. Proceed? (yes/no)" - server untouched |
+| "yes" performs the real transaction | The server received a real POST and replied `{"booked": true, "reference": "REF-001"}` |
+| **The stored credential genuinely reached the wire** | The server saw `Authorization: Bearer s3cr3t-token` - the exact secret `connections bookdesk connect` had put on file, never echoed back to the operator, and never previously proven to travel |
+| The action is in the durable audit log | Real entries for the read (`succeeded=True`), the unauthorized attempt (`succeeded=False`) and the real booking (`succeeded=True`) |
+| A granted specialist performs a real transaction as itself | Rhea (granted `connected_action`): confirmation, then a real POST, `REF-002`, attributed to Rhea |
+| An ungranted specialist cannot | Iris: "That's connected_action, which I'm not authorised for" - the server received nothing |
+| `services forget` really removes it | Gone from a freshly-built runtime |
+| Production data untouched | Every file under `data/` unchanged |
+
+**52.68's own repair independently re-confirmed here.** The confirmation
+*raise* wrote no audit entry, while the read, the refusal and the real booking
+each wrote exactly one - so the "a question is not an action" fix holds on the
+connected-action path as well as the communication path it was found on.
+
+**What this does not claim.** No real external vendor is connected: the
+service is a real HTTP server on loopback, which is what a declared REST
+service is, but it is not WhatsApp or a bank. That remains genuinely
+EXTERNAL ACTION REQUIRED (CON-05), and is a missing *authorization*, not a
+missing capability.
+
+The harness lives in the scratchpad rather than the suite, for the same
+structural reason CON-05's real-browser proof does: the suite cannot open a
+socket. Its evidence is recorded here.

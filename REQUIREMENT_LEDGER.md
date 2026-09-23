@@ -557,6 +557,28 @@ fully regression-verified. Production `data/` untouched (hash sweep: 90
 files, 42 directories, none modified). ARCHITECTURE.md §52.64-§52.68.
 Commit: see the repository log.
 
+## Y. Phase 6 (Real-World Services & Transactions) - a real transaction, against a real service (2026-09-23)
+
+The canonical roadmap's Phase 6 was declared complete by the owner on
+2026-09-11. Re-audited here against the stricter completion standard
+(implemented -> integrated -> authorized -> reachable -> runtime-working ->
+correct real result -> correctly represented -> regression-verified), with
+particular attention to the one leg the suite structurally cannot prove:
+`tests/conftest.py`'s `_no_network` fixture blocks every outbound socket
+including 127.0.0.1, so every existing proof of this path stubs
+`urllib.request.urlopen`. **No defect was found, and no code changed** - what
+was missing was evidence, and it is now supplied. ARCHITECTURE.md §52.69.
+
+| ID | Requirement | Status | Evidence | Dependencies / Limitations |
+|---|---|---|---|---|
+| Y-TXN-01 | A service the owner declares in the Control Center is reachable by the running system, and a real transaction against it genuinely happens | VERIFIED WORKING - against a **real HTTP server**, not a stub, for the first time | Real `http.server` on loopback, driven outside pytest through the real Control Center and the real conversational path, every production path redirected on its owning module: declare -> persisted; already-running session correctly does *not* see it; rebuild -> `connections.names == ['bookdesk']`; "check my connected account: read the slots" -> the server's own real `{"slots": [...]}`; "book the slot" -> `'book_slot' ... will change something on the real service. Proceed? (yes/no)` with the server untouched; "yes" -> a real POST the server received, answering `{"booked": true, "reference": "REF-001"}` | The service is a real HTTP server on 127.0.0.1 - which is exactly what a declared REST service is - never a real external vendor. A specific vendor remains EXTERNAL ACTION REQUIRED (CON-05) |
+| Y-TXN-02 | A credential the owner stores actually reaches the real request - not merely the credential store | VERIFIED WORKING - the strongest single result of this audit | The real server saw `Authorization: Bearer s3cr3t-token`, the exact secret `connections bookdesk connect desk-account s3cr3t-token` had put on file and which is never echoed back to the operator. "Stored but never consumed" is the failure mode the standard names explicitly; it is disproven here by the receiving end, not by reading code | none |
+| Y-TXN-03 | Authorization is enforced at the connection's own operation level, through conversation and not only through the admin verb | VERIFIED WORKING | With no credential on file, the conversational path answered "The 'bookdesk' connection is not authorized yet." and the server received nothing - `connected_action` performs its own `connection.authorization_for(operation).grants_access` check before executing, the same gate `services <name> execute` applies administratively | none |
+| Y-TXN-04 | A consequential operation is confirmed before it happens, and the audit log records the action rather than the question | VERIFIED WORKING; §52.68's repair independently re-confirmed on this path | The raise produced no audit entry and no server traffic; the read, the unauthorized attempt and the real booking each produced exactly one entry (`succeeded` True/False/True respectively). The "a question is not an action" fix was found on the communication path and holds here too, on a genuinely different execution path | none |
+| Y-TXN-05 | A granted specialist performs a real transaction as itself; an ungranted one cannot | VERIFIED WORKING | Rhea (granted `connected_action`): confirmation, then a real POST the server received (`REF-002`), attributed to Rhea. Iris (ungranted): "That's connected_action, which I'm not authorised for" - the server received nothing | none |
+| Y-TXN-06 | Withdrawing a service really withdraws it | VERIFIED WORKING | `services bookdesk forget` -> gone from a freshly-built runtime (`names == ['null']`) | The construction-time snapshot means withdrawal, like declaration, takes effect on the next build - stated honestly by the command itself |
+| Y-TXN-07 | None of this touches production data | VERIFIED WORKING | Every file under `data/` unchanged (size+mtime, content-hashed for small files) across the whole run, twice | The harness redirects `DEFAULT_SERVICES_PATH`/`DEFAULT_SITES_PATH` on their owning modules, not only on `control_center` - the standing hazard this project already recorded |
+
 ## O. Explicit Scope Boundaries (non-requirements, preserve these)
 
 | ID | Statement | Source | Status |
