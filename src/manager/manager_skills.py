@@ -42,6 +42,7 @@ from src.manager.capabilities import (
     CORRECT_MEMORY,
     HANDLED_BY_KEY,
     named_connection,
+    names_equipped_connection,
     MANAGER_CAPABILITIES,
     is_new_memory_statement,
     OPEN_CONVERSATION,
@@ -482,10 +483,30 @@ class ManagerSkills(BaseAgent):
         )
 
     def _names_equipped_connection(self, text: str) -> bool:
-        resolver = self._connections
-        if resolver is None or CONNECTED_ACTION.name not in self._capabilities:
+        """Whether this request names a connection this agent actually has -
+        the routing question, which is not the same as ``named_connection``'s
+        "which *non-default* one".
+
+        ``named_connection`` skips the default on purpose (an unqualified
+        request already means the default, and ``_select_connection`` falls
+        back to it). Using it alone as the routing gate meant a request that
+        named the default connection by its own name was not recognised as a
+        connection request at all: with `library` declared and configured as
+        the default, "check my clinic account: ..." reached the clinic, while
+        "check my library account: ..." fell through to open conversation and
+        answered "no language model is configured" - so the one connection
+        the owner had chosen as default was the only one they could not name
+        (measured 2026-09-23, Phase 7 audit).
+
+        The default is included here, except when it supports no operations
+        at all - which is exactly the "null" no-op connection every
+        unconfigured installation runs with, where naming it could not mean
+        anything to do. That is a property of the connection, never a name
+        this method knows.
+        """
+        if CONNECTED_ACTION.name not in self._capabilities:
             return False
-        return named_connection(text, resolver.names, resolver.default_name) is not None
+        return names_equipped_connection(text, self._connections)
 
     @property
     def voice(self) -> VoiceProfile:

@@ -6452,31 +6452,75 @@ def _compact(text: str) -> str:
     return re.sub(r"[^a-z0-9]", "", str(text or "").lower())
 
 
+def text_names_connection(text: str, name: str) -> bool:
+    """Whether ``text`` names this one connection - as a whole run of up to
+    four words, so a short name inside an unrelated word never matches
+    ("bella salon", "bella-salon" and "bellasalon" are the same name).
+
+    Extracted from ``named_connection`` below rather than duplicated,
+    because two genuinely different questions need it: *which* non-default
+    connection was named (that function), and whether a request names a
+    connection at all (the routing gate in
+    ``ManagerSkills._names_equipped_connection``).
+    """
+    words = re.findall(r"[a-z0-9]+", str(text or "").lower())
+    target = _compact(name)
+    if len(target) < 3:
+        return False
+    for start in range(len(words)):
+        joined = ""
+        for end in range(start, min(len(words), start + 4)):
+            joined += words[end]
+            if joined == target:
+                return True
+            if len(joined) >= len(target):
+                break
+    return False
+
+
 def named_connection(text: str, names: "Sequence[str]", default_name: str) -> "str | None":
     """The one non-default equipped connection ``text`` names, or None - a name
     counts only as a whole run of words in the request (so a short name inside
     an unrelated word never matches). Ambiguous (two named) is None too; the
-    connected_action handler then asks which one is meant."""
-    words = re.findall(r"[a-z0-9]+", str(text or "").lower())
-    found = []
-    for name in names:
-        if name == default_name:
-            continue
-        target = _compact(name)
-        if len(target) < 3:
-            continue
-        for start in range(len(words)):
-            joined = ""
-            for end in range(start, min(len(words), start + 4)):
-                joined += words[end]
-                if joined == target:
-                    found.append(name)
-                    break
-                if len(joined) >= len(target):
-                    break
-            if found and found[-1] == name:
-                break
+    connected_action handler then asks which one is meant.
+
+    The default is skipped deliberately and that is correct *here*: an
+    unqualified request already means the default, and ``_select_connection``
+    falls back to it. Asking "does this request name a connection at all?"
+    is a different question - see ``text_names_connection`` above.
+    """
+    found = [name for name in names if name != default_name and text_names_connection(text, name)]
     return found[0] if len(found) == 1 else None
+
+
+def names_equipped_connection(text: str, resolver: "Any | None") -> bool:
+    """Whether ``text`` names a connection this agent was actually equipped
+    with - the *routing* question, and deliberately not the same question
+    ``named_connection`` answers ("which non-default one").
+
+    One rule, two callers: ``ManagerSkills._names_equipped_connection`` and
+    ``SpecialistCapabilities.__call__``. It lives here rather than in either
+    of them because having it in only one was itself the defect - the Manager
+    had this gate and a specialist did not, so a specialist genuinely granted
+    ``connected_action`` could reach a connection only through the literal
+    phrase "check my connected account", never by naming the service
+    (measured 2026-09-23: Alfred reached the library and the clinic by name;
+    Rhea, granted the capability, reached neither).
+
+    The default connection is included, unlike in ``named_connection``,
+    except when it supports no operations at all - which is exactly the
+    "null" no-op connection an unconfigured installation runs with, where
+    naming it could not mean anything to do. That is a property of the
+    connection, never a name this function knows.
+    """
+    if resolver is None:
+        return False
+    if named_connection(text, resolver.names, resolver.default_name) is not None:
+        return True
+    default = resolver.get(resolver.default_name)
+    if not getattr(default, "supported_operations", ()):
+        return False
+    return text_names_connection(text, resolver.default_name)
 
 
 def _connection_request_text(task: Task) -> str:

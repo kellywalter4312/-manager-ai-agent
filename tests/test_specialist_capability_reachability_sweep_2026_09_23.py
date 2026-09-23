@@ -1215,3 +1215,134 @@ class TestAGrantedCapabilityThatIsSelectedByWordOverlapIsActuallyDispatchable:
             if authority_of(capability) == GRANTABLE and capability.scoreable
         }
         assert grantable_and_scoreable == {"knowledge", "live_information"}
+
+
+class _FakeResolver:
+    """The two questions ``names_equipped_connection`` asks a resolver, and
+    nothing else - deliberately not a ConnectionResolver, so this pins the
+    rule rather than that class's construction."""
+
+    def __init__(self, names, default_name, default_operations=("do_thing",)):
+        self.names = tuple(names)
+        self.default_name = default_name
+        self._default_operations = tuple(default_operations)
+
+    def get(self, name=None):
+        class _Connection:
+            supported_operations = self._default_operations
+        return _Connection() if (name or self.default_name) == self.default_name else object()
+
+
+class TestNamingAConnectionIsTheRoutingQuestion:
+    """``named_connection`` answers "which *non-default* one", which is right
+    for choosing between connections and wrong as a routing gate: it made the
+    one connection the owner configured as default the only one they could
+    not name."""
+
+    def test_a_non_default_connection_is_named(self):
+        from src.manager.capabilities import names_equipped_connection
+
+        resolver = _FakeResolver(("clinic", "library"), "library")
+        assert names_equipped_connection("check my clinic account: list the appointments", resolver)
+
+    def test_the_default_connection_is_named_too(self):
+        from src.manager.capabilities import names_equipped_connection
+
+        resolver = _FakeResolver(("clinic", "library"), "library")
+        assert names_equipped_connection("check my library account: find the book", resolver)
+
+    def test_a_connection_that_was_never_equipped_is_not(self):
+        from src.manager.capabilities import names_equipped_connection
+
+        resolver = _FakeResolver(("clinic", "library"), "library")
+        assert not names_equipped_connection("check my pharmacy account: collect it", resolver)
+
+    def test_the_no_op_default_is_never_routed_to_by_name(self):
+        """An unconfigured installation runs with the "null" connection as its
+        default. It supports no operations, so naming it could not mean
+        anything to do - and including it would have changed routing for every
+        installation that has declared nothing at all."""
+        from src.manager.capabilities import names_equipped_connection
+
+        resolver = _FakeResolver(("null",), "null", default_operations=())
+        assert not names_equipped_connection("check my null account: do it", resolver)
+
+    def test_named_connection_itself_still_skips_the_default(self):
+        """The narrower question is unchanged - ``_select_connection`` relies
+        on it, and an unqualified request must still mean the default."""
+        from src.manager.capabilities import named_connection
+
+        assert named_connection("check my library account: find the book",
+                                ("clinic", "library"), "library") is None
+        assert named_connection("check my clinic account: list them",
+                                ("clinic", "library"), "library") == "clinic"
+
+
+class TestASpecialistReachesADeclaredConnectionByName:
+    """The Manager had a connection-naming routing gate
+    (``ManagerSkills._names_equipped_connection``); the specialist dispatcher
+    did not. So a specialist genuinely granted ``connected_action`` could
+    reach a connection only through the literal phrase "check my connected
+    account" - never by naming the service, which is the natural way to pick
+    one when several are declared. Measured against two real HTTP services:
+    Alfred reached the library and the clinic by name; Rhea, granted the
+    capability, reached neither."""
+
+    def _system(self, tmp_path, monkeypatch):
+        _connection_sandbox(tmp_path, monkeypatch)
+        system = su.build_live_system(_settings(tmp_path))
+        _run(system, "services library declare http://127.0.0.1:9401 find_book:GET:/books:open")
+        _run(system, "services clinic declare http://127.0.0.1:9402 list_appointments:GET:/appointments:open")
+        return su.build_live_system(_settings(tmp_path, connection_provider="library"))
+
+    def _no_real_call(self, monkeypatch):
+        import urllib.request
+
+        class _Response:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self): return b'{"ok": true}'
+
+        monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _Response())
+
+    def test_the_manager_reaches_both_the_default_and_a_non_default_by_name(self, tmp_path, monkeypatch):
+        system = self._system(tmp_path, monkeypatch)
+        self._no_real_call(monkeypatch)
+
+        assert _say(system, "check my library account: find the book").capability == "connected_action"
+        assert _say(system, "check my clinic account: list the appointments").capability == "connected_action"
+
+    def test_a_granted_specialist_reaches_both_by_name(self, tmp_path, monkeypatch):
+        system = self._system(tmp_path, monkeypatch)
+        self._no_real_call(monkeypatch)
+        _run(system, "agent create rhea Rhea|bookings|connected_action")
+
+        by_default_name = _say(system, "Rhea, check my library account: find the book", to="Rhea")
+        assert by_default_name.handled_by == "Rhea"
+        assert by_default_name.capability == "connected_action"
+
+        by_other_name = _say(system, "Rhea, check my clinic account: list the appointments", to="Rhea")
+        assert by_other_name.handled_by == "Rhea"
+        assert by_other_name.capability == "connected_action"
+
+    def test_an_ungranted_specialist_reaches_neither(self, tmp_path, monkeypatch):
+        system = self._system(tmp_path, monkeypatch)
+        _run(system, "agent create iris Iris|bookings")
+
+        for text in ("Iris, check my library account: find the book",
+                     "Iris, check my clinic account: list the appointments",
+                     "Iris, check my connected account: find the book"):
+            turn = _say(system, text, to="Iris")
+            assert turn.capability != "connected_action", text
+            assert not turn.succeeded, text
+
+    def test_revoking_it_stops_naming_a_connection_from_reaching_it(self, tmp_path, monkeypatch):
+        system = self._system(tmp_path, monkeypatch)
+        self._no_real_call(monkeypatch)
+        _run(system, "agent create rhea Rhea|bookings|connected_action")
+        assert _say(system, "Rhea, check my library account: find the book",
+                    to="Rhea").capability == "connected_action"
+
+        _run(system, "capabilities revoke Rhea connected_action")
+        turn = _say(system, "Rhea, check my library account: find the book", to="Rhea")
+        assert turn.capability != "connected_action"

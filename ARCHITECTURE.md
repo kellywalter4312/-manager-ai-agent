@@ -11919,3 +11919,97 @@ missing capability.
 The harness lives in the scratchpad rather than the suite, for the same
 structural reason CON-05's real-browser proof does: the suite cannot open a
 socket. Its evidence is recorded here.
+
+### 52.70 Phase 7 (Connection Architecture) - the connection you named was the one you could not reach (2026-09-23, continued)
+
+**What Phase 7 claims, and why one service could not prove it.** Phase 6
+showed a single declared service working end to end. Phase 7's claim is
+different and stronger: an agent holds an open-ended *context* of many
+connections at once, each independently authorized, and a request resolves
+which one it means **by name** - never falling back to one nobody asked for,
+and never inventing a name it was not equipped with. Those properties only
+appear when there is more than one connection, so this was audited against
+**two real HTTP services running simultaneously**, outside pytest.
+
+Two genuine defects, both of the same shape: one routing rule that answered
+a subtly different question than the one being asked.
+
+---
+
+**Defect 1 - naming the default connection reached nothing.**
+`ManagerSkills.execute` gates the whole connected-action route on
+`_names_equipped_connection`, which asked `named_connection`. That function
+answers "which *non-default* connection does this text name?" and skips the
+default deliberately - correctly, for its own job, because an unqualified
+request already means the default and `_select_connection` falls back to it.
+
+Used as the routing gate, though, the question is different: "does this
+request name a connection at all?" Answering it with a function that ignores
+the default meant the connection the owner had configured as their default
+was the only one they could not name. Measured with `library` (default) and
+`clinic` both declared:
+
+    "check my clinic account: list the appointments"  -> clinic reached
+    "check my library account: find the book"         -> nothing reached;
+                                                         open conversation
+                                                         answered "no language
+                                                         model is configured"
+
+The more services are declared, the worse it reads: whichever one you chose
+as default becomes the one you must not say the name of.
+
+**Defect 2 - a specialist could not name a connection at all.** The gate
+above lives in `ManagerSkills.execute`. `SpecialistCapabilities.__call__` has
+no equivalent, so a specialist genuinely granted `connected_action` could
+reach a connection **only** through the literal phrase "check my connected
+account" - never `library`, never `clinic`, default or not:
+
+    Alfred: connected/library/clinic  -> library / library / clinic
+    Rhea  : connected/library/clinic  -> library / NOTHING / NOTHING
+
+This is the "works from the Manager, not from a specialist" class this
+campaign has now found several times, on a capability the owner can grant.
+
+**Repair - one rule, in one place.** `names_equipped_connection(text,
+resolver)` now lives in `src/manager/capabilities.py` beside
+`named_connection`, and both dispatchers call it. It includes the default,
+**except** when that default supports no operations - which is exactly the
+`null` no-op connection every unconfigured installation runs with, where
+naming it could not mean anything to do. That exception is a property of the
+connection (`supported_operations`), never a name the function knows, and it
+is what keeps the change inert for any installation that has declared
+nothing. The narrower `named_connection` is untouched, because
+`_select_connection` depends on its existing meaning; the shared word-run
+matcher was extracted as `text_names_connection` rather than duplicated.
+
+---
+
+**Runtime evidence** - two real `http.server` instances on loopback, driven
+through the real Control Center and the real conversational path, every
+registry/credential/audit path redirected on its owning module. **17/17.**
+
+| Check | Evidence |
+|---|---|
+| One agent holds both at once | `connections.names == ['clinic', 'library']`, default `library` |
+| Naming one selects that one | "check my clinic account: ..." -> the clinic server received `/appointments`; the library server received **nothing** - no fallback to the default |
+| Naming the default works (repair 1) | "check my library account: ..." -> the library server received `/books`; the clinic received nothing |
+| A credential on one does not authorize the other | With only `library` credentialed: the clinic write was refused ("The 'clinic' connection is not authorized yet.") and the clinic server received nothing; the library write executed |
+| **The secret that travelled belongs to one connection only** | The library server saw `library-only-secret`; the clinic server saw no Authorization header at all, ever |
+| An unequipped name is refused, never invented | "check my pharmacy account: ..." -> neither server received anything |
+| A granted specialist uses the same context (repair 2) | Rhea: "check my library account: find the book" -> the library server received `/books`, attributed to Rhea; the clinic received nothing |
+| An ungranted specialist reaches neither, by any phrasing | Iris: all three phrasings -> nothing reached, `capability != connected_action` |
+| Revocation stops naming from working | `capabilities revoke Rhea connected_action` -> the next named request reaches nothing |
+| The Control Center is truthful about both surfaces | `services` lists both declared services; `connections` (the *credential* surface) lists `library`, which has an account, and honestly omits `clinic`, which has none |
+| Production data untouched | Every file under `data/` unchanged |
+
+**Not a defect, checked and recorded:** `connections` omitting a declared
+service with no credential. Its own docstring scopes it to connect/
+disconnect/list/status/validate - it is the credential surface, and
+`services` is the declaration surface. Two truthful views, not one broken
+one. The harness's first assertion here was wrong and was corrected rather
+than the code.
+
+Regression: 9 new tests in
+`tests/test_specialist_capability_reachability_sweep_2026_09_23.py` (61
+total), including a unit pin that the `null` default is never routed to by
+name, and that `named_connection` itself still skips the default.

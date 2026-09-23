@@ -1583,7 +1583,7 @@ class SpecialistCapabilities:
 
     def __call__(self, agent, task):
         from src.control_center.workspace_catalog import workspace_refusal
-        from src.manager.capabilities import OPEN_CONVERSATION
+        from src.manager.capabilities import CONNECTED_ACTION, OPEN_CONVERSATION, names_equipped_connection
         from src.core.contracts import TaskResult
         from src.manager.guided_interaction import guided_interaction_response
         from src.services.memory.guidance import crisis_signal
@@ -1626,12 +1626,26 @@ class SpecialistCapabilities:
                 resolved = guided_interaction_response(self.request_for(agent, task))
                 if resolved is not None:
                     return resolved
-        capability = next(
-            (c for c in sorted(reachable.values(), key=lambda c: c.name)
-             if not c.own_path and c.claims is not None and c is not OPEN_CONVERSATION
-             and c.claims(task, _agent_names(self._manager))),
-            None,
-        )
+        # A declared connection named in the request reaches the one governed
+        # connected_action capability - the identical gate ManagerSkills.execute
+        # has had all along, and whose absence here meant a specialist granted
+        # connected_action could only ever reach a connection through the
+        # literal phrase "check my connected account", never by naming the
+        # service (measured 2026-09-23: Alfred reached both declared services
+        # by name; Rhea, granted the capability, reached neither). One rule,
+        # in capabilities.py, so the two dispatchers cannot drift again.
+        capability = None
+        if CONNECTED_ACTION.name in reachable and names_equipped_connection(
+            task.description, getattr(self._runtime, "connections", None)
+        ):
+            capability = reachable[CONNECTED_ACTION.name]
+        if capability is None:
+            capability = next(
+                (c for c in sorted(reachable.values(), key=lambda c: c.name)
+                 if not c.own_path and c.claims is not None and c is not OPEN_CONVERSATION
+                 and c.claims(task, _agent_names(self._manager))),
+                None,
+            )
         if capability is None:
             capability = self._best_scored(task, reachable)
         if capability is None:
