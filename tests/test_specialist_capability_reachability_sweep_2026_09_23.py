@@ -218,3 +218,61 @@ class TestCreateArtifactReachesAnAuthorizedSpecialist:
         assert not turn.succeeded
         assert "create_artifact, which I'm not authorised for" in turn.outcome
         assert not system.runtime.artifacts.all()
+
+
+class TestReviseArtifactReachesAnAuthorizedSpecialistAndStaysOwnershipScoped:
+    """revise_artifact is a genuinely different shape from create_artifact -
+    it reads an existing artifact back, mutates it in place (same identity,
+    a new version), and runs a governance check first. This is the
+    ownership boundary ArtifactProductionTool's own module comment states
+    ("a future second agent sharing this same ArtifactStore must not be
+    able to revise another agent's artifact just by knowing its id") -
+    inspected in source (``_owned``/``_existing_owned`` in
+    src/agents/tools/artifact_production.py both check
+    ``owner_agent == self._owner_agent``) and proven here through the real
+    served system, for the first time through a granted specialist rather
+    than only through Alfred."""
+
+    CREATE = (
+        "Clara, make a handout: TITLE: Garden shed plan "
+        "SECTION: Materials: cedar boards and galvanised screws "
+        "SECTION: Timeline: framed by the second weekend of October"
+    )
+    REVISE = "Clara, edit the handout: replace cedar boards with treated pine."
+
+    def test_a_granted_specialist_revises_her_own_artifact_deterministically(self, system):
+        _run(system, "agent create clara Clara|documentation|create_artifact,revise_artifact")
+        created = _say(system, self.CREATE, to="Clara")
+        assert created.succeeded, created.outcome
+
+        revised = _say(system, self.REVISE, to="Clara")
+        assert revised.succeeded, revised.outcome
+        assert "Artifact revised" in revised.outcome
+
+        docs = [a for a in system.runtime.artifacts.all() if a.type == "document"]
+        assert len(docs) == 1
+        assert docs[0].owner_agent == "Clara"
+        assert docs[0].latest.version == 2
+        with open(docs[0].latest.renditions["txt"], encoding="utf-8") as handle:
+            text = handle.read()
+        assert "treated pine" in text
+        assert "cedar boards" not in text
+
+    def test_a_second_specialist_cannot_revise_it_by_explicit_id(self, system):
+        _run(system, "agent create clara Clara|documentation|create_artifact,revise_artifact")
+        _run(system, "agent create nova Nova|3D modelling|revise_artifact")
+        created = _say(system, self.CREATE, to="Clara")
+        assert created.succeeded, created.outcome
+        clara_artifact_id = [a for a in system.runtime.artifacts.all() if a.type == "document"][0].artifact_id
+
+        turn = _say(system, f"Nova, edit artifact {clara_artifact_id}: replace cedar boards with treated pine.", to="Nova")
+        assert not turn.succeeded
+        assert "couldn't find that handout to revise" in turn.outcome
+
+        docs = [a for a in system.runtime.artifacts.all() if a.type == "document"]
+        assert len(docs) == 1
+        assert docs[0].owner_agent == "Clara"
+        assert docs[0].latest.version == 1
+        with open(docs[0].latest.renditions["txt"], encoding="utf-8") as handle:
+            text = handle.read()
+        assert "cedar boards" in text

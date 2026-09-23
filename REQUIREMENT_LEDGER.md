@@ -506,10 +506,11 @@ were not swept").
 Continuation of section W: W-CAP-02/W-READ-01 proved the generic
 grant/dispatch mechanism itself works; this closes the evidence gap left
 open for the other representative capabilities the closure brief named
-(video, image/content processing, artifact generation), and repairs one
-genuine defect found while doing it. Verified through the **served system**,
-real FFmpeg, a real PNG, no network. ARCHITECTURE.md §52.63. Regression
-protection: `tests/test_specialist_capability_reachability_sweep_2026_09_23.py` (6).
+(video, image/content processing, artifact generation, document revision),
+and repairs one genuine defect found while doing it. Verified through the
+**served system**, real FFmpeg, a real PNG, no network. ARCHITECTURE.md
+§52.63-§52.64. Regression protection:
+`tests/test_specialist_capability_reachability_sweep_2026_09_23.py` (8).
 
 | ID | Requirement | Before | Change | Evidence | Status |
 |---|---|---|---|---|---|
@@ -518,12 +519,13 @@ protection: `tests/test_specialist_capability_reachability_sweep_2026_09_23.py` 
 | X-ART-01 | `create_artifact` reaches a granted specialist end to end, Half-Brain-safe | Not yet exercised | None - already worked once granted; evidence only | The deterministic `TITLE:`/`SECTION:` path (no model consulted) produced a real `document` artifact (real PDF rendition) owned by the specialist, with the given title; ungranted -> honest refusal, no artifact produced | VERIFIED |
 | X-GEN-01 | `generate_document` is genuinely Brain-gated for a specialist, the same honest way `create_3d_model` already is | - | Not changed - inspected, not re-run: `request.converse is None` gates it identically, and the `converse` wiring 52.61/52.62 already proved generic covers this path; re-running would re-prove an already-proven mechanism | Traced in source: `generate_document()` gates on `request.converse is None` before anything else, same shape as `create_3d_model`'s own `TestSafetyAndBrains.test_half_brain_specialist_is_honest_about_what_needs_a_model` | VERIFIED (by inspection - shares an already-proven mechanism) |
 | X-FIELD-01 | Every `CapabilityRequest` field a specialist's request omits either defaults safely or belongs to a capability a specialist can never reach | Not swept | Checked `recognition`, `schedule`, `activity_brain`, `assess_governance` against every grantable capability that reads them | `recognition`/`schedule` carry real, non-`None` defaults (`Recognition()`, `UserSchedule()`) - no crash, an honest empty context, consistent with specialists never holding the person's own profile; `activity_brain` is read only by Manager-only milestone/proactive capabilities, unreachable by a specialist through the generic dispatch; `assess_governance` (read by `connected_action`, grantable) - `assess()` already treats "no `ask_brain` given" and "a real Manager with no reasoning configured" as the identical fact, degrading honestly to a conservative `CLARIFY` rather than a silent allow or a crash | VERIFIED - no further defect found |
+| X-REV-01 | `revise_artifact` reaches a granted specialist end to end, Half-Brain-safe deterministic path | Not yet exercised | None - already worked once granted; evidence only | Clara (granted `create_artifact,revise_artifact`) creates a handout, then "edit the handout: replace cedar boards with treated pine." -> `Artifact revised`, same artifact id, version 1 -> 2, the real `.txt` rendition shows the replacement applied | VERIFIED |
+| X-REV-02 | A specialist cannot revise another specialist's artifact merely by knowing its id | Not yet exercised (ownership check exists in `ArtifactProductionTool` since it was built, never proven live for two specialists) | None - the existing `owner_agent` check in `_existing_owned`/`_owned`/`_get` already enforces this; evidence only | Nova (granted `revise_artifact`, no artifacts of her own) given Clara's real artifact id -> honest "I couldn't find that handout to revise" (the identical unowned-id message); Clara's artifact provably unchanged (version still 1, original text still present) | VERIFIED |
+| X-SWEEP-02 | `record_this`, `image_transform`, `media_production`, `knowledge`, `live_information` - each checked for the same class of defect X-VIS-01 was | Not swept | None found needing repair | `record_this` uses only `request.retain` (W-MEM-01's already-proven mechanism); its `MemoryCategory.RECORDING` value matches `SpecialistMemoryCategory.RECORDING` exactly, confirmed by reading both enums. `image_transform`/`media_production` are tool-only (or tool + the already-proven `converse` fallback), the identical shape `clip_video`/`create_artifact` already proved live - no field they read is one `request_for` omits. `knowledge`/`live_information` are tool-plus-`converse`, the identical shape `generate_document` (X-GEN-01) already covers; `knowledge_inquiry`'s `request.recognition.notes()` call traced and confirmed safe (non-`None` default) | VERIFIED (by inspection) - no defect found |
 
-Full suite: **8,169 passed** fixed order (`-p no:randomly`), **8,169 passed**
-randomised order (run twice independently, both clean; pytest-randomly's own
-per-run seed line is suppressed by `-q` and was not separately captured -
-noted honestly rather than citing a number not actually recorded). Production
-`data/` untouched (mtime sweep). Commit: see the repository log.
+Full suite (this round): **8,171 passed** fixed order, **8,171 passed**
+randomised order. Production `data/` untouched (mtime sweep). ARCHITECTURE.md
+§52.64. Commit: see the repository log.
 
 ## O. Explicit Scope Boundaries (non-requirements, preserve these)
 

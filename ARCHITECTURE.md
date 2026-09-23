@@ -11363,3 +11363,58 @@ Regression: `tests/test_specialist_capability_reachability_sweep_2026_09_23.py`
 (6, new). Full suite: **8,169 passed** fixed order, **8,169 passed**
 randomised order (run twice independently). Production `data/` untouched
 (confirmed by mtime sweep). Commit: see the ledger row.
+
+### 52.64 revise_artifact through a specialist, and the ownership boundary that isolates them (2026-09-23, continued)
+
+**Continuing the same sweep**, not a new campaign: `revise_artifact` is
+architecturally distinct from every capability 52.63 proved - it reads an
+existing artifact *back*, mutates it in place (same identity, a new version),
+and runs a governance check before touching anything - so it was inspected
+and proven separately rather than assumed covered by `create_artifact`'s own
+evidence.
+
+**Inspected first, nothing repaired.** `ArtifactProductionTool`
+(`src/agents/tools/artifact_production.py`) already scopes every read and
+mutation by `owner_agent` - `_owned`, `_existing_owned`, `_get`,
+`_find_latest` and `_list_content` each check `artifact.owner_agent ==
+self._owner_agent` before returning anything, and `manager_tools()`
+(`scripts/control_center.py:1139`) already threads a specialist's own name
+through as `owner` for every per-agent tool it builds, `ArtifactProductionTool`
+included. The isolation this section proves was already correctly built; what
+was missing was evidence that granting `revise_artifact` to a specialist
+actually reaches it, and that a second specialist cannot revise the first
+one's artifact merely by knowing its id.
+
+**Runtime evidence**, through the real served system, real PDF rendering:
+
+| Check | Result |
+|---|---|
+| A granted specialist revises her own artifact, Half-Brain-safe deterministic path | Clara creates a handout, then "edit the handout: replace cedar boards with treated pine." -> `Artifact revised`, same artifact id, version bumped 1 -> 2, the real `.txt` rendition contains "treated pine" and no longer contains "cedar boards" |
+| A second specialist, granted the identical capability, cannot revise it by explicit id | Nova (granted `revise_artifact`, no artifacts of her own) given Clara's real artifact id -> "I couldn't find that handout to revise" - the identical honest-absence message an unowned id already produces, never a leak of Clara's content, never a silent no-op; Clara's artifact is unchanged (version still 1, "cedar boards" still present) |
+
+**Also inspected this round, found sound, no live proof needed:**
+- `record_this` - Half-Brain-safe by the module's own comment, uses only
+  `request.retain` (the identical, already-proven W-MEM-01 mechanism); its
+  `MemoryCategory.RECORDING` value (`"recording"`) is the exact string
+  `SpecialistMemoryCategory.RECORDING` already admits, confirmed by reading
+  both enums rather than assumed.
+- `image_transform` - tool-only (`ImageIntelligenceTool`) for its
+  deterministic named-technique and parametric-edit paths, with the
+  identical already-proven `converse` fallback (52.61's wiring) only for
+  edits no operation recognises; no field this capability reads is one
+  `request_for` omits.
+- `media_production` - tool-only (`MediaProductionTool`), the identical
+  three-outcome shape `clip_video`/`create_artifact` already proved live;
+  no new field dependency.
+- `knowledge`/`live_information` - tool-plus-`converse`, the identical shape
+  `generate_document` already covers (X-GEN-01); `knowledge_inquiry`'s own
+  `request.recognition.notes()` call was traced and confirmed safe (`recognition`
+  defaults to an empty, non-`None` `Recognition()` for a specialist - an honest
+  empty context, not a crash, consistent with a specialist never holding the
+  person's own profile).
+
+Regression: 2 new tests appended to
+`tests/test_specialist_capability_reachability_sweep_2026_09_23.py` (8 total
+in the file). Full suite: **8,171 passed** fixed order, **8,171 passed**
+randomised order. Production `data/` untouched (confirmed by mtime sweep).
+Commit: see the ledger row.
