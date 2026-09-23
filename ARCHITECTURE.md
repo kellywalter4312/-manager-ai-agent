@@ -11488,3 +11488,54 @@ confirm Alfred's own confirmation/governance behaviour is unchanged. Full
 suite: **8,175 passed** fixed order, **8,175 passed** randomised order.
 Production `data/` untouched (confirmed by mtime sweep). Commit: see the
 ledger row.
+
+### 52.66 communication through a specialist - the shared resolver's own path proven distinct, no separate defect (2026-09-23, continued)
+
+**Not assumed covered by 52.65.** `communication` shares the identical
+`PendingConfirmation`/`ActivitySessions` resolver `connected_action` does -
+52.65's fix keys on `"connected_action" if confirmation.connection else
+"communication"`, so it already protects both generically - but the
+*execution* path is genuinely distinct: `CommunicationSendTool`/
+`CommunicationCallTool` against a real `CommunicationProvider`, and
+`_communication_shape`'s own party/content extraction, neither of which
+`connected_action`'s proof touched at all. Proven separately rather than
+inferred.
+
+**Method.** A real `CommunicationProvider` double
+(`_WorkingCommunicationProvider`) was registered through the actual
+provider factory seam (`communication_factory._BUILDERS`, monkeypatched
+with `setitem` exactly as the vision-probe and 3D-probe proofs already
+register a provider by name - never a vendor call, never a tool swapped
+directly onto an agent's own `ToolSet`) and selected via
+`communication_provider=` at build time, so both Alfred's and every
+specialist's `CommunicationSendTool`/`CommunicationCallTool` - both built
+from the identical `runtime.communication` - genuinely reach it, the same
+way a real vendor backend would.
+
+**Result: no defect found.** Every check passed on the first run, including
+the revocation-mid-confirmation case - direct, real confirmation that
+52.65's fix generalises correctly to `communication` rather than merely
+being assumed to.
+
+**Runtime evidence**, through the real served system, no genuine vendor
+reached:
+
+| Check | Result |
+|---|---|
+| A granted specialist raises and executes a real send | Clara: "send Kai a message saying hello" -> a real confirmation naming Kai, ending "(yes/no)"; nothing sent yet (`provider.sent == []`); "yes" -> `provider.sent == [("Kai", "saying hello")]`, attributed to Clara |
+| A granted specialist raises and executes a real call | Clara: "call Rema" -> confirmation naming Rema; "yes" -> `provider.called == ["Rema"]`, attributed to Clara |
+| A clear "no" cancels without ever sending | "no, cancel that" -> cancelled, `provider.sent` stays empty, nothing left pending |
+| Ungranted specialist refused before anything is raised | The standard "which I'm not authorised for" refusal; `provider.sent` untouched, nothing pending |
+| Revoking mid-confirmation stops it (52.65's fix, proven for this path specifically) | Confirmation raised, `capabilities revoke Clara communication`, then "yes" -> honest refusal naming `communication` as "no longer authorised"; `provider.sent` stays empty - the real send never attempted; nothing left pending; Alfred immediately sends through the identical provider right after, unaffected |
+
+Regression: 5 new tests appended to
+`tests/test_specialist_capability_reachability_sweep_2026_09_23.py` (17
+total in the file); `tests/test_phase_4_real_world_communication.py`,
+`tests/test_stage15_communication.py`,
+`tests/test_natural_language_live_connection_integration.py`,
+`tests/test_governance.py` and
+`tests/test_capability_authorization_and_defined_specialists.py` re-run
+clean (192 passed) to confirm Alfred's own communication/governance
+behaviour is unchanged. Full suite: **8,180 passed** fixed order, **8,180
+passed** randomised order. Production `data/` untouched (confirmed by mtime
+sweep). Commit: see the ledger row.

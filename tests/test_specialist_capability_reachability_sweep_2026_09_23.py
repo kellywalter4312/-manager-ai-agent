@@ -415,3 +415,143 @@ class TestConnectedActionReachesAnAuthorizedSpecialistAndRevocationStopsAPending
         assert "connected_action, which I'm not authorised for" in turn.outcome
         sessions = system.manager.own_skills._activity_sessions
         assert sessions.pending_confirmation("Clara") is None
+
+
+class _WorkingCommunicationProvider:
+    """A real CommunicationProvider double that genuinely records what it
+    was asked to do - proving the mechanism end-to-end without claiming a
+    live vendor was ever reached. Registered through the real provider
+    factory seam (``communication_factory._BUILDERS``), never swapped
+    directly onto an agent's own ``ToolSet`` - so both Alfred's and every
+    specialist's ``CommunicationSendTool``/``CommunicationCallTool`` (both
+    built from the identical ``runtime.communication``) genuinely reach
+    it, the same way a real vendor backend would."""
+
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, str]] = []
+        self.called: list[str] = []
+
+    @property
+    def name(self) -> str:
+        return "closure-comm-probe"
+
+    def read_messages(self, *, limit: int = 10):
+        return ()
+
+    def send_message(self, *, to: str, content: str):
+        from src.providers.communication import CommunicationResult, CommunicationStatus, utc_now
+
+        self.sent.append((to, content))
+        return CommunicationResult(
+            operation="send", party=to, status=CommunicationStatus.SUCCEEDED,
+            source=self.name, attempted_at=utc_now(),
+        )
+
+    def place_call(self, *, to: str):
+        from src.providers.communication import CommunicationResult, CommunicationStatus, utc_now
+
+        self.called.append(to)
+        return CommunicationResult(
+            operation="call", party=to, status=CommunicationStatus.SUCCEEDED,
+            source=self.name, attempted_at=utc_now(),
+        )
+
+
+class TestCommunicationReachesAnAuthorizedSpecialistAndRevocationStopsAPendingConfirmation:
+    """communication shares the identical PendingConfirmation/
+    ActivitySessions resolver connected_action does - 52.65's own fix
+    (SpecialistCapabilities.__call__ re-checking authorisation before
+    resolving a pending confirmation) already covers both, since it keys
+    on "connected_action" vs "communication" generically. What had never
+    been proven is communication's own, genuinely distinct execution path:
+    CommunicationSendTool/CommunicationCallTool, party/content extraction,
+    and a real registered CommunicationProvider - never assumed covered by
+    connected_action's own proof."""
+
+    def _system(self, tmp_path, monkeypatch):
+        from src.providers import communication_factory
+
+        provider = _WorkingCommunicationProvider()
+        monkeypatch.setitem(
+            communication_factory._BUILDERS, "closure_comm_probe",
+            lambda settings, env=None, account=None: provider,
+        )
+        _sandbox(tmp_path, monkeypatch)
+        system = su.build_live_system(_settings(tmp_path, communication_provider="closure_comm_probe"))
+        return system, provider
+
+    def test_a_granted_specialist_raises_and_executes_a_real_send(self, tmp_path, monkeypatch):
+        system, provider = self._system(tmp_path, monkeypatch)
+        _run(system, "agent create clara Clara|operations|communication")
+
+        raised = _say(system, "Clara, send Kai a message saying hello", to="Clara")
+        assert raised.succeeded, raised.outcome
+        assert "Kai" in raised.outcome and "(yes/no)" in raised.outcome
+        assert provider.sent == [], "must not send before confirmation"
+
+        confirmed = _say(system, "yes", to="Clara")
+        assert confirmed.succeeded, confirmed.outcome
+        assert provider.sent == [("Kai", "saying hello")]
+        # Ownership preserved: attributed to Clara, never Alfred.
+        assert confirmed.handled_by == "Clara"
+
+    def test_a_granted_specialist_places_a_real_call(self, tmp_path, monkeypatch):
+        system, provider = self._system(tmp_path, monkeypatch)
+        _run(system, "agent create clara Clara|operations|communication")
+
+        raised = _say(system, "Clara, call Rema", to="Clara")
+        assert raised.succeeded and "Rema" in raised.outcome and "(yes/no)" in raised.outcome
+        assert provider.called == []
+
+        confirmed = _say(system, "yes", to="Clara")
+        assert confirmed.succeeded
+        assert provider.called == ["Rema"]
+        assert confirmed.handled_by == "Clara"
+
+    def test_a_clear_no_cancels_without_ever_sending(self, tmp_path, monkeypatch):
+        system, provider = self._system(tmp_path, monkeypatch)
+        _run(system, "agent create clara Clara|operations|communication")
+
+        _say(system, "Clara, send Kai a message saying hello", to="Clara")
+        cancelled = _say(system, "no, cancel that", to="Clara")
+        assert cancelled.succeeded
+        assert "won't" in cancelled.outcome.lower()
+        assert provider.sent == []
+        sessions = system.manager.own_skills._activity_sessions
+        assert sessions.pending_confirmation("Clara") is None
+
+    def test_ungranted_specialist_is_honestly_refused_and_nothing_is_raised(self, tmp_path, monkeypatch):
+        system, provider = self._system(tmp_path, monkeypatch)
+        _run(system, "agent create clara Clara|operations")
+
+        turn = _say(system, "Clara, send Kai a message saying hello", to="Clara")
+        assert not turn.succeeded
+        assert "communication, which I'm not authorised for" in turn.outcome
+        assert provider.sent == []
+        sessions = system.manager.own_skills._activity_sessions
+        assert sessions.pending_confirmation("Clara") is None
+
+    def test_revoking_mid_confirmation_stops_it_from_executing(self, tmp_path, monkeypatch):
+        system, provider = self._system(tmp_path, monkeypatch)
+        _run(system, "agent create clara Clara|operations|communication")
+
+        raised = _say(system, "Clara, send Kai a message saying hello", to="Clara")
+        assert raised.succeeded and "(yes/no)" in raised.outcome
+
+        _run(system, "capabilities revoke Clara communication")
+
+        confirmed = _say(system, "yes", to="Clara")
+        assert not confirmed.succeeded
+        assert "communication" in confirmed.outcome
+        assert "no longer authorised" in confirmed.outcome
+        assert provider.sent == [], "revoking mid-confirmation must prevent the real send"
+
+        sessions = system.manager.own_skills._activity_sessions
+        assert sessions.pending_confirmation("Clara") is None
+
+        # Alfred himself is untouched by Clara's revocation - he can still
+        # send through the identical provider.
+        alfred_raised = _say(system, "send Kai a message saying hello")
+        assert alfred_raised.succeeded and "(yes/no)" in alfred_raised.outcome
+        _say(system, "yes")
+        assert provider.sent == [("Kai", "saying hello")]
