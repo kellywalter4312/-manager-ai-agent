@@ -1451,6 +1451,32 @@ class SpecialistCapabilities:
 
         return converse
 
+    def _analyze_image_as(self, agent):
+        """The agent's own Brain's real visual reasoning, when its own
+        provider offers it - the specialist counterpart of
+        ``composition.py``'s ``analyze_image=manager_brain.analyze_image``
+        wiring, which only ever reached the Manager. Without this, a
+        specialist granted ``image_analysis`` could never be answered by
+        its own Full Brain even with a vision-capable provider selected
+        for it - only the shared local-vision fallback in
+        ``image_analysis()`` (src/manager/capabilities.py) was ever
+        reachable."""
+        from src.manager.brain import BrainAction, BrainDecision
+
+        def analyze_image(image_bytes, prompt):
+            try:
+                insight = agent.brain.analyze_image(image_bytes, prompt)
+            except Exception as exc:  # noqa: BLE001 - a failure to see degrades, never crashes
+                return BrainDecision.no_view(
+                    reason=f"visual reasoning failed: {type(exc).__name__}", source=agent.name,
+                )
+            if insight.is_useful and insight.summary.strip():
+                return BrainDecision(action=BrainAction.REPORT, reason=insight.summary,
+                                     confidence=insight.confidence, source=insight.source or agent.name)
+            return BrainDecision.no_view(reason=insight.summary, source=insight.source or agent.name)
+
+        return analyze_image
+
     def request_for(self, agent, task) -> "CapabilityRequest":
         from src.manager.capabilities import CapabilityRequest
 
@@ -1468,6 +1494,7 @@ class SpecialistCapabilities:
             user=skills.user if skills is not None else None,
             tools=self.tools_for(agent),
             converse=self._converse_as(agent),
+            analyze_image=self._analyze_image_as(agent),
             recall=agent.memory.recall, forget=agent.memory.forget, retain=agent.retain,
             celebration=getattr(agent, "celebration_reaction", None),
             connections=runtime.connections,

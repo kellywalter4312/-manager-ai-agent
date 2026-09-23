@@ -226,3 +226,60 @@ class LLMSpecialistBrain(SpecialistBrain):
         # the identical stance LLMManagerBrain.converse takes returning
         # action=REPORT unconditionally rather than a graded confidence.
         return Insight(summary=completion.text, confidence=1.0, source=source)
+
+    def analyze_image(self, image_bytes: bytes, prompt: str) -> Insight:
+        """Genuine visual reasoning via this brain's own provider, when -
+        and only when - that provider genuinely offers it. Mirrors
+        ``LLMManagerBrain.analyze_image``'s own honesty rules: a real,
+        additive per-provider method, checked via ``hasattr`` and
+        refused by name rather than silently answering with a
+        fabricated description. Never raises, the same three-outcome
+        shape ``consider()``/``converse()`` already hold themselves to.
+
+        Before this, a specialist's own Brain had no vision-analysis
+        method at all - a specialist granted ``image_analysis`` could
+        never reach a real, vision-capable provider through its own
+        reasoning, only the shared local-vision fallback, even with one
+        configured and selected.
+        """
+        analyze = getattr(self._provider, "analyze_image", None)
+        if analyze is None:
+            return Insight.none(
+                reason=(
+                    f"the configured provider ('{self.provider_name}') cannot "
+                    "perform visual reasoning - no real vision-capable "
+                    "provider is currently selected"
+                ),
+                source=self.name,
+            )
+
+        try:
+            completion = analyze(image_bytes, prompt)
+        except Exception as exc:  # noqa: BLE001 - deliberate boundary catch
+            self._availability = Availability(
+                state=AvailabilityState.UNAVAILABLE,
+                reason=str(exc) or type(exc).__name__,
+                error_type=type(exc).__name__,
+            )
+            logger.exception(
+                "provider '%s' failed while analyzing an image: %s",
+                self.provider_name,
+                type(exc).__name__,
+            )
+            return Insight.none(
+                reason=f"the provider failed: {type(exc).__name__}: {exc}",
+                source=self.name,
+            )
+
+        self._availability = Availability(
+            state=AvailabilityState.AVAILABLE, reason="a call succeeded"
+        )
+
+        if completion.is_empty:
+            return Insight.none(
+                reason="the provider returned no visual analysis",
+                source=f"llm:{completion.model or completion.provider}",
+            )
+
+        source = f"llm:{completion.model or completion.provider}"
+        return Insight(summary=completion.text, confidence=1.0, source=source)

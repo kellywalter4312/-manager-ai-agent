@@ -11286,3 +11286,80 @@ labelling a note Nova kept as Alfred's. Both now credit each write to the
 agent whose memory actually grew (`_memory_writes`; `captured_by`).
 Regression tests: `TestAGrantedSpecialistReadsContentItself` (3) - the
 attribution test fails with the fix reverted.
+
+### 52.63 Representative specialist reachability sweep, and the vision gap it found (2026-09-23)
+
+**Continuation, not a restart.** 52.61/52.62 proved the generic grant/dispatch
+mechanism itself works, end to end, for `create_3d_model` and `read_content`.
+What remained was evidence, not architecture: no task had yet exercised a
+granted specialist's real execution of `clip_video`, `image_analysis` or
+`create_artifact` - the video, image and artifact-generation representatives
+the closure brief named. Swept representatively, not exhaustively, through
+the real served system (`scripts.serve_ui.build_live_system`), real FFmpeg
+and a real PNG.
+
+**Genuine software gap found and repaired.** `SpecialistBrain`
+(`src/agents/brain.py`) declared `consider` and `converse` but no
+`analyze_image` at all - and `SpecialistCapabilities.request_for`
+(`scripts/control_center.py`) never built one into `CapabilityRequest`
+either. `composition.py` wires `analyze_image=manager_brain.analyze_image`
+for Alfred alone (`skills._analyze_image = manager_brain.analyze_image`,
+composition.py:785/997); nothing parallel ever existed for a specialist.
+Consequence: a specialist granted `image_analysis`, even with a genuinely
+vision-capable provider selected as its own Full Brain, could never be
+answered by that reasoning - `request.analyze_image` was always `None`, so
+`image_analysis()` (capabilities.py) fell straight to the shared local-vision
+fallback (`request.assist`, itself fine - a shared, stateless local model,
+correctly reused from the Manager's own skills the same way `tools_for`
+already reuses shared infrastructure) or, with none configured, an honest but
+needlessly pessimistic refusal even when the specialist's own Brain could
+genuinely have answered.
+
+**Repair**, mirroring exactly how `converse` is already handled for a
+specialist:
+- `SpecialistBrain.analyze_image` - a concrete default on the ABC returning
+  an honest `Insight.none("no reasoning capability is configured")`, so every
+  existing `SpecialistBrain` implementation and test double keeps working
+  unchanged (`NullSpecialistBrain` needed no edit).
+- `LLMSpecialistBrain.analyze_image` (`src/agents/llm_brain.py`) - a real
+  override mirroring `LLMManagerBrain.analyze_image`'s own honesty rules
+  exactly: `hasattr` on the provider, never a fabricated description; a
+  failing provider or an empty response each become an honest no-view: never
+  an exception.
+- `SpecialistCapabilities._analyze_image_as(agent)` (`scripts/control_center.py`)
+  - the specialist counterpart of the existing `_converse_as`, converting the
+  Brain's `Insight` to the `BrainDecision` shape `image_analysis()` already
+  expects; wired into `request_for` beside `converse=self._converse_as(agent)`.
+
+**Runtime evidence**, through the real served system, no network reached:
+
+| Check | Result |
+|---|---|
+| Half Brain specialist, image_analysis granted | "Iris, look at this image and tell me what you see" -> honest "I couldn't analyze that image: ..." - never a fabricated description, never silently answered by Alfred |
+| Full Brain specialist, a real vision-capable `LLMProvider` double selected (`specialist_brain="llm"`) | the same request -> the provider's real analysis text, verbatim, with the real uploaded image bytes reaching `provider.analyze_image` (SHA-equal); `iris.brain.analyze_image` is the method that ran - provably not `system.manager.own_skills._analyze_image` |
+| `clip_video` granted to a specialist ("Clara") | a real, FFmpeg-made source clipped through the served conversational floor into a real, distinct `video` artifact owned by `Clara`, linked to the source; FFmpeg-measured duration inside the requested range |
+| `clip_video` revoked | honest refusal naming the capability and the grant command; no `video` artifact produced |
+| `create_artifact` granted to a specialist | the Half-Brain-safe deterministic path (structured `TITLE:`/`SECTION:` text, no model consulted) produced a real `document` artifact (real PDF rendition) owned by the specialist, with the real given title |
+| `create_artifact` not granted | honest refusal naming the capability and the grant command; no artifact produced |
+
+`generate_document` was not separately re-proven for a specialist: it is
+Brain-gated the identical way `create_3d_model` already is (`request.converse
+is None` -> honest refusal), and 52.61/52.62's own `converse` wiring already
+covers that path generically - re-running it would have re-proven a mechanism
+already proven, not found new evidence. The other `CapabilityRequest` fields
+absent from a specialist's request (`recognition`, `schedule`,
+`activity_brain`, `assess_governance`) were checked for the same class of
+defect and found safe: each either carries a real, non-`None` default
+(`Recognition()`, `UserSchedule()`) or is read only by a Manager-only
+capability a specialist can never reach through the generic dispatch in the
+first place (`assess_governance` -> `_governance_check`, read by
+`connected_action`, itself grantable - but `assess()` already treats "no
+`ask_brain` given" and "a real Manager with no reasoning configured" as the
+identical fact, honestly degrading to a conservative `CLARIFY` rather than a
+silent allow or a crash - the Half-Brain-safe floor the module's own
+docstring already commits to).
+
+Regression: `tests/test_specialist_capability_reachability_sweep_2026_09_23.py`
+(6, new). Full suite: **8,169 passed** fixed order, **8,169 passed**
+randomised order (run twice independently). Production `data/` untouched
+(confirmed by mtime sweep). Commit: see the ledger row.

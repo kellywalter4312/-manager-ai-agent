@@ -501,6 +501,30 @@ were not swept").
 | W-TRAIL-01 | The trail credits each memory write to whoever kept it | **BROKEN** - every delegated turn showed "Nova / Memory: 1 record(s) retained" when the record was Alfred's own delegation note (Nova's store unchanged); a note kept by Nova was shown as Alfred's | Per-agent write counts (`trail._memory_writes`); retention acknowledgement grouped by `captured_by` | Trail now `Alfred/Memory` for his delegation note, `Nova/Memory` for her own note - matching the stores' actual growth; regression test fails with the fix reverted | REPAIRED, VERIFIED |
 | W-REPO-01 | Crash recovery without loss | Index zeroed by the crash | Snapshot, index rebuilt from HEAD, `fsck` clean | 14 recovered files intact; nothing had been staged (no objects between `ccec6c4` and the crash) | RESOLVED |
 
+## X. Representative specialist reachability sweep, and the vision gap it found (2026-09-23)
+
+Continuation of section W: W-CAP-02/W-READ-01 proved the generic
+grant/dispatch mechanism itself works; this closes the evidence gap left
+open for the other representative capabilities the closure brief named
+(video, image/content processing, artifact generation), and repairs one
+genuine defect found while doing it. Verified through the **served system**,
+real FFmpeg, a real PNG, no network. ARCHITECTURE.md §52.63. Regression
+protection: `tests/test_specialist_capability_reachability_sweep_2026_09_23.py` (6).
+
+| ID | Requirement | Before | Change | Evidence | Status |
+|---|---|---|---|---|---|
+| X-VIS-01 | A specialist's own Full Brain can perform real visual reasoning when granted `image_analysis`, exactly as Alfred's can | **BROKEN** - `SpecialistBrain` had no `analyze_image` method at all, and `SpecialistCapabilities.request_for` never built one into `CapabilityRequest`; a specialist granted `image_analysis`, even with a vision-capable provider selected as its own Full Brain, could never be answered by that reasoning - only the shared local-vision fallback was ever reachable | `SpecialistBrain.analyze_image` (concrete default, honest no-view - every existing implementation/double unchanged); `LLMSpecialistBrain.analyze_image` (real override, mirrors `LLMManagerBrain.analyze_image`'s honesty rules exactly - `hasattr`-checked, never fabricated); `SpecialistCapabilities._analyze_image_as` wired into `request_for` beside `converse` | Half Brain specialist (Iris, granted `image_analysis`, no vision provider): honest "I couldn't analyze that image" - never a fabricated description, never silently answered by Alfred. Full Brain specialist (a real vision-capable `LLMProvider` double selected as `specialist_brain="llm"`): the provider's real analysis text reached the reply verbatim, the real uploaded image bytes reached `provider.analyze_image` (SHA-equal), and `iris.brain.analyze_image` - not `system.manager.own_skills._analyze_image` - is provably what ran | REPAIRED, VERIFIED |
+| X-CLIP-01 | `clip_video` reaches a granted specialist end to end, real bytes in, real bytes out | Not yet exercised (mechanism proven generic by W-CAP-02, never run for this capability) | None - already worked once granted; evidence only | A real FFmpeg-made source, uploaded to specialist "Clara", clipped through the served conversational floor into a real, distinct `video` artifact owned by `Clara`, linked to the source, FFmpeg-measured duration inside the requested range; revoked -> honest refusal naming the capability, no clip produced | VERIFIED |
+| X-ART-01 | `create_artifact` reaches a granted specialist end to end, Half-Brain-safe | Not yet exercised | None - already worked once granted; evidence only | The deterministic `TITLE:`/`SECTION:` path (no model consulted) produced a real `document` artifact (real PDF rendition) owned by the specialist, with the given title; ungranted -> honest refusal, no artifact produced | VERIFIED |
+| X-GEN-01 | `generate_document` is genuinely Brain-gated for a specialist, the same honest way `create_3d_model` already is | - | Not changed - inspected, not re-run: `request.converse is None` gates it identically, and the `converse` wiring 52.61/52.62 already proved generic covers this path; re-running would re-prove an already-proven mechanism | Traced in source: `generate_document()` gates on `request.converse is None` before anything else, same shape as `create_3d_model`'s own `TestSafetyAndBrains.test_half_brain_specialist_is_honest_about_what_needs_a_model` | VERIFIED (by inspection - shares an already-proven mechanism) |
+| X-FIELD-01 | Every `CapabilityRequest` field a specialist's request omits either defaults safely or belongs to a capability a specialist can never reach | Not swept | Checked `recognition`, `schedule`, `activity_brain`, `assess_governance` against every grantable capability that reads them | `recognition`/`schedule` carry real, non-`None` defaults (`Recognition()`, `UserSchedule()`) - no crash, an honest empty context, consistent with specialists never holding the person's own profile; `activity_brain` is read only by Manager-only milestone/proactive capabilities, unreachable by a specialist through the generic dispatch; `assess_governance` (read by `connected_action`, grantable) - `assess()` already treats "no `ask_brain` given" and "a real Manager with no reasoning configured" as the identical fact, degrading honestly to a conservative `CLARIFY` rather than a silent allow or a crash | VERIFIED - no further defect found |
+
+Full suite: **8,169 passed** fixed order (`-p no:randomly`), **8,169 passed**
+randomised order (run twice independently, both clean; pytest-randomly's own
+per-run seed line is suppressed by `-q` and was not separately captured -
+noted honestly rather than citing a number not actually recorded). Production
+`data/` untouched (mtime sweep). Commit: see the repository log.
+
 ## O. Explicit Scope Boundaries (non-requirements, preserve these)
 
 | ID | Statement | Source | Status |
@@ -528,6 +552,10 @@ were not swept").
 
 **Missing software found 2026-09-21 (section T) - not external, awaiting the owner's priority:**
 - Gmail send - an owner decision first (T-GMAIL-01), then a governed build and the owner's sign-in.
+
+**Resolved 2026-09-23 (this campaign):**
+- X-VIS-01 - a specialist's own Full Brain genuinely reaches real visual reasoning when granted `image_analysis`, not only the shared local-vision fallback; see the row itself for the full repair and evidence.
+- X-CLIP-01/X-ART-01 - `clip_video` and `create_artifact` proven end to end through a granted specialist (previously mechanism-proven by W-CAP-02 but never exercised for these capabilities); see the rows themselves.
 
 **Resolved 2026-09-22 (this campaign):**
 - U-VOICE-05 - ElevenLabs' real speaking-style capability (and a genuine gender-reporting defect found alongside it) now truthfully reported and wired to real voice selection; see the row itself for the full repair and evidence.

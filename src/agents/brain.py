@@ -163,6 +163,22 @@ class SpecialistBrain(ABC):
             reason="no reasoning capability is configured", source=self.name
         )
 
+    def analyze_image(self, image_bytes: bytes, prompt: str) -> Insight:
+        """Genuine visual reasoning over ``image_bytes``, when this
+        brain's own provider offers it - the specialist counterpart of
+        ``ManagerBrain.analyze_image``.
+
+        Concrete, not abstract, and defaulting to an honest "no view" -
+        the same reason ``converse()`` defaults this way, so every
+        existing ``SpecialistBrain`` implementation and test double
+        keeps working unchanged. Only a brain whose provider genuinely
+        supports vision needs to override this (see
+        ``LLMSpecialistBrain.analyze_image``).
+        """
+        return Insight.none(
+            reason="no reasoning capability is configured", source=self.name
+        )
+
 
 class NullSpecialistBrain(SpecialistBrain):
     """The default: no reasoning capability configured.
