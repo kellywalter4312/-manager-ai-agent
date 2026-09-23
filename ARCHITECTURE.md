@@ -11732,3 +11732,133 @@ Regression: 26 new tests appended to
 `tests/test_specialist_capability_reachability_sweep_2026_09_23.py` (43
 total in the file). Full suite: see the ledger row. Production `data/`
 untouched. Commit: see the repository log.
+
+### 52.68 Granted, shown as granted, and impossible to run - plus the address leaking into the work itself (2026-09-23, continued)
+
+**Why this section exists.** 52.67 closed the eight-capability boundary and
+the campaign then moved to a stricter completion standard: a capability is
+complete only when it is implemented, integrated, authorized, *reachable*,
+runtime-working, producing the correct real result, correctly represented
+and regression-verified. Re-inspecting the boundary that had just been
+declared closed against that standard found three more genuine defects. All
+three were invisible to the tests that already existed, because those tests
+exercised the handler rather than asking whether anything could reach the
+handler, or what the handler was actually handed.
+
+---
+
+**Defect 1 - `knowledge` and `live_information` were grantable, shown as
+GRANTED, and undispatchable by any specialist.**
+
+`SpecialistCapabilities.__call__` selected a capability by asking each
+reachable one's `claims` predicate. That is the first half of
+`select_capability`, which the Manager himself uses; the second half is word
+overlap among capabilities that declare `scoreable`. Two grantable
+capabilities have no `claims` predicate *on purpose* - "is this asking about
+something current?" has no reliable shape, so overlap is the only way either
+is ever selected, for anyone.
+
+The consequence was total for specialists. The owner could run
+`capabilities grant Nova live_information`; `capabilities access Nova`
+listed it under GRANTED; and no request could ever reach it. Measured
+through the real served system, with a real `LiveInfoProvider` registered at
+the real factory seam:
+
+    Alfred: "what is happening in the news today"
+        -> capability=live_information, provider queried: ["what is happening in the news today"]
+
+    Nova (granted live_information AND knowledge), same words:
+        -> capability=None, provider queried: []   <- nothing, ever
+
+This is the exact failure mode the standard names: registered, authorized,
+represented as available, and not reachable. An earlier sweep row had
+recorded `knowledge`/`live_information` as verified *by inspection* on the
+grounds that they share `generate_document`'s tool-plus-`converse` shape.
+They do - and it made no difference, because nothing could call them.
+
+**Repair.** Selection now honours what the registry already declares about
+each capability, exactly as `select_capability` does for the Manager: claims
+first, then word overlap **among `scoreable` capabilities only**
+(`SpecialistCapabilities._best_scored`). It returns `None` when nothing
+scores, rather than falling back to `open_conversation`, because "nothing
+claimed it" must still leave the specialist doing its own work.
+
+**The protection this replaced is kept, and is now provable.** The
+claims-only rule existed so "a grant cannot pull a specialist's own domain
+work away from it". Almost every capability sets `scoreable=False` precisely
+because its declared words ("model", "image", "call") also occur in ordinary
+domain talk, and none of those can be selected by overlap here - verified
+live: Nova, granted `create_3d_model`, asked "tell me about the models you
+have made", built nothing.
+
+Better, the change is provably inert for anyone who was granted neither
+capability. Every `every_agent` capability is either reached through its own
+route (`own_path`) or is not `scoreable`, so for an agent granted nothing the
+scoreable set is empty and dispatch is byte-identical to before. That is
+pinned by a test rather than argued, so a future capability cannot widen it
+silently.
+
+---
+
+**Defect 2 - `media_production` read the same sentence two different ways,
+four lines apart.** The handler already computed
+`working = _strip_vocative(request.task.description)` to decide *which*
+operation was being asked for - and then handed the tool
+`request.task.description`, raw. `MediaProductionTool._illustrate` passes its
+content straight to the image generator as the prompt and saves it as the
+artifact's title; `_narrate` speaks it aloud. So:
+
+    "Nova, make me an image of a cat sitting on a fence"
+        -> the image generator was asked to draw
+           "Nova, make me an image of a cat sitting on a fence"
+        -> artifact titled the same
+
+A specialist asked by name to make a picture produced a picture generated
+from a prompt containing its own name, and narration would have read the
+address out loud. Repaired by passing `working` - the text the function had
+already computed and then ignored.
+
+---
+
+**Defect 3 - the same leak in `general_assistance` and `live_information`.**
+`_CODE_REQUEST_VERB` is anchored, so with a name in front of it nothing was
+stripped at all:
+
+    "Nova, write a python function that reverses a list"
+        -> real code artifact saved in the owner's coding workspace,
+           titled "Nova, write a python function that reverses a list"
+
+and the model was handed a prompt that opened by addressing an agent the
+model is not. The same line reached `web_search` as the literal query
+"Nova, research ...", and `live_information`'s own query was the whole
+utterance too.
+
+Repaired with one named helper, `_asked(request)`, which draws the
+distinction explicitly: conversation legitimately keeps the whole utterance -
+who is being spoken to is part of what was said, and `open_conversation`
+still passes it to the Brain unchanged - but when a handler uses the
+request's words as *the thing itself*, the name of the agent being asked is
+not part of that thing.
+
+---
+
+**Runtime evidence**, real served system, real local engines, no vendor
+reached:
+
+| Check | Before | After |
+|---|---|---|
+| Nova granted `live_information`, "what is happening in the news today" | `capability=None`, provider never called | `capability=live_information`, provider called with `"what is happening in the news today"`, honest Half-Brain refusal to synthesise |
+| Alfred, identical words | already worked | unchanged - both now reach it identically |
+| Ungranted specialist, identical words | provider never called | provider never called |
+| Revoked mid-session | - | next request no longer reaches it, provider not called |
+| Nova granted `create_3d_model`, "tell me about the models you have made" | not pulled in | still not pulled in, nothing built |
+| Nova granted `media_production`, "make me an image of a cat sitting on a fence" | artifact titled `'Nova, make me an image of a cat sitting on a fence'` | artifact titled `'make me an image of a cat sitting on a fence'` |
+| Nova granted `general_assistance`, "write a python function that reverses a list" | artifact titled `'Nova, write a python function...'` | artifact titled `'A python function that reverses a list'` |
+| Same, research shape | query carried the address | provider received `"research how heat pumps work in winter"` |
+
+Regression: 9 new tests appended to
+`tests/test_specialist_capability_reachability_sweep_2026_09_23.py` (52
+total). Focused re-run of capability authorisation, grants, Control Center
+truth, creative media, AI media generation, knowledge/research and
+specialist registry/conversation: 302 passed. Full suite: see the ledger
+row. Production `data/` untouched.

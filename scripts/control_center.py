@@ -1362,8 +1362,31 @@ class SpecialistCapabilities:
     Precedence, the same the Manager's own execute() has: a message that
     speaks of ending one's life is answered with care first, whichever agent
     was addressed; then an open confirmation or clarification this agent
-    raised is resolved; then claims. Word-overlap scoring is never used here,
-    so a grant cannot pull a specialist's own domain work away from it.
+    raised is resolved; then claims; then - only for a capability that
+    declares itself selectable that way (``scoreable``) - word overlap.
+
+    **Why scoring is here at all, and why it is safe.** It used to be absent
+    entirely, so that "a grant could not pull a specialist's own domain work
+    away from it". That protection is real and is kept: almost every
+    capability sets ``scoreable=False`` precisely because its declared words
+    ("model", "image", "call") also occur in ordinary domain talk, and no
+    such capability can be selected by overlap here. But two grantable
+    capabilities - ``knowledge`` and ``live_information`` - deliberately have
+    no ``claims`` predicate at all, because "is this asking about something
+    current?" has no reliable shape; word overlap is how the Manager himself
+    selects them. Dispatching on ``claims`` alone therefore made those two
+    *undispatchable for every specialist*: the owner could grant them,
+    ``capabilities access`` showed GRANTED, and the capability could never
+    run. Measured (2026-09-23): Alfred answering "what is happening in the
+    news today" reached the real provider; Nova, granted both, reached
+    nothing at all.
+
+    So selection now honours the registry's own statement about how each
+    capability may be chosen, exactly as ``select_capability`` does for the
+    Manager - claims first, then overlap among ``scoreable`` capabilities
+    only. The set that can be reached this way is, by construction, the
+    capabilities the owner explicitly granted that also asked to be selected
+    this way.
 
     Capabilities an agent reaches through its own route (``own_path``: its
     voice, recordings, task board, conversation floor, workspace movement)
@@ -1423,6 +1446,28 @@ class SpecialistCapabilities:
         """
         found = self._last_selected.get(agent_name)
         return found[1] if found is not None and found[0] == task_id else None
+
+    def _best_scored(self, task, reachable) -> "object | None":
+        """The best word-overlap match among the capabilities this agent may
+        use that declare themselves selectable that way, or None.
+
+        The scoring half of ``select_capability`` (src/manager/capabilities.py),
+        applied to this agent's own reachable set - never a second scoring
+        rule. Unlike that function this returns None rather than falling back
+        to ``open_conversation``: nothing claimed and nothing scored means the
+        specialist does its own work, which is this handler's whole contract.
+        """
+        from src.manager.capabilities import OPEN_CONVERSATION, tokenize
+
+        tokens = tokenize(task.description)
+        best, best_score = None, 0
+        for capability in sorted(reachable.values(), key=lambda c: c.name):
+            if capability.own_path or capability is OPEN_CONVERSATION or not capability.scoreable:
+                continue
+            score = capability.score(tokens)
+            if score > best_score:
+                best, best_score = capability, score
+        return best
 
     def unauthorised_reason(self, agent, task) -> "str | None":
         """When a registered capability this agent may not use claims the
@@ -1587,6 +1632,8 @@ class SpecialistCapabilities:
              and c.claims(task, _agent_names(self._manager))),
             None,
         )
+        if capability is None:
+            capability = self._best_scored(task, reachable)
         if capability is None:
             return None
         # Recorded before it runs, so a capability that fails is still named

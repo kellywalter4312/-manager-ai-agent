@@ -46,6 +46,8 @@ import src.services.credentials.account_store_file as account_store_file_module
 from scripts.exchange import exchange
 from src.config.settings import Settings
 from src.providers.base import Completion, LLMProvider
+from src.providers.live_info import LiveInfoProvider, LiveInfoResult
+from src.providers.live_info import utc_now as live_info_utc_now
 from src.providers.translation.factory import build_translator
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -1027,3 +1029,189 @@ class TestTheTrailNamesTheCapabilityASpecialistActuallyRan:
         assert [(e.actor, e.capability) for e in load_action_log(log)] == [
             ("Clara", "communication"), ("Alfred", "communication"),
         ]
+
+
+class _RecordingLiveInfo(LiveInfoProvider):
+    """A real LiveInfoProvider double registered through the actual
+    ``live_info_factory._BUILDERS`` seam - it records the query it is
+    genuinely handed, which is the only way to see what the capability
+    actually searched for."""
+
+    def __init__(self) -> None:
+        self.queries: list[str] = []
+
+    @property
+    def name(self) -> str:
+        return "closure_search_probe"
+
+    def fetch(self, query: str) -> LiveInfoResult:
+        self.queries.append(query)
+        return LiveInfoResult(
+            query=query,
+            content="Heat pumps move warmth by compressing a refrigerant. [source: probe]",
+            source="closure_search_probe",
+            retrieved_at=live_info_utc_now(),
+        )
+
+
+class TestWhatWasAskedIsNotWhoWasAsked:
+    """``translation_request``'s repair, found a second time in
+    ``general_assistance``.
+
+    Conversation legitimately keeps the whole utterance - who is being
+    spoken to is part of what was said. But when a handler takes the
+    request's own words and uses them as the *thing itself* - the query to
+    search for, the prompt to write code from, the title to save it under -
+    the name of the agent being asked is not part of that thing.
+    ``_CODE_REQUEST_VERB`` is anchored, so with a name in front of it
+    nothing was stripped at all.
+    """
+
+    @pytest.mark.skipif(not LOCAL_MODEL.is_file(), reason="the real local model this machine has installed")
+    def test_a_saved_code_artifact_is_titled_by_the_ask_not_the_address(self, tmp_path, monkeypatch):
+        _sandbox(tmp_path, monkeypatch)
+        system = su.build_live_system(_settings(tmp_path, media="local", local_assist="local"))
+        _run(system, "agent create nova Nova|general work|general_assistance")
+
+        turn = _say(system, "Nova, write a python function that reverses a list", to="Nova")
+        assert turn.succeeded, turn.outcome
+        code = [a for a in system.runtime.artifacts.all() if a.type == "code"]
+        assert len(code) == 1 and code[0].owner_agent == "Nova"
+        # Before the repair this read "Nova, write a python function that
+        # reverses a list" - the agent's name saved as the title of the work.
+        assert code[0].latest.title == "A python function that reverses a list"
+
+    def test_the_search_query_carries_the_ask_not_the_address(self, tmp_path, monkeypatch):
+        from src.providers import live_info_factory
+
+        probe = _RecordingLiveInfo()
+        monkeypatch.setitem(live_info_factory._BUILDERS, "closure_search_probe", lambda settings: probe)
+        _sandbox(tmp_path, monkeypatch)
+        system = su.build_live_system(_settings(tmp_path, live_info_provider="closure_search_probe"))
+        _run(system, "agent create nova Nova|general work|general_assistance")
+
+        turn = _say(system, "Nova, research how heat pumps work in winter", to="Nova")
+        # The real provider was genuinely reached, with the ask alone.
+        assert probe.queries == ["research how heat pumps work in winter"]
+        # Half Brain: real evidence acquired, reasoning over it honestly refused.
+        assert not turn.succeeded
+        assert "found sources but couldn't properly reason" in turn.outcome
+
+    def test_the_manager_addressed_by_name_is_treated_identically(self, tmp_path, monkeypatch):
+        from src.providers import live_info_factory
+
+        probe = _RecordingLiveInfo()
+        monkeypatch.setitem(live_info_factory._BUILDERS, "closure_search_probe", lambda settings: probe)
+        _sandbox(tmp_path, monkeypatch)
+        system = su.build_live_system(_settings(tmp_path, live_info_provider="closure_search_probe"))
+
+        _say(system, "Alfred, research how heat pumps work in winter")
+        assert probe.queries == ["research how heat pumps work in winter"]
+
+
+class TestAGrantedCapabilityThatIsSelectedByWordOverlapIsActuallyDispatchable:
+    """``knowledge`` and ``live_information`` deliberately have no ``claims``
+    predicate - "is this asking about something current?" has no reliable
+    shape, so word overlap is how the Manager himself selects them.
+
+    ``SpecialistCapabilities.__call__`` dispatched on ``claims`` alone, which
+    made both of them undispatchable for *every* specialist: the owner could
+    grant them, ``capabilities access`` reported GRANTED, and the capability
+    could never run. Neither an earlier by-inspection sweep nor any test
+    caught it, because both looked at the handler rather than at whether
+    anything could reach the handler.
+    """
+
+    def _system(self, tmp_path, monkeypatch):
+        from src.providers import live_info_factory
+
+        probe = _RecordingLiveInfo()
+        monkeypatch.setitem(live_info_factory._BUILDERS, "closure_search_probe", lambda settings: probe)
+        _sandbox(tmp_path, monkeypatch)
+        system = su.build_live_system(_settings(
+            tmp_path, media="local", live_info_provider="closure_search_probe",
+        ))
+        return system, probe
+
+    def test_a_granted_specialist_reaches_the_real_live_information_provider(self, tmp_path, monkeypatch):
+        system, probe = self._system(tmp_path, monkeypatch)
+        _run(system, "agent create nova Nova|current affairs|live_information")
+
+        turn = _say(system, "Nova, what is happening in the news today", to="Nova")
+        assert turn.handled_by == "Nova"
+        assert turn.capability == "live_information"
+        # The real provider was genuinely reached, as itself, with the ask.
+        assert probe.queries == ["what is happening in the news today"]
+        # Half Brain: real evidence acquired, synthesis honestly refused.
+        assert not turn.succeeded
+        assert "found current information but couldn't properly reason" in turn.outcome
+
+    def test_alfred_and_a_granted_specialist_now_reach_it_identically(self, tmp_path, monkeypatch):
+        system, probe = self._system(tmp_path, monkeypatch)
+        _run(system, "agent create nova Nova|current affairs|live_information")
+
+        alfred = _say(system, "what is happening in the news today")
+        probe.queries.clear()
+        nova = _say(system, "Nova, what is happening in the news today", to="Nova")
+        assert alfred.capability == nova.capability == "live_information"
+        assert probe.queries == ["what is happening in the news today"]
+
+    def test_an_ungranted_specialist_never_reaches_the_provider(self, tmp_path, monkeypatch):
+        system, probe = self._system(tmp_path, monkeypatch)
+        _run(system, "agent create iris Iris|current affairs")
+
+        turn = _say(system, "Iris, what is happening in the news today", to="Iris")
+        assert not turn.succeeded
+        assert probe.queries == []
+
+    def test_revoking_it_stops_the_next_request(self, tmp_path, monkeypatch):
+        system, probe = self._system(tmp_path, monkeypatch)
+        _run(system, "agent create kai Kai|current affairs|live_information")
+        assert _say(system, "Kai, what is happening in the news today", to="Kai").capability == "live_information"
+
+        probe.queries.clear()
+        _run(system, "capabilities revoke Kai live_information")
+        turn = _say(system, "Kai, what is happening in the news today", to="Kai")
+        assert turn.capability != "live_information"
+        assert probe.queries == []
+
+    def test_a_capability_that_is_not_scoreable_is_still_never_pulled_in_by_overlap(self, system):
+        """The protection the claims-only rule existed to give, kept intact:
+        almost every capability sets ``scoreable=False`` precisely because its
+        declared words also occur in ordinary domain talk."""
+        _run(system, "agent create nova Nova|3D modelling|create_3d_model")
+
+        turn = _say(system, "Nova, tell me about the models you have made", to="Nova")
+        assert turn.capability != "create_3d_model"
+        # Nothing was built - the grant did not pull her own domain talk in.
+        assert not [a for a in system.runtime.artifacts.all() if a.type == "model3d"]
+
+    def test_the_repair_can_only_ever_affect_an_explicitly_granted_capability(self):
+        """The property that bounds the change, pinned so a future capability
+        cannot widen it silently.
+
+        ``_best_scored`` only ever considers capabilities in an agent's
+        *reachable* set that declare ``scoreable`` and have no ``own_path``.
+        Every ``every_agent`` capability is either reached through its own
+        route or is not scoreable, so for an agent granted nothing, that set
+        is empty and dispatch is byte-identical to the claims-only rule this
+        replaced. The entire blast radius is the two grantable capabilities
+        that asked to be selected by word overlap.
+        """
+        from src.control_center.capability_access import EVERY_AGENT, GRANTABLE, authority_of
+        from src.manager.capabilities import MANAGER_CAPABILITIES
+
+        scoreable_without_own_route = {
+            name for name, capability in MANAGER_CAPABILITIES.items()
+            if authority_of(capability) == EVERY_AGENT and capability.scoreable and not capability.own_path
+        }
+        assert scoreable_without_own_route == set(), (
+            "an every_agent capability became selectable by word overlap without its own "
+            "route - that widens specialist dispatch for agents nobody granted anything"
+        )
+
+        grantable_and_scoreable = {
+            name for name, capability in MANAGER_CAPABILITIES.items()
+            if authority_of(capability) == GRANTABLE and capability.scoreable
+        }
+        assert grantable_and_scoreable == {"knowledge", "live_information"}

@@ -1184,7 +1184,9 @@ def general_assistance(request: CapabilityRequest) -> TaskResult:
         # code artifact - never by the tool itself.
         return _write_code(request, capability)
 
-    outcome = request.tools.invoke(capability.tool, {"query": request.task.description})
+    # What to search for is the ask itself, never the name of whoever was
+    # asked - see ``_asked`` for the runtime evidence.
+    outcome = request.tools.invoke(capability.tool, {"query": _asked(request)})
     if not outcome.ok:
         return TaskResult.failure(
             request.task,
@@ -1233,21 +1235,47 @@ def _code_title(text: str) -> str:
     return (words[:1].upper() + words[1:])[:80] or "Code"
 
 
+def _asked(request: CapabilityRequest) -> str:
+    """What was asked for, with the address to whoever was asked removed.
+
+    The distinction this draws is the one ``_strip_vocative`` already exists
+    to draw, applied to *content* rather than to recognition. Conversation
+    legitimately keeps the whole utterance - who is being spoken to is part
+    of what was said, and ``open_conversation`` passes it to the Brain
+    unchanged. But when a handler takes the request's own words and uses
+    them as the *thing itself* - the query to search for, the prompt to
+    write code from, the title to save it under - the name of the agent
+    being asked is not part of that thing.
+
+    Found at runtime, 2026-09-23, immediately after the identical defect was
+    repaired in ``translation_request``: "Nova, write a python function that
+    reverses a list" saved a real code artifact into the owner's coding
+    workspace titled *"Nova, write a python function that reverses a list"*
+    - ``_CODE_REQUEST_VERB`` is anchored, so with a name in front of it
+    nothing was stripped at all - and handed the model a prompt that opened
+    by addressing an agent the model is not. The same line reached
+    ``web_search`` as the literal query "Nova, research ...". Alfred
+    addressed by name was affected identically.
+    """
+    return _strip_vocative(request.task.description)
+
+
 def _write_code(request: CapabilityRequest, capability: GeneralCapability) -> TaskResult:
-    language = _code_language(request.task.description)
+    asked = _asked(request)
+    language = _code_language(asked)
     written, brain = None, None
     if request.converse is not None:
         decision = request.converse(
             Task(description=(
                 f"Write {language} code for this request. Reply with only the code in one fenced code block.\n\n"
-                f"{request.task.description}"
+                f"{asked}"
             )),
             tuple(_recent_conversation_notes(request)),
         )
         if decision.is_decided and decision.reason.strip():
             written, brain = decision.reason, decision.source
     if written is None and request.assist is not None:
-        text = request.assist.write_code(request.task.description, language=language)
+        text = request.assist.write_code(asked, language=language)
         if text:
             written, brain = text, "local_assist"
     if written is None:
@@ -1259,7 +1287,7 @@ def _write_code(request: CapabilityRequest, capability: GeneralCapability) -> Ta
         )
     fenced = _FENCED_CODE.search(written)
     source = (fenced.group(1) if fenced else written).strip("\n")
-    title = _code_title(request.task.description)
+    title = _code_title(asked)
     attribution = ""
     if brain == "local_assist":
         from src.providers.local_assistant import ATTRIBUTION
@@ -1268,7 +1296,7 @@ def _write_code(request: CapabilityRequest, capability: GeneralCapability) -> Ta
     block = f"```{language}\n{source}\n```"
     payload = {"handled_by": "general_assistance", "kind": "coding", "tool": capability.tool, "brain": brain, "language": language}
     outcome = request.tools.invoke(capability.tool, {"operation": "save", "content": json.dumps({
-        "title": title, "language": language, "source": source, "request": request.task.description,
+        "title": title, "language": language, "source": source, "request": asked,
     })})
     if not outcome.ok:
         return TaskResult.success(
@@ -2751,7 +2779,11 @@ def live_information(request: CapabilityRequest) -> TaskResult:
             ),
         )
 
-    outcome = request.tools.invoke("live_information", {"query": request.task.description})
+    # What to look up is the ask itself, never the name of whoever was
+    # asked - the identical distinction ``_asked`` above draws, and the one
+    # ``media_production`` below already drew for its own operation
+    # detection while still handing the raw utterance to the tool.
+    outcome = request.tools.invoke("live_information", {"query": _asked(request)})
     if not outcome.ok:
         return TaskResult.failure(
             request.task,
@@ -4137,8 +4169,16 @@ def media_production(request: CapabilityRequest) -> TaskResult:
             ),
         )
 
+    # ``working`` - the address already removed, four lines above, to decide
+    # which operation this is. Handing the tool the *raw* utterance instead
+    # was a real, visible defect: ``_illustrate`` passes its content straight
+    # to the image generator as the prompt and saves it as the artifact
+    # title, so "Nova, make me an image of a cat" asked the generator to draw
+    # "Nova, make me an image of a cat" and titled it that; ``_narrate``
+    # would have spoken the address aloud. One function, two readings of the
+    # same text - now one.
     outcome = request.tools.invoke(
-        "media_production", {"operation": operation, "content": request.task.description}
+        "media_production", {"operation": operation, "content": working}
     )
     if not outcome.ok:
         return TaskResult.failure(
