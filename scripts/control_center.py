@@ -1526,15 +1526,39 @@ class SpecialistCapabilities:
             # Safety, not authority: care and a pointer to real help, from
             # whichever agent the person was speaking to.
             return live["personal_guidance"].handle(self.request_for(agent, task))
-        sessions = getattr(self._manager.own_skills, "_activity_sessions", None)
-        if sessions is not None and (
-            sessions.pending_confirmation(agent.name) is not None
-            or sessions.pending_clarification(agent.name) is not None
-        ):
-            resolved = guided_interaction_response(self.request_for(agent, task))
-            if resolved is not None:
-                return resolved
         reachable = self.reachable(agent)
+        sessions = getattr(self._manager.own_skills, "_activity_sessions", None)
+        if sessions is not None:
+            confirmation = sessions.pending_confirmation(agent.name)
+            if confirmation is not None:
+                # A pending confirmation can execute a real consequential
+                # action on a clear "yes" (guided_interaction_response,
+                # below) through a completely separate code path from the
+                # ordinary reachable()/claims() dispatch this method
+                # otherwise gates every request with. Re-check that this
+                # agent is still authorised for the capability that raised
+                # it before letting that happen - the identical defensive
+                # re-check _execute_connected_operation already applies to
+                # *tool* permission (always present; manager_tools() builds
+                # every tool unconditionally), extended here to *capability*
+                # authorisation, which is the layer that actually gates who
+                # may reach it. Without this, revoking connected_action or
+                # communication from a specialist while a confirmation was
+                # still open did not stop it - the next "yes" still
+                # attempted the real call.
+                capability_name = "connected_action" if confirmation.connection else "communication"
+                if capability_name not in reachable:
+                    sessions.clear_confirmation(agent.name)
+                    return TaskResult.failure(
+                        task, agent.name,
+                        f"That '{capability_name}' action is no longer authorised for me - the "
+                        "owner revoked it while I was waiting to hear back, so nothing was "
+                        "executed and nothing is pending any more.",
+                    )
+            if confirmation is not None or sessions.pending_clarification(agent.name) is not None:
+                resolved = guided_interaction_response(self.request_for(agent, task))
+                if resolved is not None:
+                    return resolved
         capability = next(
             (c for c in sorted(reachable.values(), key=lambda c: c.name)
              if not c.own_path and c.claims is not None and c is not OPEN_CONVERSATION

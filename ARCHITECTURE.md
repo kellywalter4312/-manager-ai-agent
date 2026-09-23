@@ -11418,3 +11418,73 @@ Regression: 2 new tests appended to
 in the file). Full suite: **8,171 passed** fixed order, **8,171 passed**
 randomised order. Production `data/` untouched (confirmed by mtime sweep).
 Commit: see the ledger row.
+
+### 52.65 connected_action through a specialist, and the revocation-mid-confirmation gap it found (2026-09-23, continued)
+
+**The last structurally distinct grantable capability.** Every capability
+52.63/52.64 proved was a document/media/vision shape (tool call, optionally
+Brain-assisted). `connected_action` is genuinely different: it raises a real
+`PendingConfirmation` for a consequential operation and only executes on a
+separate, later "yes" - a two-turn state machine, never a single-call
+dispatch - so it needed its own proof rather than assumed covered.
+
+**Genuine defect found and repaired.**
+`SpecialistCapabilities.__call__` (`scripts/control_center.py`) resolves a
+pending confirmation through `guided_interaction_response` *before* the
+ordinary `reachable(agent)`/`capability.claims()` authorisation dispatch
+every other request goes through - a separate code path, entered whenever
+`sessions.pending_confirmation(agent.name)` is not `None`, regardless of
+whether the agent is still authorised for anything. A clear "yes" on that
+path reaches `_execute_connected_operation`, which re-checks only *tool*
+permission (`request.tools.permits(tool_name)`) - and the specialist's
+`ToolSet` (`manager_tools()`) builds every tool unconditionally for every
+agent; only the *capability* layer is supposed to gate who may reach it,
+and the confirmation-resolution path never consulted that layer at all.
+
+**Consequence, proven live before the fix:** granting `connected_action` to
+a specialist, having her raise a confirmation ("write the item" on a
+declared, sandboxed local service), then *revoking* `connected_action` from
+her while that confirmation was still open, did not stop it - the next
+"yes" still attempted a real `urllib.request.urlopen` call against the
+declared service (observed directly: `RuntimeError: could not reach
+'fixturesvc': <urlopen error ... actively refused it>` - a genuine network
+attempt, failing only because nothing was listening at
+`127.0.0.1:9199`, never an authorisation refusal). The same gap applies to
+`communication`'s send/call confirmations for a specialist, sharing the
+identical resolver.
+
+**Repair.** `SpecialistCapabilities.__call__` now computes `reachable(agent)`
+before checking for a pending confirmation, and - specifically for a pending
+*confirmation* (never a clarification, which records a plain fact through
+no grantable capability at all) - checks whether the capability that raised
+it (`"connected_action"` when `confirmation.connection` is set, else
+`"communication"`) is still in that reachable set. If not, the stale
+confirmation is cleared and the specialist honestly refuses, naming the
+capability, rather than either executing it or leaving it dangling
+indefinitely. Mirrors the existing defensive-re-check pattern
+`_execute_connected_operation`'s own docstring already states for tool
+permission ("this may run on a later turn than the one that raised the
+confirmation"), extended to the layer that actually governs access.
+
+**Runtime evidence**, through the real served system, a real declared local
+service (`services fixturesvc declare http://127.0.0.1:9199 ...`), real
+FFmpeg untouched, no genuine network reached in any passing test:
+
+| Check | Result |
+|---|---|
+| A granted specialist raises and executes a real confirmation | Clara: "check my connected account: write the item" -> a real description naming the operation, ending "(yes/no)"; "yes" (with `urlopen` stubbed, matching the existing connection-integration test's own convention) -> real execution, the stubbed service's own `id` in the reply, attributed to Clara |
+| A clear "no" cancels without ever reaching the service | "no, don't" -> "Okay, I won't write_item on fixturesvc." with no `urlopen` stub present at all - a real attempt would have raised; nothing pending afterward |
+| Revoking mid-confirmation stops it | Confirmation raised, then `capabilities revoke Clara connected_action`, then "yes" (still no `urlopen` stub) -> honest refusal naming `connected_action` as "no longer authorised" - no real attempt made, nothing left pending (`ActivitySessions.pending_confirmation("Clara")` is `None` afterward) |
+| Alfred untouched by Clara's revocation | Immediately after, Alfred raises the identical operation on the identical connection normally - the fix is scoped to the confirmation's own agent, not a system-wide freeze |
+| Ungranted specialist refused before anything is raised | A specialist never granted `connected_action` -> the standard "which I'm not authorised for" refusal; nothing pending |
+
+Regression: 4 new tests appended to
+`tests/test_specialist_capability_reachability_sweep_2026_09_23.py` (12
+total in the file); `tests/test_natural_language_live_connection_integration.py`,
+`tests/test_governance.py`, `tests/test_connected_action_operation_selection.py`,
+`tests/test_stage16_connections.py`, `tests/test_capability_authorization_and_defined_specialists.py`
+and `tests/test_agentic_objective_loop.py` re-run clean (211 passed) to
+confirm Alfred's own confirmation/governance behaviour is unchanged. Full
+suite: **8,175 passed** fixed order, **8,175 passed** randomised order.
+Production `data/` untouched (confirmed by mtime sweep). Commit: see the
+ledger row.

@@ -506,11 +506,12 @@ were not swept").
 Continuation of section W: W-CAP-02/W-READ-01 proved the generic
 grant/dispatch mechanism itself works; this closes the evidence gap left
 open for the other representative capabilities the closure brief named
-(video, image/content processing, artifact generation, document revision),
-and repairs one genuine defect found while doing it. Verified through the
-**served system**, real FFmpeg, a real PNG, no network. ARCHITECTURE.md
-§52.63-§52.64. Regression protection:
-`tests/test_specialist_capability_reachability_sweep_2026_09_23.py` (8).
+(video, image/content processing, artifact generation, document revision,
+consequential connected actions), and repairs two genuine defects found
+while doing it. Verified through the **served system**, real FFmpeg, a real
+PNG, a real declared local service, no genuine network reached in any
+passing test. ARCHITECTURE.md §52.63-§52.65. Regression protection:
+`tests/test_specialist_capability_reachability_sweep_2026_09_23.py` (12).
 
 | ID | Requirement | Before | Change | Evidence | Status |
 |---|---|---|---|---|---|
@@ -522,10 +523,12 @@ and repairs one genuine defect found while doing it. Verified through the
 | X-REV-01 | `revise_artifact` reaches a granted specialist end to end, Half-Brain-safe deterministic path | Not yet exercised | None - already worked once granted; evidence only | Clara (granted `create_artifact,revise_artifact`) creates a handout, then "edit the handout: replace cedar boards with treated pine." -> `Artifact revised`, same artifact id, version 1 -> 2, the real `.txt` rendition shows the replacement applied | VERIFIED |
 | X-REV-02 | A specialist cannot revise another specialist's artifact merely by knowing its id | Not yet exercised (ownership check exists in `ArtifactProductionTool` since it was built, never proven live for two specialists) | None - the existing `owner_agent` check in `_existing_owned`/`_owned`/`_get` already enforces this; evidence only | Nova (granted `revise_artifact`, no artifacts of her own) given Clara's real artifact id -> honest "I couldn't find that handout to revise" (the identical unowned-id message); Clara's artifact provably unchanged (version still 1, original text still present) | VERIFIED |
 | X-SWEEP-02 | `record_this`, `image_transform`, `media_production`, `knowledge`, `live_information` - each checked for the same class of defect X-VIS-01 was | Not swept | None found needing repair | `record_this` uses only `request.retain` (W-MEM-01's already-proven mechanism); its `MemoryCategory.RECORDING` value matches `SpecialistMemoryCategory.RECORDING` exactly, confirmed by reading both enums. `image_transform`/`media_production` are tool-only (or tool + the already-proven `converse` fallback), the identical shape `clip_video`/`create_artifact` already proved live - no field they read is one `request_for` omits. `knowledge`/`live_information` are tool-plus-`converse`, the identical shape `generate_document` (X-GEN-01) already covers; `knowledge_inquiry`'s `request.recognition.notes()` call traced and confirmed safe (non-`None` default) | VERIFIED (by inspection) - no defect found |
+| X-CONN-01 | `connected_action` reaches a granted specialist end to end - raise, confirm/execute, cancel | Not yet exercised | None - already worked once granted; evidence only | Clara (granted `connected_action`), against a real declared local service (`services fixturesvc declare http://127.0.0.1:9199 ...`): "check my connected account: write the item" -> a real confirmation naming the operation; "yes" (with `urlopen` stubbed) -> real execution, attributed to Clara; separately, "no" -> cancelled with no `urlopen` stub present at all (a real attempt would have raised); ungranted -> the standard authorisation refusal, nothing raised | VERIFIED |
+| X-CONN-02 | Revoking a capability while its confirmation is still pending stops it from executing - never a usable stray confirmation | **BROKEN** - `SpecialistCapabilities.__call__` resolved a pending confirmation (which can execute a real consequential action on "yes") through a separate code path entered *before* the ordinary `reachable(agent)`/`capability.claims()` authorisation dispatch; `_execute_connected_operation`'s own re-check is *tool* permission only (always present - `manager_tools()` builds every tool unconditionally), never *capability* authorisation. Proven live before the fix: granting `connected_action`, raising a confirmation, then revoking it mid-flight, then saying "yes" - the next "yes" still attempted a real `urllib.request.urlopen` call against the declared service (`RuntimeError: could not reach 'fixturesvc': <urlopen error ... actively refused it>` - a genuine network attempt, failing only because nothing was listening, never an authorisation refusal) | `SpecialistCapabilities.__call__` now computes `reachable(agent)` before checking for a pending confirmation, and - specifically for a pending *confirmation* (`"connected_action"` when `confirmation.connection` is set, else `"communication"`) - refuses and clears it if that capability is no longer reachable, rather than letting `guided_interaction_response` resolve it | Confirmation raised, `capabilities revoke Clara connected_action`, then "yes" (still no `urlopen` stub) -> honest refusal naming `connected_action` as "no longer authorised" - no real attempt made; `ActivitySessions.pending_confirmation("Clara")` is `None` afterward; Alfred immediately raises the identical operation normally right after, proving the fix is scoped to Clara's own revocation, not a system-wide freeze | REPAIRED, VERIFIED |
 
-Full suite (this round): **8,171 passed** fixed order, **8,171 passed**
+Full suite (this round): **8,175 passed** fixed order, **8,175 passed**
 randomised order. Production `data/` untouched (mtime sweep). ARCHITECTURE.md
-§52.64. Commit: see the repository log.
+§52.64-§52.65. Commit: see the repository log.
 
 ## O. Explicit Scope Boundaries (non-requirements, preserve these)
 

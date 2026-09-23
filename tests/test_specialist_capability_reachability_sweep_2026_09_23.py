@@ -39,6 +39,8 @@ import pytest
 
 import scripts.control_center as cc
 import scripts.serve_ui as su
+import src.services.connections.service_registry as service_registry_module
+import src.services.credentials.account_store_file as account_store_file_module
 from scripts.exchange import exchange
 from src.config.settings import Settings
 from src.providers.base import Completion, LLMProvider
@@ -53,6 +55,20 @@ def _sandbox(tmp_path, monkeypatch):
         ("DEFAULT_BACKUPS_DIR", tmp_path / "backups"),
     ):
         monkeypatch.setattr(cc, name, value)
+
+
+def _connection_sandbox(tmp_path, monkeypatch):
+    """The identical isolation
+    tests/test_natural_language_live_connection_integration.py's own
+    ``_isolated_paths`` fixture uses - including, critically, the two
+    ``connection_factory.py`` reads *directly off their owning module*
+    rather than through ``control_center``'s own copied name, so a
+    service declared through the Control Center is genuinely what a
+    freshly-built system selects as its active connection."""
+    _sandbox(tmp_path, monkeypatch)
+    monkeypatch.setattr(cc, "DEFAULT_SERVICES_PATH", tmp_path / "services.json")
+    monkeypatch.setattr(service_registry_module, "DEFAULT_SERVICES_PATH", tmp_path / "services.json")
+    monkeypatch.setattr(account_store_file_module, "DEFAULT_ACCOUNTS_PATH", tmp_path / "accounts.json")
 
 
 def _settings(tmp_path, **extra):
@@ -276,3 +292,126 @@ class TestReviseArtifactReachesAnAuthorizedSpecialistAndStaysOwnershipScoped:
         with open(docs[0].latest.renditions["txt"], encoding="utf-8") as handle:
             text = handle.read()
         assert "cedar boards" in text
+
+
+class TestConnectedActionReachesAnAuthorizedSpecialistAndRevocationStopsAPendingConfirmation:
+    """connected_action is the last structurally distinct grantable
+    capability: real consequential-action machinery (a confirmation gate,
+    a governance check, a real external connection) rather than a
+    document/media/vision shape already proven twice over. Verified
+    through a real declared local service (127.0.0.1, never actually
+    reachable unless urllib.request.urlopen is monkeypatched - the
+    identical convention
+    tests/test_natural_language_live_connection_integration.py already
+    uses) rather than a mock that replaces the mechanism itself.
+
+    **Genuine defect found and repaired here.**
+    ``SpecialistCapabilities.__call__`` resolved a pending confirmation
+    (``guided_interaction_response``, which can execute the connected
+    operation on a clear "yes") *before* it ever checked whether the
+    specialist was still authorised for the capability that raised it -
+    a completely separate code path from the ordinary
+    ``reachable(agent)``/``capability.claims()`` dispatch every other
+    request goes through. Revoking ``connected_action`` (or
+    ``communication``) from a specialist while a confirmation was still
+    open did not stop it: the next "yes" still executed, because
+    ``_execute_connected_operation`` only re-checks *tool* permission
+    (always present - ``manager_tools()`` builds every tool
+    unconditionally; only the *capability* layer gates who may reach
+    it), never capability authorisation. Repaired by re-checking
+    authorisation for the confirmation's own capability before letting
+    it resolve at all; an unauthorised pending confirmation is cleared
+    and honestly refused rather than executed or left dangling.
+    """
+
+    OPERATIONS = "read_item:GET:/item:open,write_item:POST:/item:auth"
+    REQUEST = "Clara, check my connected account: write the item"
+
+    def _system(self, tmp_path, monkeypatch):
+        """Declares and credentials 'fixturesvc' with a throwaway build
+        first (the real, confirmed-at-the-terminal-layer Control Center
+        commands, exactly as a person would type them), then builds the
+        real system under test - ``connection_provider`` is read once, at
+        build time, so the service must already be on disk before this
+        second build runs."""
+        _connection_sandbox(tmp_path, monkeypatch)
+        declaring = su.build_live_system(_settings(tmp_path))
+        _run(declaring, f"services fixturesvc declare http://127.0.0.1:9199 {self.OPERATIONS}")
+        _run(declaring, "connections fixturesvc connect testaccount genuine-secret-token")
+        return su.build_live_system(_settings(tmp_path, connection_provider="fixturesvc"))
+
+    def test_a_granted_specialist_raises_and_executes_a_real_confirmation(self, tmp_path, monkeypatch):
+        import urllib.request
+
+        system = self._system(tmp_path, monkeypatch)
+        _run(system, "agent create clara Clara|operations|connected_action")
+
+        raised = _say(system, self.REQUEST, to="Clara")
+        assert raised.succeeded, raised.outcome
+        assert "write_item" in raised.outcome and "(yes/no)" in raised.outcome
+        assert raised.handled_by == "Clara"
+
+        class _FakeResponse:
+            def __enter__(self_): return self_
+            def __exit__(self_, *a): return False
+            def read(self_): return b'{"id": "item-1"}'
+
+        monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _FakeResponse())
+        confirmed = _say(system, "yes", to="Clara")
+        assert confirmed.succeeded, confirmed.outcome
+        assert "id" in confirmed.outcome
+        # Ownership preserved: the trail attributes this to Clara, never Alfred.
+        assert confirmed.handled_by == "Clara"
+
+    def test_a_clear_no_cancels_it_without_ever_reaching_the_real_service(self, tmp_path, monkeypatch):
+        system = self._system(tmp_path, monkeypatch)
+        _run(system, "agent create clara Clara|operations|connected_action")
+
+        raised = _say(system, self.REQUEST, to="Clara")
+        assert raised.succeeded and "(yes/no)" in raised.outcome
+
+        # No urlopen monkeypatch: a real attempt would try to reach
+        # 127.0.0.1:9199, where nothing is listening.
+        cancelled = _say(system, "no, don't", to="Clara")
+        assert cancelled.succeeded
+        assert cancelled.outcome == "Okay, I won't write_item on fixturesvc."
+        sessions = system.manager.own_skills._activity_sessions
+        assert sessions.pending_confirmation("Clara") is None
+
+    def test_revoking_mid_confirmation_stops_it_from_executing(self, tmp_path, monkeypatch):
+        system = self._system(tmp_path, monkeypatch)
+        _run(system, "agent create clara Clara|operations|connected_action")
+
+        raised = _say(system, self.REQUEST, to="Clara")
+        assert raised.succeeded and "(yes/no)" in raised.outcome
+
+        _run(system, "capabilities revoke Clara connected_action")
+
+        # No urlopen monkeypatch here either: if the (buggy) old behaviour
+        # were still in place, "yes" would try to reach 127.0.0.1:9199 for
+        # real. A graceful, honest refusal - never a real attempted call,
+        # never a silent execution - is the only way this can pass.
+        confirmed = _say(system, "yes", to="Clara")
+        assert not confirmed.succeeded
+        assert "connected_action" in confirmed.outcome
+        assert "no longer authorised" in confirmed.outcome
+
+        # Nothing usable is left pending - not merely "the reply looked
+        # like a refusal", the actual session state is gone.
+        sessions = system.manager.own_skills._activity_sessions
+        assert sessions.pending_confirmation("Clara") is None
+
+        # Alfred himself is untouched by Clara's revocation - he can still
+        # reach the identical connection and operation.
+        alfred_raised = _say(system, "check my connected account: write the item")
+        assert alfred_raised.succeeded and "(yes/no)" in alfred_raised.outcome
+
+    def test_ungranted_specialist_is_honestly_refused_and_nothing_is_raised(self, tmp_path, monkeypatch):
+        system = self._system(tmp_path, monkeypatch)
+        _run(system, "agent create clara Clara|operations")
+
+        turn = _say(system, self.REQUEST, to="Clara")
+        assert not turn.succeeded
+        assert "connected_action, which I'm not authorised for" in turn.outcome
+        sessions = system.manager.own_skills._activity_sessions
+        assert sessions.pending_confirmation("Clara") is None
