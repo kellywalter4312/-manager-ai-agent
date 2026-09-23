@@ -233,6 +233,21 @@ class CognitiveAgent(BaseAgent):
         names = getattr(handler, "authorised", None)
         return tuple(names(self)) if callable(names) else ()
 
+    def selected_capability_for(self, task_id: str) -> "str | None":
+        """Which authorised capability actually ran for ``task_id``, or None
+        (nothing claimed it, or no handler was given).
+
+        The same question - and the same name - ``ManagerSkills`` already
+        answers for the Manager, so one reader (the Control Center's trail)
+        asks every agent alike rather than knowing which kind it has. Read
+        through the bound handler for the identical layering reason
+        ``authorised_capabilities`` above is: this package never reaches the
+        orchestrator's code.
+        """
+        handler = getattr(self, "_capability_handler", None)
+        selected = getattr(handler, "selected_capability_for", None)
+        return selected(self.name, task_id) if callable(selected) else None
+
     def bind_user_knowledge(self, user_knowledge) -> None:
         """Grant this agent the canonical, read-only view of the person
         (``UserKnowledge``) - the same one the Manager reads."""

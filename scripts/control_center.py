@@ -1377,6 +1377,12 @@ class SpecialistCapabilities:
         self._channel = channel
         self._conversation = conversation
         self._tools: "dict[str, ToolSet]" = {}
+        # The capability this handler last actually chose, per agent, keyed by
+        # the task it chose it for - the specialist-side counterpart of
+        # ``ManagerSkills._last_selected``. Read back through
+        # ``selected_capability_for`` below; see that method's own docstring
+        # for what depended on it and was wrong without it.
+        self._last_selected: "dict[str, tuple[str, str]]" = {}
 
     def rebind_runtime(self, runtime) -> None:
         """A live backend or reasoning switch: every specialist's tools are
@@ -1401,6 +1407,22 @@ class SpecialistCapabilities:
 
         config, live = self._live()
         return tuple(n for n in granted_names(agent.name, config.values) if n in live)
+
+    def selected_capability_for(self, agent_name: str, task_id: str) -> "str | None":
+        """The registered capability this handler actually ran for
+        ``task_id`` on behalf of ``agent_name``, or None.
+
+        Exactly what ``ManagerSkills.selected_capability_for`` already is for
+        Alfred, and read the same way by the same reader
+        (``src/control_center/trail.py``): the decision that was made, never
+        a re-derivation after the fact. Without it, a *failed* capability run
+        by a specialist reported no capability at all - its handler returns a
+        bare ``TaskResult.failure`` with no payload to read - so the durable
+        consequential-action audit log recorded Alfred's failed send and
+        stayed silent about a specialist's.
+        """
+        found = self._last_selected.get(agent_name)
+        return found[1] if found is not None and found[0] == task_id else None
 
     def unauthorised_reason(self, agent, task) -> "str | None":
         """When a registered capability this agent may not use claims the
@@ -1567,6 +1589,9 @@ class SpecialistCapabilities:
         )
         if capability is None:
             return None
+        # Recorded before it runs, so a capability that fails is still named
+        # as the one that was reached - a failure carries no payload to read.
+        self._last_selected[agent.name] = (task.id, capability.name)
         if not capability.anywhere:
             refusal = workspace_refusal(agent.name, config.values, (capability.name, *sorted(capability.capabilities)))
             if refusal:

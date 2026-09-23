@@ -11539,3 +11539,196 @@ clean (192 passed) to confirm Alfred's own communication/governance
 behaviour is unchanged. Full suite: **8,180 passed** fixed order, **8,180
 passed** randomised order. Production `data/` untouched (confirmed by mtime
 sweep). Commit: see the ledger row.
+
+### 52.67 The last eight grantable capabilities through a specialist - a name in front of a request, and a specialist's work missing from the audit log (2026-09-23, continued)
+
+**What this closes.** 52.63-52.66 swept the structurally distinct
+capabilities (vision, clipping, artifact create/revise, connected actions,
+communication). This sweeps the eight that were left: `create_diagram`,
+`revise_diagram`, `general_assistance`, `image_authenticity`,
+`image_comparison`, `transcribe_media`, `translate` and `translate_media` -
+each traced from registration through authorisation, `CapabilityRequest`
+construction, Brain/provider routing, tool execution, ownership and output,
+then actually run through a granted specialist on the real served system.
+Two capabilities share no runtime path with anything already proven
+(`translate_media`'s recognise-translate-caption pipeline,
+`general_assistance`'s local-assistant code path); the rest were proven on
+their own paths rather than inferred from a sibling.
+
+Nothing here needed a paid call. Real offline language packs (argos:
+en/zh/fr/de/it/pt/es), Windows' own speech recogniser, local Whisper, a real
+local 1.5B model and the local title-card image provider are all genuinely
+installed on this machine, so every "Half Brain" claim below is measured
+rather than argued.
+
+---
+
+**Defect 1 - a capability that disappeared the moment you said its agent's
+name.** `translation_request` (src/manager/capabilities.py) matches four
+anchored patterns. The anchoring is deliberate and correct: "what's the
+weather in Paris" names a place, not a language, and only anchoring keeps a
+translation request distinguishable from an ordinary question containing
+"in <word>". But nothing removed the vocative address first, and this
+system's one natural way to reach a specialist is to open with its name.
+
+    "translate 'the harvest begins at dawn' into Italian"          -> real translation
+    "Nova, translate 'the harvest begins at dawn' into Italian"    -> "no language model is configured"
+
+The second is not a refusal from `translate` at all - the capability was
+never claimed, the request fell through to open conversation, and open
+conversation correctly reported that it had no Brain. A registered,
+enabled, granted capability with a working offline engine behind it was
+unreachable through the only addressing form the Control Center itself
+tells the owner to use ("Talk to it by name: 'Nova, ...'"). Alfred
+addressed by name was refused identically, so this was never specific to
+specialists.
+
+`_strip_vocative` - "who was addressed is not what was asked" - already
+exists in that very module and is already used by `_communication_shape`,
+`select_voice`, workspace creation and five other anchored shapes.
+`translation_request` was simply the one that never got it. Repaired by
+applying it. The negative cases stay negative: they have no leading
+"<name>," to remove, so the anchoring that keeps "what's the weather in
+Paris" out of translation is untouched.
+
+---
+
+**Defect 2 - a specialist's real consequential action reached no audit
+log.** `trail.observe()` has two branches. For work Alfred does himself it
+reads `skills.selected_capability_for(task.id)` - the decision that was
+actually made. For a *delegated* turn it read `_shared_words(task, agent)`:
+the overlap between the request's words and the agent's declared spec.
+
+That was a fair description of *why the router chose that agent* when the
+only delegation was to an agent with domain code of its own. It is not what
+the agent then did. Once a specialist could be granted a registered
+capability and run the identical handler Alfred runs (52.61's authority
+model), every such turn reported a stray word like "images", or nothing:
+
+    Nova (granted create_diagram) makes a real diagram   -> turn.capability = None
+    Nova (granted image_comparison) compares two images  -> turn.capability = "images"
+
+Two things read that field, and both were wrong. The Control Center's own
+trail showed the owner no capability name for work a specialist genuinely
+performed - a management surface that cannot say what its agents did. And
+`scripts/exchange.py` gates the durable consequential-action audit log on
+`turn.capability in CONSEQUENTIAL_CAPABILITIES`. Measured on the real
+served system before the fix:
+
+    Clara (granted communication) -> "yes" -> provider.sent == [("Kai", "saying hello")]
+    action log: []
+
+    Alfred, identical request      -> "yes" -> provider.sent == [("Kai", "saying hello")]
+    action log: [("Alfred", "communication", True)]
+
+A real message left through a real provider and no durable record named it.
+That log exists precisely so "what did this system actually do" is
+answerable; a specialist was invisible to it.
+
+Repaired on the same principle the module already states - *learn the
+answer, never work it out* - in the two places the answer already exists:
+
+  * `_executed_capability(result)` reads the capability the handler itself
+    reported in its payload (`"handled_by"`, which ~100 handlers already
+    write and `ManagerSkills.execute` already reads), exactly as
+    `_invited_in` reads `INVITED_KEY`. Named once as `HANDLED_BY_KEY` for
+    the side that reads it.
+  * `_selected_capability(agent, task)` covers the case a payload cannot: a
+    capability that *failed* returns a bare `TaskResult.failure` with no
+    payload at all. `SpecialistCapabilities` now records what it selected,
+    before running it, and exposes it as `selected_capability_for` -
+    deliberately the same method name `ManagerSkills` has always had, so
+    `CognitiveAgent.selected_capability_for` lets the one reader ask every
+    agent alike instead of knowing which kind it is holding.
+  * `_shared_words` remains the fallback, unchanged, for a delegation that
+    reports no capability at all (EmailAgent's own domain work).
+
+---
+
+**Defect 3 - the audit log counted the question as the action.** Found
+while proving Defect 2. A turn that only *raised* a confirmation ("Send
+"hello" to Kai? (yes/no)") was itself written to the log as
+`capability="communication", succeeded=True`, against a log whose own
+docstring promises "succeeded=True is exact: the capability's own code path
+proves the tool ran and returned success". Nothing had run, and the person
+had not yet answered. Every real send was therefore recorded twice, the
+first time before it happened.
+
+The confirming capability already writes `"awaiting": "confirmation"` into
+its payload - the fact was there, unread. `ConversationTurn` now carries it
+(`awaiting_confirmation`, read from the payload exactly as `speak_in_full`
+already is) and `exchange()` skips the log for such a turn. The answering
+"yes" reaches the real tool and is recorded then, once, with its true
+outcome.
+
+---
+
+**Runtime evidence**, all through the real served system
+(`scripts.serve_ui.build_live_system`), real files, real local engines, no
+vendor reached:
+
+| Capability | Evidence |
+|---|---|
+| `create_diagram` | Nova, Half Brain, no provider at all: "make a diagram of a two-stage water filtration system" -> a real `image` artifact owned by Nova with a real PNG rendition (`\x89PNG`). Vague ("make me a diagram") with no Brain -> honest refusal, nothing created. Vague with a real provider double as Nova's own Full Brain -> Nova's own Brain composed the prompt (its specialist system prompt, never Alfred's) and the artifact is titled with it |
+| `revise_diagram` | The same artifact identity, version 1 -> 2, a genuinely different PNG, title updated. Iris (granted `revise_diagram`, given Nova's real artifact id) -> "couldn't find that diagram to revise"; Nova's artifact provably still at version 1 |
+| `general_assistance` | Nothing configured -> "I won't guess at code", naming `local_assist_provider`. With the real local 1.5B model: real working Python, saved as a real `code` artifact owned by Nova, and labelled "answered by the small local model on this machine - not verified reasoning". Full Brain: answered verbatim from Nova's own Brain, proven by the specialist system prompt reaching the provider |
+| `image_authenticity` | A real JPEG -> real error-level analysis and metadata evidence, prefixed "evidence, not a verdict" and closing "I can't tell you for certain ... that needs a trained forensic model, which isn't available here". Never a conclusion |
+| `image_comparison` | Two real PNGs -> real measurement (perceptual-hash distance, mean pixel difference, share of the picture differing, relative brightness), prefixed "measurements, not a guess" |
+| `transcribe_media` | Real speech synthesised by Windows and recognised by Windows' own engine -> a real timestamped transcript, kept as a derived transcript document owned by Nova. An *image* shared instead -> "I don't see audio or video" (modality is a requirement, not a word). `provider video_understanding_provider use null` -> "I would rather say so than invent one" |
+| `translate` | Repaired (Defect 1). Real argos translation in Half Brain, addressed by name, attributed to Nova. "into Swahili" (no pack installed) -> honest refusal naming the packs that *are* installed, and "I won't guess at a translation". `provider translation_provider use null` -> honest refusal naming how to turn it back on; `use argos` -> working again in the same session |
+| `translate_media` | A genuinely separate pipeline: real audio -> local Whisper recognition -> argos translation -> a real WebVTT subtitle artifact owned by Nova containing the real translated line. Proving `translate` proves none of this, and it was not inferred |
+
+**Negative behaviour** was checked for every one of the eight: an ungranted
+specialist gets the standard "That's <capability>, which I'm not authorised
+for ... capabilities grant Nova <capability>" refusal, nothing is produced,
+and Alfred does not quietly do it instead. Revocation takes effect on the
+very next request (`capabilities revoke Nova create_diagram` -> refused).
+Ownership isolation holds for images and artifacts alike: a specialist
+cannot reach a file uploaded to another agent, by pointing word or by
+explicit id.
+
+**Brain compatibility**, as measured rather than assumed:
+
+| Capability | Half Brain | Full Brain | What it actually requires |
+|---|---|---|---|
+| `create_diagram` | Yes, when the request names its subject | Yes - the specialist's own Brain composes a prompt for a vague ask | An `ImageProvider` for the rendition; the artifact's real content (the prompt) is created either way |
+| `revise_diagram` | Yes, when the revision names what changes | Yes, same shape | As above, plus an owned image artifact |
+| `general_assistance` | Yes for code/research when the tool (or the local assistant) is configured; honest refusal otherwise | Yes - the specialist's own Brain, never Alfred's | Text reasoning, or the attributed local assistant, or the named tool |
+| `image_authenticity` | Yes - local forensic examination, no model | Same (no Brain is consulted) | Nothing beyond the image; certainty is honestly out of reach |
+| `image_comparison` | Yes - measurement, no model | Same (no Brain is consulted) | Two owned images |
+| `transcribe_media` | Yes - with a real local recogniser configured | Same (no Brain is consulted) | A transcription provider and genuine audio/video; an image is refused |
+| `translate` | Yes - offline packs are deterministic | Yes - the Brain is asked only for a pair no pack covers | An offline pack, else text reasoning; refuses honestly when neither |
+| `translate_media` | Yes - recognition and translation are both local | Same (no Brain is consulted) | Speech recognition *and* translation, plus real audio/video |
+
+**Control Center reachability** was verified for all eight: each appears in
+`capabilities list`, in `capabilities access <agent>` under GRANTED or
+GRANTABLE with the exact grant command, and in `agent list`; `capabilities
+grant`/`revoke` change runtime on the next request; `provider
+translation_provider` and `provider video_understanding_provider` show the
+real active backend, name the capabilities that depend on them, and - proven
+live - switching one genuinely changes what the running system can do
+rather than only what is stored. With Defect 2 repaired, the trail now names
+the capability a specialist ran, including one that failed.
+
+**Cross-cutting checks that found nothing to repair.** Tool construction is
+still unconditional and still not authorisation (`manager_tools()` builds
+every tool; `reachable_capabilities` gates). Provider availability is still
+not Brain availability (argos installed with no model configured translates;
+no model is ever implied). No capability among the eight holds a pending
+operation, so 52.65's execution-time re-authorisation has nothing further to
+cover here. `agent create` already refuses an unregistered capability name
+outright (`grant_refusal`), so a specialist cannot be created holding a
+grant that does not exist. Voice, video/3D and provider/device coupling were
+re-inspected against this pass's own changes and are unchanged: `VoiceProfile`
+still keeps `language`, `accent`, `preferred_voice`, `pace` and `style`
+separate fields with no provider in any of them; the 3D grammar still
+describes shapes, dimensions and placements with no subject anywhere in it;
+`InterfaceDescriptor` still declares the *shape* of a surface and grants
+nothing; and both surfaces this project serves (terminal and web) are built
+by the one `scripts.control_center.build`, so identity, memory, grants,
+artifacts and work history live below whichever surface is presenting them.
+
+Regression: 26 new tests appended to
+`tests/test_specialist_capability_reachability_sweep_2026_09_23.py` (43
+total in the file). Full suite: see the ledger row. Production `data/`
+untouched. Commit: see the repository log.

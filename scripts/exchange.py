@@ -300,7 +300,16 @@ def exchange(
 
     admit_invited(conversation, turn)
 
-    if action_log_path is not None and turn.capability in CONSEQUENTIAL_CAPABILITIES:
+    # A turn that only raised the confirmation question ("Send X to Y?
+    # (yes/no)") executed nothing, so it is not a consequential action and
+    # recording it as one - which this did, with succeeded=True, against a
+    # log whose own docstring promises "succeeded=True is exact: the
+    # capability's own code path proves the tool ran and returned success" -
+    # both double-counted every real send/call and claimed one had happened
+    # before the person had answered. The answering "yes" reaches the real
+    # tool and is recorded then, exactly once, with its true outcome.
+    if (action_log_path is not None and turn.capability in CONSEQUENTIAL_CAPABILITIES
+            and not turn.awaiting_confirmation):
         record_action(
             ActionLogEntry(
                 timestamp=audit_utc_now().isoformat(),

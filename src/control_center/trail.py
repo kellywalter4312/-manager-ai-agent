@@ -37,7 +37,7 @@ from typing import Any
 
 from src.control_center.views import ConversationTurn, TrailStep
 from src.core.contracts import Task, TaskResult, TaskStatus
-from src.manager.capabilities import INVITED_KEY
+from src.manager.capabilities import HANDLED_BY_KEY, INVITED_KEY
 from src.manager.cognition import assess_cognition, assess_manager
 from src.manager.collaboration_entry import answer_with_collaboration
 from src.manager.manager import ManagerAgent
@@ -203,7 +203,14 @@ def observe(
                 actor=handled_by,
             )
         )
-        capability = _shared_words(task, agent)
+        # What the specialist actually did, when a registered capability
+        # answered - falling back to the router's own word overlap for a
+        # delegation that reports no capability (EmailAgent's domain work).
+        capability = (
+            _executed_capability(result)
+            or _selected_capability(agent, task)
+            or _shared_words(task, agent)
+        )
     else:
         steps.append(
             TrailStep(
@@ -274,6 +281,9 @@ def observe(
         invited=_invited_in(result),
         celebration=_celebration_of(result),
         speak_in_full=bool((result.payload or {}).get("speak_in_full")),
+        # Read from the payload the confirming capability already writes,
+        # never inferred: a turn that only asked "(yes/no)" executed nothing.
+        awaiting_confirmation=(result.payload or {}).get("awaiting") == "confirmation",
     )
 
 
@@ -302,9 +312,68 @@ def _invited_in(result: TaskResult) -> str | None:
     return invited if isinstance(invited, str) and invited.strip() else None
 
 
+def _executed_capability(result: TaskResult) -> str | None:
+    """The registered capability that actually ran, as its own handler
+    reported it - or None when this result came from somewhere that reports
+    no capability at all (EmailAgent's own domain work, a specialist's own
+    conversation floor).
+
+    Read from the payload the handler already produced, the identical
+    "learn the answer rather than work it out" rule ``_invited_in`` above
+    and ``_own_capability`` below both already follow. Nothing is inferred:
+    a name no capability is registered under is not one.
+
+    **Why this exists.** A delegated turn used to report ``_shared_words``
+    - the overlap between the request's words and the specialist's declared
+    spec - as its capability. That is an honest description of *why the
+    router picked that agent*, and it was the only thing available when the
+    only delegation was to an agent with domain code of its own. It is not
+    what the specialist then *did*: once a specialist could be granted a
+    registered capability (``capabilities grant``) and run the identical
+    handler Alfred runs, every such turn still reported a word like
+    "images", or nothing at all.
+
+    Two things read that field, and both were wrong for a specialist. The
+    Control Center's own trail showed the owner no capability name for work
+    a specialist genuinely performed; and ``scripts/exchange.py`` gates the
+    durable consequential-action audit log on
+    ``turn.capability in CONSEQUENTIAL_CAPABILITIES`` - so a specialist
+    granted ``communication`` really sent a message through the real
+    provider and **nothing was written to the action log at all**, while
+    Alfred doing the identical thing wrote an entry (found at runtime,
+    2026-09-23). A consequential action that no audit record names is the
+    one thing that log exists to make impossible.
+    """
+    name = (result.payload or {}).get(HANDLED_BY_KEY)
+    if not isinstance(name, str) or not name.strip():
+        return None
+    from src.manager.capabilities import MANAGER_CAPABILITIES
+
+    return name if name in MANAGER_CAPABILITIES else None
+
+
 def _manager_name(manager: ManagerAgent) -> str:
     skills = manager.own_skills
     return skills.name if skills is not None else "manager"
+
+
+def _selected_capability(agent: Any, task: Task) -> str | None:
+    """The registered capability this agent's own authorised-capability
+    handler actually chose for this task, or None.
+
+    The identical question ``_own_capability`` below asks the Manager
+    through the identical method name, asked of a specialist instead - so a
+    capability that *failed* (and therefore returned no payload for
+    ``_executed_capability`` to read) is still named as the one that was
+    reached, rather than falling through to the router's word overlap.
+    """
+    if agent is None:
+        return None
+    selected = getattr(agent, "selected_capability_for", None)
+    try:
+        return selected(task.id) if callable(selected) else None
+    except Exception:  # noqa: BLE001 - watching must not break the request
+        return None
 
 
 def _shared_words(task: Task, agent: Any) -> str | None:

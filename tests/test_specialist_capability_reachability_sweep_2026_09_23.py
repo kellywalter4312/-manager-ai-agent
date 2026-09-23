@@ -31,8 +31,10 @@ proved generic.
 from __future__ import annotations
 
 import base64
+import io
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -44,6 +46,7 @@ import src.services.credentials.account_store_file as account_store_file_module
 from scripts.exchange import exchange
 from src.config.settings import Settings
 from src.providers.base import Completion, LLMProvider
+from src.providers.translation.factory import build_translator
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -555,3 +558,472 @@ class TestCommunicationReachesAnAuthorizedSpecialistAndRevocationStopsAPendingCo
         assert alfred_raised.succeeded and "(yes/no)" in alfred_raised.outcome
         _say(system, "yes")
         assert provider.sent == [("Kai", "saying hello")]
+
+
+# ===========================================================================
+# Continuation, same day: the eight remaining grantable capabilities that had
+# never been exercised end to end through an authorised specialist -
+# create_diagram, revise_diagram, general_assistance, image_authenticity,
+# image_comparison, transcribe_media, translate and translate_media.
+#
+# Two genuine software defects were found doing it, both repaired here:
+#
+#   1. ``translate`` was unreachable whenever the agent was addressed by
+#      name. ``translation_request``'s four patterns are anchored (on
+#      purpose - "what's the weather in Paris" must not be a translation),
+#      and nothing stripped the vocative first, so "Nova, translate 'x' into
+#      Italian" matched nothing and fell through to open conversation -
+#      which answered "no language model is configured" although real
+#      offline packs were installed and the capability was granted. Alfred
+#      addressed by name was refused identically. Repaired by applying this
+#      module's own ``_strip_vocative``, which eight other anchored shapes
+#      in capabilities.py already use.
+#
+#   2. The Control Center's trail reported no capability at all for work a
+#      *specialist* did. ``observe()``'s delegated branch derived it from
+#      ``_shared_words`` - the overlap between the request and the agent's
+#      spec - which is an honest description of why the router chose that
+#      agent and is not what it then did. Two things read that field, and
+#      both were wrong: the owner saw no capability name, and
+#      ``scripts/exchange.py`` gates the durable consequential-action audit
+#      log on it - so a specialist granted ``communication`` really sent a
+#      message and nothing at all was written to the log, while Alfred doing
+#      the identical thing wrote an entry. Repaired by reading the capability
+#      the handler itself reported (its result payload, as ``_invited_in``
+#      already does) and, for a failed run that carries no payload, the
+#      capability ``SpecialistCapabilities`` recorded that it selected - the
+#      specialist-side counterpart of
+#      ``ManagerSkills.selected_capability_for``, which ``_own_capability``
+#      has always read for Alfred.
+#
+#      Found while doing so, and repaired with it: a turn that only *raised*
+#      a confirmation ("Send X to Y? (yes/no)") was itself written to that
+#      log as succeeded=True, against a log whose own docstring promises
+#      succeeded=True means the tool ran. Every real send was double-counted
+#      and claimed before the person had answered.
+# ===========================================================================
+
+ON_WINDOWS = sys.platform.startswith("win")
+ARGOS_INSTALLED = build_translator(type("_TranslationChoice", (), {"translation": "argos"})()) is not None
+LOCAL_MODEL = REPO_ROOT / "data" / "models" / "llm" / "qwen2.5-1.5b-instruct-q4_k_m.gguf"
+
+
+def _wav(tmp_path, sentence: str) -> bytes:
+    """Real speech from Windows' own synthesiser - no network, no key, the
+    identical instrument tests/test_campaign_03_file_media_interop.py already
+    uses to prove real transcription."""
+    path = tmp_path / "speech.wav"
+    script = (
+        "Add-Type -AssemblyName System.Speech; "
+        "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+        f"$s.SetOutputToWaveFile('{path}'); $s.Speak('{sentence}'); $s.Dispose()"
+    )
+    subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], check=True, timeout=120)
+    return path.read_bytes()
+
+
+class _TextProbe(LLMProvider):
+    """A real LLMProvider double registered through the real factory seam -
+    the text counterpart of ``_VisionProbe`` above, and used for exactly the
+    same reason: to prove which Brain a capability actually reached, without
+    a paid call. It never stands in for a capability's own work."""
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+        self.prompts: list[tuple[str, str]] = []
+
+    @property
+    def name(self) -> str:
+        return "closure_text_probe"
+
+    def complete(self, prompt, *, system=None):
+        self.prompts.append((str(prompt), str(system or "")))
+        if "should_retain" in str(prompt) or "should_retain" in str(system or ""):
+            return Completion(text='{"should_retain": false, "content": null}', provider=self.name)
+        return Completion(text=self._text, provider=self.name)
+
+
+@pytest.mark.skipif(not ARGOS_INSTALLED, reason="real offline language packs")
+class TestTranslateReachesAnAuthorizedSpecialistAndSurvivesBeingAddressedByName:
+    """The repaired defect, and the capability's own real offline path.
+
+    Deterministic, so this is genuine Half Brain evidence: no reasoning
+    provider is configured in any test here, and a real translation still
+    comes back."""
+
+    def test_a_granted_specialist_translates_for_real_addressed_by_name(self, tmp_path, monkeypatch):
+        _sandbox(tmp_path, monkeypatch)
+        system = su.build_live_system(_settings(tmp_path, translation="argos"))
+        _run(system, "agent create nova Nova|languages|translate")
+
+        turn = _say(system, "Nova, translate 'the harvest begins at dawn' into Italian", to="Nova")
+        assert turn.succeeded, turn.outcome
+        assert turn.handled_by == "Nova"
+        assert turn.capability == "translate"
+        assert "raccolto" in turn.outcome.lower()
+
+    def test_the_manager_addressed_by_name_is_translated_too(self, tmp_path, monkeypatch):
+        """The same defect, on Alfred: addressing him by name refused a
+        translation he plainly does when unaddressed."""
+        _sandbox(tmp_path, monkeypatch)
+        system = su.build_live_system(_settings(tmp_path, translation="argos"))
+
+        named = _say(system, "Alfred, translate 'the harvest begins at dawn' into Italian")
+        plain = _say(system, "translate 'the harvest begins at dawn' into Italian")
+        assert named.succeeded and plain.succeeded
+        assert named.capability == plain.capability == "translate"
+        assert named.outcome == plain.outcome
+
+    def test_an_uninstalled_language_is_refused_honestly_and_never_guessed(self, tmp_path, monkeypatch):
+        _sandbox(tmp_path, monkeypatch)
+        system = su.build_live_system(_settings(tmp_path, translation="argos"))
+        _run(system, "agent create nova Nova|languages|translate")
+
+        turn = _say(system, "Nova, translate 'the harvest begins at dawn' into Swahili", to="Nova")
+        assert not turn.succeeded
+        assert "won't guess" in turn.outcome
+        # Names which packs *are* installed, not only that this one is not.
+        assert "Italian" in turn.outcome
+
+    def test_turning_the_engine_off_in_the_control_center_really_stops_it(self, tmp_path, monkeypatch):
+        """Provider selection affects execution, never only configuration."""
+        _sandbox(tmp_path, monkeypatch)
+        system = su.build_live_system(_settings(tmp_path, translation="argos"))
+        _run(system, "agent create nova Nova|languages|translate")
+        assert _say(system, "Nova, translate 'good morning' into Italian", to="Nova").succeeded
+
+        _run(system, "provider translation_provider use null")
+        off = _say(system, "Nova, translate 'good evening' into Italian", to="Nova")
+        assert not off.succeeded and "translation_provider" in off.outcome
+
+        _run(system, "provider translation_provider use argos")
+        assert _say(system, "Nova, translate 'good evening' into Italian", to="Nova").succeeded
+
+    def test_an_ungranted_specialist_cannot_translate(self, tmp_path, monkeypatch):
+        _sandbox(tmp_path, monkeypatch)
+        system = su.build_live_system(_settings(tmp_path, translation="argos"))
+        _run(system, "agent create nova Nova|languages")
+
+        turn = _say(system, "Nova, translate 'good morning' into Italian", to="Nova")
+        assert not turn.succeeded
+        assert "translate, which I'm not authorised for" in turn.outcome
+
+
+@pytest.mark.skipif(not (ON_WINDOWS and ARGOS_INSTALLED), reason="real local speech and language packs")
+class TestTranslateMediaReachesAnAuthorizedSpecialist:
+    """A genuinely different path from ``translate``: real audio in, real
+    recognition, real translation, a real subtitle artifact out. Proving
+    ``translate`` proves none of it."""
+
+    def _system(self, tmp_path, monkeypatch):
+        _sandbox(tmp_path, monkeypatch)
+        return su.build_live_system(_settings(
+            tmp_path, media="local", translation="argos", video_understanding="local_whisper",
+        ))
+
+    def test_a_granted_specialist_captions_a_real_recording_into_another_language(self, tmp_path, monkeypatch):
+        system = self._system(tmp_path, monkeypatch)
+        _run(system, "agent create nova Nova|media languages|translate_media")
+        _upload(system, "Nova", _wav(tmp_path, "The harvest begins at dawn."), "note.wav", "audio/wav")
+
+        turn = _say(system, "Nova, translate this recording into Italian with subtitles", to="Nova")
+        assert turn.succeeded, turn.outcome
+        assert turn.handled_by == "Nova"
+        assert turn.capability == "translate_media"
+        assert "into it" in turn.outcome
+
+        subtitles = [a for a in system.runtime.artifacts.all() if "vtt" in a.latest.renditions]
+        assert len(subtitles) == 1
+        assert subtitles[0].owner_agent == "Nova"
+        captions = Path(subtitles[0].latest.renditions["vtt"]).read_text(encoding="utf-8").lower()
+        assert "raccolto" in captions
+
+    def test_an_ungranted_specialist_cannot_and_nothing_is_produced(self, tmp_path, monkeypatch):
+        system = self._system(tmp_path, monkeypatch)
+        _run(system, "agent create nova Nova|media languages")
+        _upload(system, "Nova", _wav(tmp_path, "The harvest begins at dawn."), "note.wav", "audio/wav")
+
+        turn = _say(system, "Nova, translate this recording into Italian with subtitles", to="Nova")
+        assert not turn.succeeded
+        assert "translate_media, which I'm not authorised for" in turn.outcome
+        assert not [a for a in system.runtime.artifacts.all() if "vtt" in a.latest.renditions]
+
+
+class TestCreateAndReviseDiagramReachAnAuthorizedSpecialist:
+    """Half-Brain-safe: a request that already names its subject needs no
+    model, so a real PNG comes back with no reasoning provider at all."""
+
+    MAKE = "Nova, make a diagram of a two-stage water filtration system"
+    REVISE = "Nova, revise the diagram: add a third stage with a carbon filter"
+
+    def test_a_granted_specialist_creates_then_revises_one_real_artifact(self, system):
+        _run(system, "agent create nova Nova|diagrams|create_diagram,revise_diagram")
+
+        created = _say(system, self.MAKE, to="Nova")
+        assert created.succeeded, created.outcome
+        assert created.handled_by == "Nova" and created.capability == "create_diagram"
+        images = [a for a in system.runtime.artifacts.all() if a.type == "image"]
+        assert len(images) == 1 and images[0].owner_agent == "Nova"
+        first_png = Path(images[0].latest.renditions["png"]).read_bytes()
+        assert first_png.startswith(b"\x89PNG")
+
+        revised = _say(system, self.REVISE, to="Nova")
+        assert revised.succeeded, revised.outcome
+        assert revised.capability == "revise_diagram"
+        images = [a for a in system.runtime.artifacts.all() if a.type == "image"]
+        # The same artifact identity, one real version further along.
+        assert len(images) == 1 and images[0].latest.version == 2
+        assert "carbon" in images[0].latest.title.lower()
+        assert Path(images[0].latest.renditions["png"]).read_bytes() != first_png
+
+    def test_a_second_specialist_cannot_revise_it_by_explicit_id(self, system):
+        _run(system, "agent create nova Nova|diagrams|create_diagram,revise_diagram")
+        _run(system, "agent create iris Iris|diagrams|revise_diagram")
+        assert _say(system, self.MAKE, to="Nova").succeeded
+        owned = [a for a in system.runtime.artifacts.all() if a.type == "image"][0]
+
+        turn = _say(system, f"Iris, revise the diagram artifact {owned.artifact_id}: make it a single stage", to="Iris")
+        assert not turn.succeeded
+        assert "couldn't find that diagram to revise" in turn.outcome
+        after = [a for a in system.runtime.artifacts.all() if a.type == "image"]
+        assert len(after) == 1 and after[0].owner_agent == "Nova" and after[0].latest.version == 1
+
+    def test_a_vague_request_with_no_brain_is_refused_rather_than_invented(self, system):
+        _run(system, "agent create nova Nova|diagrams|create_diagram")
+        turn = _say(system, "Nova, make me a diagram", to="Nova")
+        assert not turn.succeeded
+        assert "no reasoning capability is configured" in turn.outcome
+        assert not [a for a in system.runtime.artifacts.all() if a.type == "image"]
+
+    def test_a_vague_request_is_composed_by_the_specialists_own_brain(self, tmp_path, monkeypatch):
+        from src.providers import factory
+
+        probe = _TextProbe("A labelled cutaway of a two-stage water filter")
+        monkeypatch.setitem(factory._BUILDERS, "closure_text_probe", lambda settings, env=None, account=None: probe)
+        _sandbox(tmp_path, monkeypatch)
+        system = su.build_live_system(_settings(
+            tmp_path, media="local", provider="closure_text_probe", brain="llm", specialist_brain="llm",
+        ))
+        _run(system, "agent create nova Nova|diagrams|create_diagram")
+
+        turn = _say(system, "Nova, make me a diagram", to="Nova")
+        assert turn.succeeded, turn.outcome
+        images = [a for a in system.runtime.artifacts.all() if a.type == "image"]
+        assert len(images) == 1 and images[0].owner_agent == "Nova"
+        assert images[0].latest.title == "A labelled cutaway of a two-stage water filter"
+        # Nova's own Brain, never Alfred's: the system prompt is the specialist's.
+        assert any("specialist agent" in system_prompt for _p, system_prompt in probe.prompts)
+
+    def test_an_ungranted_specialist_creates_nothing(self, system):
+        _run(system, "agent create nova Nova|diagrams")
+        turn = _say(system, self.MAKE, to="Nova")
+        assert not turn.succeeded
+        assert "create_diagram, which I'm not authorised for" in turn.outcome
+        assert not system.runtime.artifacts.all()
+
+
+class TestImageAuthenticityAndComparisonReachAnAuthorizedSpecialist:
+    """Both are measurement rather than reasoning - real in Half Brain, and
+    neither is ever allowed to become a verdict."""
+
+    def _jpeg(self) -> bytes:
+        from PIL import Image
+
+        buffer = io.BytesIO()
+        Image.new("RGB", (64, 64), (200, 30, 30)).save(buffer, format="JPEG", quality=90)
+        return buffer.getvalue()
+
+    def test_authenticity_reports_real_evidence_and_refuses_to_conclude(self, system):
+        _run(system, "agent create nova Nova|images|image_authenticity")
+        _upload(system, "Nova", self._jpeg(), "photo.jpg", "image/jpeg")
+
+        turn = _say(system, "Nova, is this photo edited or AI generated?", to="Nova")
+        assert turn.succeeded, turn.outcome
+        assert turn.handled_by == "Nova" and turn.capability == "image_authenticity"
+        assert "evidence, not a verdict" in turn.outcome
+        assert "Error-level analysis" in turn.outcome
+        assert "can't tell you for certain" in turn.outcome
+
+    def test_comparison_measures_two_real_images(self, system):
+        _run(system, "agent create nova Nova|images|image_comparison")
+        _upload(system, "Nova", _png((10, 20, 30)), "a.png", "image/png")
+        _upload(system, "Nova", _png((10, 20, 200)), "b.png", "image/png")
+
+        turn = _say(system, "Nova, compare these two images and tell me the differences", to="Nova")
+        assert turn.succeeded, turn.outcome
+        assert turn.capability == "image_comparison"
+        assert "measurements, not a guess" in turn.outcome
+        assert "Perceptual-hash distance" in turn.outcome
+
+    def test_neither_reaches_an_image_that_belongs_to_another_agent(self, system):
+        _run(system, "agent create nova Nova|images|image_authenticity,image_comparison")
+        _upload(system, "Alfred", _png(), "alfred-a.png", "image/png")
+        _upload(system, "Alfred", _png((3, 4, 5)), "alfred-b.png", "image/png")
+
+        authenticity = _say(system, "Nova, is this photo edited?", to="Nova")
+        assert not authenticity.succeeded and "Which image?" in authenticity.outcome
+        comparison = _say(system, "Nova, compare these two images", to="Nova")
+        assert not comparison.succeeded and "I need two images" in comparison.outcome
+        assert {a.owner_agent for a in system.runtime.artifacts.all()} == {"Alfred"}
+
+    def test_ungranted_is_refused_for_both(self, system):
+        _run(system, "agent create nova Nova|images")
+        _upload(system, "Nova", _png(), "a.png", "image/png")
+        assert "image_authenticity, which I'm not authorised for" in _say(
+            system, "Nova, is this photo edited?", to="Nova").outcome
+        _upload(system, "Nova", _png((3, 4, 5)), "b.png", "image/png")
+        assert "image_comparison, which I'm not authorised for" in _say(
+            system, "Nova, compare these two images", to="Nova").outcome
+
+
+@pytest.mark.skipif(not ON_WINDOWS, reason="Windows' own speech engine")
+class TestTranscribeMediaReachesAnAuthorizedSpecialist:
+    def _system(self, tmp_path, monkeypatch):
+        _sandbox(tmp_path, monkeypatch)
+        return su.build_live_system(_settings(tmp_path, media="local", video_understanding="windows"))
+
+    def test_a_granted_specialist_produces_a_real_transcript_and_keeps_it(self, tmp_path, monkeypatch):
+        system = self._system(tmp_path, monkeypatch)
+        _run(system, "agent create nova Nova|media|transcribe_media")
+        _upload(system, "Nova", _wav(tmp_path, "The meeting is moved to Friday afternoon."), "note.wav", "audio/wav")
+
+        turn = _say(system, "Nova, transcribe this audio", to="Nova")
+        assert turn.succeeded, turn.outcome
+        assert turn.handled_by == "Nova" and turn.capability == "transcribe_media"
+        assert "meeting" in turn.outcome.lower()
+        kept = [a for a in system.runtime.artifacts.all() if a.latest.title.startswith("Transcript - ")]
+        assert len(kept) == 1 and kept[0].owner_agent == "Nova"
+
+    def test_an_image_is_not_a_recording(self, tmp_path, monkeypatch):
+        """Modality is a real requirement, not a word: "media" does not make
+        a picture transcribable."""
+        system = self._system(tmp_path, monkeypatch)
+        _run(system, "agent create nova Nova|media|transcribe_media")
+        _upload(system, "Nova", _png(), "picture.png", "image/png")
+
+        turn = _say(system, "Nova, transcribe this recording", to="Nova")
+        assert not turn.succeeded
+        assert "I don't see audio or video" in turn.outcome
+
+    def test_turning_the_recogniser_off_is_honest_rather_than_an_invented_transcript(self, tmp_path, monkeypatch):
+        system = self._system(tmp_path, monkeypatch)
+        _run(system, "agent create nova Nova|media|transcribe_media")
+        _upload(system, "Nova", _wav(tmp_path, "The meeting is moved to Friday afternoon."), "note.wav", "audio/wav")
+        assert _say(system, "Nova, transcribe this audio", to="Nova").succeeded
+
+        _run(system, "provider video_understanding_provider use null")
+        turn = _say(system, "Nova, transcribe this audio", to="Nova")
+        assert not turn.succeeded
+        assert "rather say so than invent one" in turn.outcome
+
+    def test_an_ungranted_specialist_cannot_transcribe(self, tmp_path, monkeypatch):
+        system = self._system(tmp_path, monkeypatch)
+        _run(system, "agent create nova Nova|media")
+        _upload(system, "Nova", _wav(tmp_path, "The meeting is moved to Friday afternoon."), "note.wav", "audio/wav")
+
+        turn = _say(system, "Nova, transcribe this audio", to="Nova")
+        assert not turn.succeeded
+        assert "transcribe_media, which I'm not authorised for" in turn.outcome
+
+
+class TestGeneralAssistanceReachesTheSpecialistsOwnReasoningNotAlfreds:
+    """"general_assistance" must not quietly mean "the Manager can answer"."""
+
+    ASK = "Nova, write a python function that reverses a list"
+
+    def test_with_nothing_configured_it_refuses_honestly_rather_than_guessing(self, system):
+        _run(system, "agent create nova Nova|general work|general_assistance")
+        turn = _say(system, self.ASK, to="Nova")
+        assert not turn.succeeded
+        assert turn.handled_by == "Nova"
+        assert "I won't guess at code" in turn.outcome
+        assert "local_assist_provider" in turn.outcome
+
+    @pytest.mark.skipif(not LOCAL_MODEL.is_file(), reason="the real local model this machine has installed")
+    def test_half_brain_really_writes_code_through_the_local_assistant(self, tmp_path, monkeypatch):
+        _sandbox(tmp_path, monkeypatch)
+        system = su.build_live_system(_settings(tmp_path, media="local", local_assist="local"))
+        _run(system, "agent create nova Nova|general work|general_assistance")
+
+        turn = _say(system, self.ASK, to="Nova")
+        assert turn.succeeded, turn.outcome
+        assert turn.handled_by == "Nova" and turn.capability == "general_assistance"
+        assert "def " in turn.outcome
+        # Attributed honestly - never presented as verified reasoning.
+        assert "small local model" in turn.outcome
+        code = [a for a in system.runtime.artifacts.all() if a.type == "code"]
+        assert len(code) == 1 and code[0].owner_agent == "Nova"
+
+    def test_full_brain_answers_from_the_specialists_own_brain(self, tmp_path, monkeypatch):
+        from src.providers import factory
+
+        probe = _TextProbe("A heat pump moves warmth by compressing a refrigerant.")
+        monkeypatch.setitem(factory._BUILDERS, "closure_text_probe", lambda settings, env=None, account=None: probe)
+        _sandbox(tmp_path, monkeypatch)
+        system = su.build_live_system(_settings(
+            tmp_path, media="local", provider="closure_text_probe", brain="llm", specialist_brain="llm",
+        ))
+        _run(system, "agent create nova Nova|general work|general_assistance")
+
+        turn = _say(system, "Nova, explain how a heat pump moves warmth in winter", to="Nova")
+        assert turn.succeeded, turn.outcome
+        assert turn.handled_by == "Nova"
+        assert turn.outcome == "A heat pump moves warmth by compressing a refrigerant."
+        assert any("specialist agent" in system_prompt for _p, system_prompt in probe.prompts)
+
+    def test_an_ungranted_specialist_is_refused(self, system):
+        _run(system, "agent create nova Nova|general work")
+        turn = _say(system, self.ASK, to="Nova")
+        assert not turn.succeeded
+        assert "general_assistance, which I'm not authorised for" in turn.outcome
+
+
+class TestTheTrailNamesTheCapabilityASpecialistActuallyRan:
+    """Repair 2. The Control Center is a management *and assessment* surface:
+    what a specialist did must be visible there, and a consequential action
+    must reach the durable audit log whoever performed it."""
+
+    def test_every_capability_a_specialist_runs_is_named_including_failures(self, system):
+        _run(system, "agent create nova Nova|images|create_diagram,revise_diagram,image_comparison")
+
+        made = _say(system, "Nova, make a diagram of a water filter", to="Nova")
+        assert made.succeeded and made.capability == "create_diagram"
+        revised = _say(system, "Nova, revise the diagram: add a carbon stage", to="Nova")
+        assert revised.succeeded and revised.capability == "revise_diagram"
+        # A failure carries no payload at all, and is still named.
+        failed = _say(system, "Nova, compare these two images", to="Nova")
+        assert not failed.succeeded and failed.capability == "image_comparison"
+
+    def test_a_specialists_real_consequential_action_is_written_to_the_audit_log(self, tmp_path, monkeypatch):
+        from src.providers import communication_factory
+        from src.services.audit.action_log import load_action_log
+
+        provider = _WorkingCommunicationProvider()
+        monkeypatch.setitem(
+            communication_factory._BUILDERS, "closure_comm_probe",
+            lambda settings, env=None, account=None: provider,
+        )
+        _sandbox(tmp_path, monkeypatch)
+        system = su.build_live_system(_settings(tmp_path, communication_provider="closure_comm_probe"))
+        log = tmp_path / "action_log.json"
+
+        def say(text, to=None):
+            return exchange(system.channel, system.conversation, text, addressed=to, action_log_path=log)
+
+        _run(system, "agent create clara Clara|operations|communication")
+        raised = say("Clara, send Kai a message saying hello", to="Clara")
+        assert raised.succeeded and "(yes/no)" in raised.outcome
+        # Nothing was executed, so nothing is recorded yet.
+        assert load_action_log(log) == ()
+
+        confirmed = say("yes", to="Clara")
+        assert confirmed.succeeded and provider.sent == [("Kai", "saying hello")]
+        assert [(e.actor, e.capability, e.succeeded) for e in load_action_log(log)] == [
+            ("Clara", "communication", True),
+        ]
+
+        say("send Rema a message saying hello")
+        say("yes")
+        assert [(e.actor, e.capability) for e in load_action_log(log)] == [
+            ("Clara", "communication"), ("Alfred", "communication"),
+        ]

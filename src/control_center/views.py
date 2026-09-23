@@ -584,6 +584,15 @@ class ConversationTurn:
     # whole of it rather than only a short first paragraph. Set only from
     # the handling capability's own payload, never inferred from the text.
     speak_in_full: bool = False
+    # True when this turn only *raised* a confirmation question ("Send X to
+    # Y? (yes/no)") and executed nothing - read from the same payload key
+    # the confirming capability already writes ("awaiting": "confirmation"),
+    # never inferred from the text. Carried for one reader:
+    # ``scripts/exchange.py``'s durable consequential-action audit log,
+    # which must not record "communication succeeded" for a turn in which
+    # no message was sent. The answering "yes" runs the real action and is
+    # recorded then, once.
+    awaiting_confirmation: bool = False
 
 
 # ---------------------------------------------------------------------------

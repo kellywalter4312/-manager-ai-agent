@@ -40,6 +40,7 @@ from src.manager.brain import BrainDecision, GovernanceBrainVerdict
 from src.manager.capabilities import (
     CONNECTED_ACTION,
     CORRECT_MEMORY,
+    HANDLED_BY_KEY,
     named_connection,
     MANAGER_CAPABILITIES,
     is_new_memory_statement,
@@ -722,7 +723,7 @@ class ManagerSkills(BaseAgent):
         # Pre-Stage-9 Campaign 10 (CON-04): a pending confirmation or
         # clarification is resolved through open conversation on behalf of the
         # capability that raised it - the trail names the one that answered.
-        handled_by = (result.payload or {}).get("handled_by") if result is not None else None
+        handled_by = (result.payload or {}).get(HANDLED_BY_KEY) if result is not None else None
         if isinstance(handled_by, str) and handled_by != capability.name and handled_by in self._capabilities:
             self._last_selected = (task.id, handled_by)
         return result

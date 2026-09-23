@@ -711,6 +711,17 @@ def invitation_intent(task: Task, participants: Sequence[str] = ()) -> bool:
 
 INVITED_KEY = "invited"
 
+# What every capability handler in this module already writes into its own
+# result payload to name itself ("handled_by": "translate", ...). Named here
+# because two *readers* outside this function depend on it being that exact
+# fact rather than a re-derivation: ``ManagerSkills.execute`` (which corrects
+# the capability it recorded when a pending confirmation was resolved on
+# another capability's behalf) and ``src/control_center/trail.py`` (which
+# reports which capability actually answered). The ~100 handlers that write
+# it keep their literals - this names the contract for the side that reads
+# it, exactly as ``INVITED_KEY`` above already does for one payload field.
+HANDLED_BY_KEY = "handled_by"
+
 
 def invite_participant(request: CapabilityRequest) -> TaskResult:
     """Work out which registered agent a person is asking to bring in.
@@ -8178,8 +8189,29 @@ _QUOTED = re.compile(r"^['\"\u2018\u201c].+['\"\u2019\u201d]$")
 
 
 def translation_request(text: str) -> "tuple[str, str] | None":
-    """``(phrase, target language)`` for a translation request, or None."""
-    working = str(text or "").strip()
+    """``(phrase, target language)`` for a translation request, or None.
+
+    The four patterns below are anchored on purpose - "what's the weather in
+    Paris" names a place, not a language, and only anchoring keeps a
+    translation request distinguishable from an ordinary question that
+    happens to contain "in <word>". Anchoring alone, though, also refused
+    every request that opens by naming who is being asked: "Nova, translate
+    'the harvest begins at dawn' into Italian" matched nothing at all, so a
+    specialist genuinely granted ``translate``, with real offline language
+    packs installed, fell through to open conversation and answered "no
+    language model is configured" - a registered, granted capability that
+    was unreachable through the one way a person actually addresses a
+    specialist (found at runtime, 2026-09-23, not by reading code; Alfred
+    addressed by name was refused identically).
+
+    ``_strip_vocative`` is exactly the instrument for that, and is already
+    what ``_communication_shape``, ``select_voice`` and six other anchored
+    shapes in this module use - "who was addressed is not what was asked".
+    Applied here rather than duplicated: the negative cases stay negative
+    (no leading "<name>," to remove), and nothing about the anchoring that
+    keeps them negative changes.
+    """
+    working = _strip_vocative(text).strip()
     for index, pattern in enumerate(_TRANSLATE_PATTERNS):
         match = pattern.match(working)
         if match is None:
