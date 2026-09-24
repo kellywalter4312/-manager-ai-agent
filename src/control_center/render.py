@@ -401,6 +401,21 @@ def render_turn(turn: ConversationTurn, columns: int | None = None) -> str:
     if turn.detail and turn.detail not in (turn.outcome or ""):
         out += _wrap(turn.detail, columns)
 
+    # Phase 10: a discussion's turns, each under its own speaker's name - read
+    # from the report the discussion produced, never re-derived here.
+    discussion = turn.discussion or {}
+    if discussion.get("turns") or discussion.get("note"):
+        out.append("")
+        subject = discussion.get("subject")
+        out.append(f"DISCUSSION{f' - {subject}' if subject else ''}")
+        for spoken in discussion.get("turns", ()):
+            label = spoken["speaker"] if spoken["outcome"] == "spoke" else f"{spoken['speaker']} ({spoken['outcome']})"
+            out += _wrap(f"{label}: {spoken['text']}", columns)
+        if discussion.get("note"):
+            out += _wrap(str(discussion["note"]), columns)
+    if turn.dismissed:
+        out.append(f"  {turn.dismissed} left the conversation.")
+
     return "\n".join(out)
 
 

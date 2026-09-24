@@ -143,6 +143,20 @@ def _no_api_keys(monkeypatch):
         monkeypatch.delenv(name, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _sessions_in_tmp(tmp_path, monkeypatch):
+    """Every test keeps its conversation sessions in its own temporary
+    directory. Phase 10 saves a room's session after every turn through the
+    real doors (the terminal's run_command, the served /message route), so
+    without this any test driving those doors would try to write into the
+    real data/sessions - which the guard above would, rightly, refuse. The
+    store reads this attribute at each save, so redirecting it here is the
+    whole isolation."""
+    import src.services.sessions.store as session_store
+
+    monkeypatch.setattr(session_store, "DEFAULT_SESSIONS_DIR", tmp_path / "sessions")
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _no_network():
     """Make any outbound connection a loud failure for the whole session.

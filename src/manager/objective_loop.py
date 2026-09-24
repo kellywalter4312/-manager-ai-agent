@@ -68,6 +68,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from src.core.contracts import Task, TaskResult
+from src.manager.capabilities import hands_act_to_room
 from src.manager.collaboration_entry import answer_with_collaboration
 from src.manager.manager import ManagerAgent
 from src.utils.logging import get_logger, task_logger
@@ -252,6 +253,19 @@ def pursue_objective(
 
     first_result = answer_with_collaboration(manager, task)
     steps: list[ObjectiveStep] = [ObjectiveStep(task, first_result)]
+
+    # Phase 10: a request whose whole effect is an act the room's owner
+    # carries out (invite, excuse, open or steer a discussion) is complete in
+    # the step that resolved it. Found live with a real model: pursuing it
+    # further replaced the resolved result with a composed "objective is
+    # complete", the act in its payload was dropped, and the discussion that
+    # was asked for never opened. Stopping here is exactly what Half Brain
+    # already does below.
+    if hands_act_to_room(first_result):
+        status = ObjectiveStatus.COMPLETED if first_result.succeeded else ObjectiveStatus.FAILED
+        return ObjectiveOutcome(
+            objective=task.description, status=status, result=first_result, steps=tuple(steps)
+        )
 
     if not manager.can_reason:
         # Half Brain: no genuine way to judge whether more is needed

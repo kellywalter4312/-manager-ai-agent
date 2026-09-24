@@ -312,7 +312,12 @@ class TestThisIsNotASecondRouter:
             "communication", "complete_task", "connected_action", "correct_memory",
             "create_3d_model", "create_artifact",
             "create_diagram",
-            "create_task", "current_datetime", "forget",
+            "create_task", "current_datetime",
+            # Phase 10: a discussion among the room's participants, recognised
+            # by a discussion word followed by a participant's name or the room
+            # - never by "discuss" or "meeting" alone (conversation, calendar).
+            "discussion",
+            "forget",
             "general_assistance", "generate_document", "image_analysis",
             # Pre-Stage-9 Campaign 8: an authenticity question is recognised by
             # its shape (an edited/fake/generated word about a picture, asked).
@@ -323,7 +328,10 @@ class TestThisIsNotASecondRouter:
             "image_comparison", "image_transform",
             "knowledge", "list_recordings", "list_tasks", "live_information",
             "media_production",
-            "milestone_recognition", "participant_invitation", "personal_context",
+            "milestone_recognition",
+            # Phase 10: "dismiss/excuse <agent>", the name directly after the verb.
+            "participant_dismissal",
+            "participant_invitation", "personal_context",
             # Whole-ecosystem campaign: guidance is recognised by its asking
             # shapes (a situation, a week to plan, a life question), never a topic.
             "personal_guidance",

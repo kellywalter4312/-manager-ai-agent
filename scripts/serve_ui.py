@@ -168,6 +168,7 @@ from scripts.control_center import (  # noqa: E402
 )
 from scripts.exchange import (  # noqa: E402
     build_recording_record,
+    default_session_store,
     exchange,
     memory_for,
     record_shared_file,
@@ -522,6 +523,7 @@ def route_message(
             turn = exchange(
                 system.channel, system.conversation, text.strip(),
                 addressed=addressed, speak=voice_output != "device", action_log_path=DEFAULT_ACTION_LOG_PATH,
+                sessions=default_session_store(),
             )
     except Exception:  # noqa: BLE001 - an HTTP boundary must not crash the process
         logger.exception("live message handling failed")
@@ -553,6 +555,11 @@ def route_message(
             # boundary a future avatar/environment renderer would read
             # from. None for every ordinary turn.
             "celebration": turn.celebration,
+            # Phase 10: a discussion's report (each turn under its own
+            # speaker's name) and anyone excused from the room - read from
+            # the turn, None for every ordinary turn.
+            "discussion": turn.discussion,
+            "dismissed": turn.dismissed,
         }
     ).encode("utf-8")
     return 200, body, "application/json; charset=utf-8"

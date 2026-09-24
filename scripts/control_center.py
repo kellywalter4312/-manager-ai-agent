@@ -47,7 +47,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from scripts.exchange import exchange, memory_for, record_shared_file  # noqa: E402
+from scripts.exchange import default_session_store, exchange, memory_for, record_shared_file  # noqa: E402
 from src.services.audit.action_log import (  # noqa: E402
     DEFAULT_ACTION_LOG_PATH,
     ActionLogEntry,
@@ -172,6 +172,7 @@ from src.services.evolution.inventory import (  # noqa: E402
     TOOL_DOCUMENT_GENERATION,
     brain_development_snapshot,
     discover_components,
+    is_manager_component,
     memory_development_snapshot,
 )
 from src.services.evolution.ledger_store import DEFAULT_LEDGER_PATH, load_evolution_state  # noqa: E402
@@ -211,6 +212,11 @@ HELP = """
   status system            heartbeat, permissions, tools, health
   history                  what happened this session - rebuilt fresh every run
   history <category>       filter: memory, report
+  sessions                 saved conversation sessions, newest first
+  sessions current         this session: who is here, discussions, hand-overs
+  sessions resume <id|latest>
+                           continue a saved session here - its room,
+                           discussion and hand-overs pick up where they were
   actions                  the last 20 consequential tool actions, durably
                            recorded across restarts (see 'Memory' step
                            in a talk trail for when one is recorded)
@@ -696,7 +702,11 @@ def _apply_evolution_live(centre: "ControlCenter", component_id: str) -> str:
         return _apply_reasoning_live(centre, load_credential_store(DEFAULT_ACCOUNTS_PATH))
     if component_id.startswith("capability.") or component_id.startswith("image_technique."):
         return " Live now: the running session reads this governed value on every turn."
-    if component_id == "alfred" or component_id.startswith("specialist."):
+    # By role, never by a name: the caller has already resolved a legacy id to
+    # the canonical "manager", so a literal legacy name here never matched and
+    # the orchestrator's evolved identity was reported "applied live" when it
+    # is only re-read by a new session (found by the Phase 10 hardcoding gate).
+    if is_manager_component(component_id) or component_id.startswith("specialist."):
         return (
             " The identity document is re-read by every new session - restart (or 'reload') to hear "
             "the evolved identity; this conversation keeps the one it started with."
@@ -3871,6 +3881,84 @@ def _record_if_administrative_write(command: str, result: str, action_log_path) 
     )
 
 
+def run_sessions_command(conversation: Conversation, rest: str) -> str:
+    """Phase 10: saved sessions - list them, show this one, resume one.
+
+    A session is the record of a room (src/conversation/session.py), kept by
+    the one store this process shares (src/services/sessions/store.py), so
+    whichever surface a person uses can continue a session another started.
+    Resuming replaces this room's contents in place - who is here, what was
+    said, any open discussion and the hand-overs - so every surface holding
+    the room sees the resumed session. Nothing here touches any agent's memory.
+    """
+    store = default_session_store()
+    current = store.session_for(conversation)
+    args = rest.split()
+    action = args[0].lower() if args else "list"
+
+    if action == "current":
+        lines = [current.describe()]
+        active = current.active_discussion
+        if active is not None:
+            lines.append(f"  open: {active.describe()}")
+            if active.floor.holder:
+                lines.append(f"  floor: {active.floor.describe()}")
+        for discussion in current.discussions:
+            if discussion is not active:
+                lines.append(f"  {discussion.describe()}")
+        for record in current.delegations[-10:]:
+            lines.append(f"  hand-over: {record.describe()} - {record.request}")
+        if store.last_error:
+            lines.append(f"  NOT SAVED: {store.last_error}")
+        return "\n".join(lines)
+
+    if action == "list":
+        saved = store.saved()
+        if not saved:
+            return f"no saved sessions yet. This one is {current.id}."
+        lines = [f"saved sessions ({len(saved)}), newest first:"]
+        for summary in saved[:20]:
+            if "unreadable" in summary:
+                lines.append(f"  {summary['id']}  UNREADABLE: {summary['unreadable']}")
+                continue
+            marker = "*" if summary["id"] == current.id else " "
+            who = ", ".join(summary["participants"])
+            open_ = f"  open discussion: {summary['open_discussion']}" if summary["open_discussion"] else ""
+            lines.append(
+                f" {marker}{summary['id']}  {summary['started_at'][:16]}  "
+                f"{summary['utterances']} said  [{who}]{open_}"
+            )
+        return "\n".join(lines)
+
+    if action == "resume":
+        if len(args) < 2:
+            return "usage: sessions resume <id|latest>"
+        wanted = args[1]
+        if wanted.lower() == "latest":
+            others = [s for s in store.saved() if s["id"] != current.id and "unreadable" not in s]
+            if not others:
+                return "there is no other saved session to resume."
+            wanted = others[0]["id"]
+        if wanted == current.id:
+            return f"session {wanted} is already the current one."
+        try:
+            loaded = store.load(wanted)
+        except (FileNotFoundError, ValueError):
+            return f"no saved session called '{wanted}'. Try 'sessions'."
+        except Exception as exc:  # noqa: BLE001 - a damaged record is reported, never half-loaded
+            return f"FAILED: session '{wanted}' could not be read: {type(exc).__name__}: {exc}"
+        store.save(current)
+        resumed = store.bind(conversation, loaded)
+        active = resumed.active_discussion
+        still_open = f" The discussion on '{active.subject}' is still open." if active else ""
+        return (
+            f"resumed session {resumed.id}: {len(conversation.participants)} participant(s), "
+            f"{len(conversation)} utterance(s), {len(resumed.delegations)} hand-over(s).{still_open}"
+        )
+
+    return "usage: sessions | sessions current | sessions resume <id|latest>"
+
+
 def run_command(
     centre: ControlCenter,
     command: str,
@@ -4591,12 +4679,16 @@ def run_command(
         _record_if_administrative_write(command, result, action_log_path)
         return result
 
+    if verb == "sessions":
+        return run_sessions_command(conversation, rest)
+
     if verb == "talk":
         if not rest:
             return (f"say what you would like {centre.runtime.identity.name} to do, "
                     "for example: talk scan my inbox")
         return render_turn(
-            exchange(channel, conversation, rest, action_log_path=DEFAULT_ACTION_LOG_PATH), columns
+            exchange(channel, conversation, rest, action_log_path=DEFAULT_ACTION_LOG_PATH,
+                     sessions=default_session_store()), columns
         )
 
     # Anything else is treated as something to say to Alfred. Talking is the
@@ -4609,7 +4701,8 @@ def run_command(
     # is the same one. What changed is that text and voice now share one path
     # instead of voice having a path nobody used.
     return render_turn(
-        exchange(channel, conversation, command, action_log_path=DEFAULT_ACTION_LOG_PATH), columns
+        exchange(channel, conversation, command, action_log_path=DEFAULT_ACTION_LOG_PATH,
+                 sessions=default_session_store()), columns
     )
 
 

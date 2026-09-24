@@ -42,7 +42,10 @@ import sys
 from src.channels.speech import NoSpeech, SpeechAdapter, SpeechUnavailable
 from src.control_center.trail import observe
 from src.control_center.views import ConversationTurn
+from typing import Sequence
+
 from src.core.contracts import Task
+from src.core.shared_context import SharedNote, with_shared_context
 from src.manager.manager import ManagerAgent
 from src.services.identity.presence import (
     PresenceRegistry,
@@ -204,8 +207,13 @@ class Channel(ABC):
         *,
         explain: bool = True,
         addressed: str | None = None,
+        context: "Sequence[SharedNote]" = (),
     ) -> Response:
         """Put one request to Alfred. Does not present it, and does not speak.
+
+        ``context`` (Phase 10) is shared context the room's owner deliberately
+        attaches - an open discussion's contributions, attributed - carried on
+        the Task for whoever handles it. Empty for every ordinary request.
 
         **The single path.** Every channel funnels through here, and here
         funnels through `observe`, which is the same function the Control
@@ -221,7 +229,7 @@ class Channel(ABC):
         # context and the Manager decides what it means.
         turn = observe(
             self._manager,
-            Task(description=request),
+            with_shared_context(Task(description=request), context),
             explain=explain,
             addressed=addressed,
         )

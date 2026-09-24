@@ -18,7 +18,7 @@ from dataclasses import replace
 
 from pathlib import Path
 
-from src.channels.channel import Channel, speakable
+from src.channels.channel import Channel, Response, speakable
 from src.control_center.views import ConversationTurn, TrailStep
 from src.conversation.conversation import (
     Conversation,
@@ -26,12 +26,16 @@ from src.conversation.conversation import (
     ParticipantKind,
     Utterance,
 )
+from src.conversation.session import DelegationRecord
 from src.core.contracts import Task
 from src.manager.collaboration_entry import (
     answer_with_collaboration,
     collaboration_candidates,
     start_collaboration,
 )
+from src.manager.discussion import act_on as act_on_discussion
+from src.manager.discussion import discussion_notes, note_agent_reply, note_person_remark
+from src.services.sessions.store import SessionStore, default_session_store
 from src.services.audit.action_log import (
     CONSEQUENTIAL_CAPABILITIES,
     ActionLogEntry,
@@ -47,6 +51,11 @@ from src.services.memory.user_facts import extract_declared_facts, structure_dat
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+# Phase 10: the session a room belongs to - its discussions and delegations -
+# for a caller that passes no store of its own. Sessions held here live for
+# this process and are never written; production callers pass the real store.
+_UNSAVED_SESSIONS = SessionStore(persist=False)
 
 # Re-exported so existing callers (and tests) that import
 # start_collaboration / collaboration_candidates / answer_with_collaboration
@@ -71,6 +80,8 @@ __all__ = [
     # already have for record_this.
     "build_recording_record",
     "record_shared_file",
+    # Phase 10: the one session store every door of this process shares.
+    "default_session_store",
 ]
 
 
@@ -150,8 +161,14 @@ def exchange(
     addressed: str | None = None,
     speak: bool = False,
     action_log_path: "str | Path | None" = None,
+    sessions: "SessionStore | None" = None,
 ):
     """One request and its answer, recorded in the room they happened in.
+
+    ``sessions`` (Phase 10), when given, is where this room's session - its
+    discussions and delegations - is kept and saved after the turn; a caller
+    that passes none still gets working discussions for this process, and
+    nothing is written. The same opt-in shape ``action_log_path`` has.
 
     The room is a record, not a router. It is told who spoke and what was said
     *after* the fact; it does not decide who answers, and removing it would
@@ -234,10 +251,25 @@ def exchange(
         Utterance(speaker=person, text=request, addressed=to_agent or inferred)
     )
 
+    store = sessions if sessions is not None else _UNSAVED_SESSIONS
+    session = store.session_for(conversation)
+    active = session.active_discussion
+
     # What is passed is context, not an instruction. The Manager decides what
     # an address means - see ManagerAgent.decide - because a room that could
     # pick an agent would be a second router.
-    response = channel.ask(request, addressed=to_agent)
+    #
+    # Phase 10: while a discussion is open, a participant the person speaks to
+    # directly is shown the discussion so far - the same attributed shared
+    # context its turns receive, read through the discussion's own membership
+    # check, so an agent not taking part is shown nothing.
+    context = ()
+    if active is not None and to_agent and active.collaboration.has(to_agent):
+        context = discussion_notes(active, to_agent)
+    if context:
+        response = channel.ask(request, addressed=to_agent, context=context)
+    else:
+        response = channel.ask(request, addressed=to_agent)
     turn = response.turn
 
     # Foundation Repair #3 (reconciliation audit, 2026-09-05): run before the
@@ -299,6 +331,11 @@ def exchange(
         conversation.say(Utterance(speaker=speaker, text=answer, detail=turn))
 
     admit_invited(conversation, turn)
+    turn = _carry_out_session_work(
+        channel, session, turn, person=person, request=request, answer=answer,
+        speaker=speaker, active=active, speak=speak, addressed_to=to_agent,
+    )
+    store.save(session)
 
     # A turn that only raised the confirmation question ("Send X to Y?
     # (yes/no)") executed nothing, so it is not a consequential action and
@@ -320,6 +357,78 @@ def exchange(
             path=action_log_path,
         )
 
+    return turn
+
+
+def _carry_out_session_work(
+    channel: Channel, session, turn, *, person: str, request: str, answer: str,
+    speaker: str, active, speak: bool, addressed_to: str | None = None,
+):
+    """Phase 10: what a turn means for the session the room belongs to.
+
+    Everything here acts on facts the turn already carries - who handled it,
+    whether it was a hand-over, what the orchestrator's own capability
+    resolved - and never re-decides them:
+
+        dismissed    the Manager resolved a request to excuse somebody: they
+                     leave the room (what they said stays)
+        delegated    the orchestrator handed the work to another participant:
+                     the hand-over is recorded, originator and target both
+                     runtime identities. A turn the person addressed to that
+                     participant directly is not a hand-over - nobody handed
+                     it over - and is not recorded as one.
+        discussion   the Manager resolved a discussion request: it is carried
+                     out through src/manager/discussion.py, each speaker in
+                     its own voice when speech is on
+        invited      while a discussion is open, somebody invited into the
+                     room takes part in it from the next round
+        otherwise,   while a discussion is open, the person's words and a
+                     participant's direct answer join its shared context
+
+    Returns the turn, carrying the discussion's report when there was one."""
+    conversation = session.conversation
+    manager = channel.manager
+    orchestrator = manager.own_skills.name if manager.own_skills is not None else None
+
+    if turn.dismissed and turn.dismissed != orchestrator and conversation.has(turn.dismissed):
+        conversation.leave(turn.dismissed)
+
+    # Somebody invited while a discussion is open takes part in it from the
+    # next round - joining a meeting in progress, not only the room.
+    if (turn.invited and active is not None and active.is_open
+            and conversation.has(turn.invited) and not active.collaboration.has(turn.invited)):
+        session.admit(active, turn.invited)
+
+    if turn.delegated and speaker and speaker != addressed_to:
+        routing = next((s.detail for s in turn.steps if s.label == "Routing decision"), "")
+        session.record_delegation(DelegationRecord(
+            originator=turn.manager or (orchestrator or ""),
+            target=speaker,
+            request=request,
+            succeeded=turn.succeeded,
+            outcome=(answer or "")[:1000],
+            reason=routing,
+        ))
+
+    if turn.discussion:
+        report = act_on_discussion(manager, session, turn.discussion)
+        if speak:
+            for spoken in report.get("turns", ()):
+                said = replace(
+                    turn, handled_by=spoken["speaker"], outcome=spoken["text"], detail="",
+                    delegated=False, celebration=None, invited=None, discussion=None, dismissed=None,
+                    speak_in_full=True,
+                )
+                channel.deliver(Response(text=spoken["text"], speech=speakable(said), spoken=False, turn=said))
+        return replace(turn, discussion={**turn.discussion, **report})
+
+    if active is not None and active.is_open:
+        note_person_remark(session, active, person, request)
+        # Only an answer that succeeded is a contribution. A participant
+        # saying it could not answer is recorded in the room as what it said,
+        # never published as a view the others should respond to.
+        if answer and speaker and speaker != orchestrator and turn.succeeded:
+            note_agent_reply(session, active, speaker, answer)
     return turn
 
 

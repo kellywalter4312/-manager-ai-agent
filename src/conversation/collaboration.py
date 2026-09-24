@@ -167,6 +167,27 @@ class Collaboration:
         for participant in participants:
             self.join(participant)
 
+    @classmethod
+    def restore(
+        cls,
+        task: str,
+        participants: Iterable[Participant],
+        contributions: Iterable[Contribution],
+        *,
+        id: str,
+        started_at: datetime,
+        closed_at: datetime | None = None,
+    ) -> "Collaboration":
+        """A collaboration rebuilt from a saved record of one. Every
+        contribution must still name one of the restored participants - a
+        saved record is held to the same provenance rule ``contribute``
+        applies, so a record edited to name a stranger is refused."""
+        collaboration = cls(task, participants, id=id, started_at=started_at)
+        for contribution in contributions:
+            collaboration.contribute(contribution)
+        collaboration._closed_at = closed_at
+        return collaboration
+
     # ------------------------------------------------------------------
     # Who is here
     # ------------------------------------------------------------------

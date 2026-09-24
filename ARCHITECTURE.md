@@ -12580,3 +12580,194 @@ a catalog - and after a genuine rebuild the classification is unchanged (20/20).
 
 **Not started, deliberately:** Phase 10. This entry closes the integrity pass
 that precedes it.
+
+## 53. Phase 10 - Multi-Agent Intelligence (2026-09-24)
+
+The orchestrator works *with* other agents, not only through them: it hands a
+named participant a piece of work, holds a discussion among the room's
+participants in turn - each shown what the others said - takes the person's
+words into it, concludes it from what was actually said, and keeps the whole
+session so it can be continued after a restart from any surface. Nothing in it
+knows who today's agents are: every participant used to prove it was a
+temporary specialist created through the governed `agent create`.
+
+### What already existed, and was reused as it was
+
+| Existing mechanism | Role in Phase 10 |
+|---|---|
+| `Conversation` (a room of identities, never agents) | the room every interaction happens in, unchanged except `restore`/`adopt` |
+| `Collaboration` / `Contribution` (the Shared Context Graph, 50) | the shared context of each discussion, with provenance and membership |
+| `ManagerAgent` DATA loop (decide, assemble, take action, assess, record) | the only path a hand-over takes |
+| capability `authority` (grantable / every_agent / manager) | who may open a discussion, delegate or excuse somebody |
+| `participant_invitation` | bringing somebody in, now also into an open discussion |
+| each agent's own `converse` / `general_conversation` | how a participant speaks in a discussion |
+| `VoiceChannel._voice_for_agent` / `spoken_audio_for` | each speaker's own effective VoiceProfile through the configured provider |
+| `run_command` / `exchange` / `route_message` | the doors - terminal and served page reach the same session |
+
+### What was added
+
+- `src/conversation/floor.py` - turn-taking as data. A round is opened with
+  whatever order the orchestrator gives it; only the holder of the floor may
+  take the turn; somebody not in the room cannot be given one; somebody who
+  left is skipped *on the record*; a person may interject at any time without
+  anybody losing their place; a round can be cancelled. No order, count or
+  role is written in it.
+- `src/conversation/session.py` - a `Session`: the room, its discussions
+  (each a `Collaboration` for shared context plus a `Floor`) and its
+  `DelegationRecord`s, serialisable. One open discussion at a time. A saved
+  record is held to the same provenance rule a live one is: a contribution
+  naming a stranger is refused on restore.
+- `src/services/sessions/store.py` - one JSON file per session, written whole
+  and atomically after every turn, and one store per process so every door
+  sees the same live session. `DEFAULT_SESSIONS_DIR` is read at each save, and
+  `tests/conftest.py` redirects it per test, so no test can write real
+  sessions. A session is **not** agent memory: nothing here reads or writes any
+  agent's store.
+- `src/core/shared_context.py` - the one carrier of deliberately shared
+  context: `SharedNote`s on `Task.payload`, each attributed (who), typed
+  (kind) and scoped (where), and each line a brain is given begins
+  `[shared ...]`, the counterpart of the `recalled` prefix memory notes carry.
+  `Channel.ask(context=...)` puts it on the Task; a specialist's
+  `general_conversation` and the orchestrator's `open_conversation` pass it to
+  their own brain. Private memory never travels this way - nothing copies it
+  onto a task.
+- `src/manager/delegation.py` + `ManagerAgent.delegation_for` / `_delegate` -
+  explicit hand-over: "ask/tell/get <agent> to <work>", "have/let <agent>
+  <work>". The target is resolved by the registry and never the orchestrator;
+  the named agent receives *the work*, not the sentence, carrying
+  `delegated_by` and `delegation_of`; the result is assessed, evented and
+  remembered exactly as every delegation is. Only a request addressed to the
+  orchestrator (or to nobody) is read this way, so a specialist - addressed by
+  voice or by the agent selector - can never hand work to a peer.
+- `src/manager/discussion.py` - discussions. Opening resolves the named
+  participants through the registry (joining them to the room; an unknown name
+  is reported, never invented) or takes every agent in the room. Each round
+  hears the participants in the order they joined the discussion, then the
+  chair - a role, never a name. On its turn a participant is shown every
+  contribution so far as attributed shared context and answers through **its
+  own conversation path, never `execute()`**, so discussing a piece of work
+  cannot perform it. A spoken turn is said in the room under the runtime
+  speaker's name and published with `relates_to` naming what it was shown; a
+  declined turn is said but never published as a view. The conclusion is the
+  chair's own synthesis from the contributions, or - without a model - a
+  statement of who contributed how much and that no synthesis was made.
+- Two Manager-only capabilities, each with a stated reason: `discussion`
+  (open / continue / conclude / cancel; claimed only when a discussion word is
+  followed by a registered participant's name or "everyone/everybody/all of
+  you", and never with scheduling words, so "schedule a meeting" stays the
+  calendar's and "<orchestrator>, let's discuss X" stays conversation) and
+  `participant_dismissal` ("dismiss/excuse <agent>", the name directly after
+  the verb). Both resolve and return; the room's owner (`exchange`) acts.
+- `sessions` Control Center command - list, current, `resume <id|latest>`.
+  Resuming adopts the saved session into the live room in place, rebinding
+  every discussion's floor to it, so every surface holding the room continues
+  the same session.
+
+### Defects found while building and verifying it, and repaired
+
+1. **A failed answer was published as a view.** While a discussion was open, a
+   participant's honest "I can't reason about that" became a contribution and
+   the conclusion credited it. Only a successful answer is now published.
+2. **A direct address was recorded as a hand-over.** "<agent>, what do you
+   think?" was saved as "<orchestrator> -> <agent>". Only work the
+   orchestrator handed over is a hand-over now.
+3. **Nobody could join a meeting in progress.** An invitation during an open
+   discussion put somebody in the room but not in the discussion. It now admits
+   them from the next round.
+4. **Discussing building something built it.** "let's discuss whether to build
+   a 3D model of a chair with <agents>" was claimed by the 3D capability too,
+   and the claim pass breaks ties by name - so the chair was built (it failed
+   only because the parts were not buildable). `select_capability` now answers
+   an explicit discussion request before any action capability's claim - the
+   second stated exception beside the crisis check, and not a priority list.
+5. **With a reasoning brain, the discussion never opened** - found only with
+   the real local model. The Full Brain objective loop pursued the resolved
+   request further and replaced its result with a composed "the objective is
+   complete", dropping the act in its payload. The same loss applied,
+   pre-existing, to an invitation. A result whose whole effect is an act the
+   room's owner carries out (`hands_act_to_room`: invited / dismissed /
+   discussion) now completes in the step that resolved it, exactly as Half
+   Brain already did.
+6. **An agent removed from the ecosystem mid-discussion was still given the
+   floor.** A round now queues only participants still in the room *and* still
+   registered.
+7. A room error inside a discussion (somebody no longer present) escaped as an
+   exception; it is now reported as the discussion's note.
+8. **Found by the pre-commit hardcoding gate, pre-existing:** the Control
+   Center decided how an applied evolution goes live with
+   `component_id == "alfred"` - a legacy agent name. Its caller had already
+   resolved that legacy id to the canonical role id `"manager"` (HC-01), so the
+   branch never matched, and an evolved orchestrator identity was reported
+   "applied live" (with a needless backend rebind) when an identity document is
+   only re-read by a new session. It now asks `is_manager_component()` - by
+   role, never by name.
+
+### Verified
+
+- **Tests:** `tests/test_phase_10_multi_agent.py`, 81 tests - the floor, the
+  session record and store, shared context, delegation, recognising a
+  discussion, a discussion through the real system (scripted reasoning
+  provider and Half Brain), voice identity, persistence and resume, both doors,
+  and a scan of every new module for current entity names. Mutation-verified
+  sixteen ways (no shared context; brain not given it; failed answer published;
+  address recorded as hand-over; specialist's words read as delegation; anyone
+  takes a held turn; a turn runs `execute()`; resumed floor keeps the dead room;
+  scheduled meeting claimed; invented conclusion; person's words dropped; fixed
+  round order; an action capability answering a discussion; the objective loop
+  swallowing a room act; a removed agent given the floor; the orchestrator's
+  identity recognised by name) - every one caught, every file restored
+  byte-identical.
+- **Genericity, end to end:** a specialist never used before, created through
+  `agent create`, went through registration, a capability grant, a discussion
+  turn (shown the previous speaker's words), identity (its own runtime name),
+  a hand-over, its own VoiceProfile and override, a genuine rebuild and resume,
+  revocation and `agent remove` - 13/13, with no source change and nothing left
+  in production state.
+- **Runtime, real composition root, sandboxed:** 27/27 Phase 10 checks
+  (Half Brain, restart and resume, a reasoning brain behind every agent, and
+  voice through the real Windows speech engine), with the real `data/` and
+  `identities/` fingerprinted byte-identical before and after.
+- **With the real local model** (Qwen2.5-1.5B via llama_cpp, `provider=local`,
+  `brain=llm`, `specialist_brain=llm`): the first speaker's prompt carried 0
+  shared lines, the second's 1 (the first's words), the chair's 2 - and the
+  chair answered "I agree with Probebeta's view ...". After the person said the
+  budget allows one campaign, round two opened "Given the budget constraints
+  ...", and the conclusion said "they also noted that the budget only allows
+  for one marketing campaign". The quality of what a 1.5B model says is the
+  model's; what is verified is that each participant was given, and used, what
+  the others said.
+- **Voice:** through the Windows engine each participant is synthesized in its
+  own resolved voice (on this machine Microsoft David, Hazel, David - three
+  installed voices, so two profiles can share one engine voice by default);
+  a participant's own override (pace, a chosen voice) reaches its speech and no
+  one else's; three distinct VoiceProfiles.
+- **No regression:** the pre-Phase-10 closure's 28 composition-root checks and
+  the 20 provider-axis checks still pass.
+
+### Recorded, not repaired
+
+- A session is resumed explicitly (`sessions resume`), never automatically: a
+  new start opens a new room, as 24 established. Continuing is a choice any
+  surface can make by the session's id.
+- In Full Brain with the small local model, an ordinary remark made during a
+  discussion ("Remember the budget ...") ran the pre-existing objective loop to
+  its five-step bound (20 model calls) before answering. **Classified as
+  pre-existing objective-loop behaviour, not a Phase 10 integration defect**,
+  by measuring the same remark with the same scripted reasoning provider on
+  three trees: at e69f75f (before Phase 10) with no discussion, now with no
+  discussion, and now during an open discussion - identical every time
+  (handled by the orchestrator through `open_conversation`, 8 model calls, 2
+  objective judgements). Phase 10 adds no route into that loop. And it does not
+  prevent Phase 10 behaviour: the remark still joined the discussion as the
+  person's contribution, and the next round ran with every participant shown
+  it. How many steps the loop takes is the model's judgement. Not changed here.
+- **Voices: an environment/provider constraint, not an architectural one.**
+  Whether distinct participants *sound* distinct depends on the voices the
+  configured provider offers (three installed Windows voices on this machine).
+  No installed voice name appears in any executable production code; the
+  installed list comes from the engine at run time; each participant's voice
+  is resolved from its own VoiceProfile (`_voice_for_agent`); an override
+  reaches only that participant; and nothing in the multi-agent code names a
+  provider, so another voice or provider needs no multi-agent change.
+
+**Not started:** Phase 11.

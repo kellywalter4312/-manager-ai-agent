@@ -59,6 +59,7 @@ from src.agents.base_agent import BaseAgent
 from src.agents.tools.tool import ToolResult
 from src.agents.tools.toolset import ToolSet
 from src.core.contracts import Task, TaskResult, tokenize
+from src.core.shared_context import shared_notes
 from src.manager.activity_session import (
     ActivityBrainOps,
     ActivitySessions,
@@ -777,6 +778,252 @@ def invite_participant(request: CapabilityRequest) -> TaskResult:
         f"{matched.name} can join this conversation.",
         payload={INVITED_KEY: matched.name, "available": tuple(a.name for a in available)},
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 10 - discussions and participant removal
+# ---------------------------------------------------------------------------
+#
+# The same division of labour invitation already has: these handlers resolve
+# *who* and *what* from the words and the roster, and return it in the payload.
+# They join, remove and run nothing - there is no room in scope. Whoever owns
+# the room (scripts/exchange.py) acts on the payload, and the discussion itself
+# is run by src/manager/discussion.py through each participant's own runtime.
+
+DISCUSSION_KEY = "discussion"
+DISMISSED_KEY = "dismissed"
+
+
+def hands_act_to_room(result: TaskResult) -> bool:
+    """Whether this result's whole effect is an act the room's owner carries
+    out - bringing somebody in, excusing somebody, opening or steering a
+    discussion - carried in its payload. Such a request is complete in the one
+    step that resolved it: re-pursuing it, or replacing its result with a
+    composed summary, would drop the act itself (see objective_loop.py)."""
+    payload = result.payload or {}
+    return any(key in payload for key in (INVITED_KEY, DISMISSED_KEY, DISCUSSION_KEY))
+
+# What makes a request about a discussion at all.
+DISCUSSION_WORDS = frozenset({
+    "discuss", "discussion", "discussions", "meeting", "conference", "brainstorm",
+    "brainstorming", "debate", "deliberate", "roundtable",
+})
+# The room as a whole, when no participant is named. Deliberately narrow:
+# "all", "team" and "together" are ordinary words ("discuss all the options",
+# "the team budget") and would make ordinary conversation a meeting.
+ROOM_WORDS = frozenset({"everyone", "everybody"})
+_ROOM_PHRASE = re.compile(r"\ball of you\b", re.IGNORECASE)
+# A discussion *now* is not a meeting to be put in a calendar. Any of these
+# and the request belongs to the calendar, exactly as before this existed.
+SCHEDULING_WORDS = frozenset({
+    "schedule", "scheduled", "reschedule", "calendar", "book", "booked", "appointment",
+    "remind", "reminder", "tomorrow", "today", "tonight", "monday", "tuesday",
+    "wednesday", "thursday", "friday", "saturday", "sunday", "am", "pm", "week",
+    "month", "next", "later",
+})
+_CONTINUE_WORDS = frozenset({"continue", "carry", "keep", "another", "round"})
+_CONCLUDE_WORDS = frozenset({"end", "conclude", "close", "finish", "wrap", "summarise", "summarize"})
+_CANCEL_WORDS = frozenset({"cancel", "abort", "stop", "abandon"})
+# The name must follow the verb directly: "excuse me, <agent>" is politeness,
+# and "remove" is left out entirely - "remove the meeting with <agent>" is
+# calendar work, not a request for anybody to leave.
+_DISMISS = re.compile(r"\b(?:dismiss|excuse)\s+(?P<rest>.+)$", re.IGNORECASE)
+
+
+def _discussion_action(tokens: frozenset[str]) -> str | None:
+    """continue / conclude / cancel when the words ask for one, else None."""
+    if not (tokens & DISCUSSION_WORDS):
+        return None
+    if tokens & _CANCEL_WORDS:
+        return "cancel"
+    if tokens & _CONCLUDE_WORDS:
+        return "conclude"
+    if tokens & _CONTINUE_WORDS:
+        return "continue"
+    return None
+
+
+def _names_after(text: str, position: int, names: Sequence[str]) -> tuple[str, ...]:
+    """Every name in ``names`` found in ``text`` after ``position``, as a whole
+    word, longest first so a longer name is not also counted as a shorter one.
+    A possessive ("<name>'s report") is somebody's thing, not somebody taking
+    part, so it never counts."""
+    found: list[tuple[int, str]] = []
+    taken: list[tuple[int, int]] = []
+    lowered = text.lower()
+    for name in sorted({" ".join(str(n).split()) for n in names if str(n).strip()}, key=len, reverse=True):
+        for match in re.finditer(rf"(?<![\w]){re.escape(name.lower())}(?![\w'’])", lowered):
+            if match.start() < position:
+                continue
+            if any(a <= match.start() < b for a, b in taken):
+                continue
+            taken.append((match.start(), match.end()))
+            found.append((match.start(), name))
+            break
+    return tuple(name for _, name in sorted(found))
+
+
+def discussion_intent(task: Task, participants: Sequence[str] = ()) -> bool:
+    """Whether this asks the orchestrator to open, continue, conclude or
+    cancel a discussion.
+
+    Continue/conclude/cancel need a discussion word and the action. Opening
+    needs a discussion word followed - later in the sentence - by a registered
+    participant's name or a word for the room as a whole, and no scheduling
+    word: "let's discuss the budget with <agent>" is a discussion now, while
+    "<orchestrator>, let's discuss the budget" stays ordinary conversation
+    and "schedule a meeting with <agent> on Friday" stays the calendar's.
+    No agent is named here - names arrive from the roster at call time."""
+    tokens = tokenize(task.description)
+    if not (tokens & DISCUSSION_WORDS) or (tokens & SCHEDULING_WORDS):
+        return False
+    if _discussion_action(tokens) is not None:
+        return True
+    words = task.description.lower()
+    opening = min(
+        (m.start() for w in DISCUSSION_WORDS for m in [re.search(rf"\b{w}\b", words)] if m),
+        default=None,
+    )
+    if opening is None:
+        return False
+    if _names_after(task.description, opening, participants):
+        return True
+    return bool(tokenize(words[opening:]) & ROOM_WORDS) or bool(_ROOM_PHRASE.search(words[opening:]))
+
+
+_SUBJECT = re.compile(
+    r"\b(?:discuss(?:ion)?|meeting|conference|brainstorm(?:ing)?|debate|deliberate|roundtable)\b"
+    r"(?:\s+(?:about|on|regarding|over|of))?\s+(?P<subject>.+)$",
+    re.IGNORECASE,
+)
+
+
+def _discussion_subject(text: str, names: Sequence[str]) -> str:
+    """What is to be discussed: the words after the discussion word, without
+    the list of who is to discuss it. Empty when nothing was named."""
+    match = _SUBJECT.search(text)
+    if match is None:
+        return ""
+    subject = match.group("subject")
+    # Drop a trailing "with <names ...>" / "with everyone" clause.
+    subject = re.split(r"\s+(?:with|between|among|amongst)\s+", subject, maxsplit=1, flags=re.IGNORECASE)[0]
+    for name in names:
+        subject = re.sub(rf"(?<![\w]){re.escape(name)}(?![\w])", "", subject, flags=re.IGNORECASE)
+    subject = re.sub(r"\s+(?:and|,)\s*$", "", subject.strip(" ,.!?"))
+    return " ".join(subject.split()).strip(" ,.!?")
+
+
+def discussion_request(request: CapabilityRequest) -> TaskResult:
+    """Resolve a discussion request: which action, on what subject, with whom.
+
+    Returns the resolution in the payload under ``DISCUSSION_KEY`` and opens,
+    runs and closes nothing itself. Names are matched against the registered
+    specialists (the orchestrator chairs every discussion it opens, so it is
+    never listed); a name nobody is registered under is not invented. With no
+    name, the discussion is with whoever is in the room."""
+    text = request.task.description
+    tokens = tokenize(text)
+    action = _discussion_action(tokens)
+    available = request.specialists()
+    names = tuple(a.name for a in available)
+    if action is not None:
+        return TaskResult.success(
+            request.task, request.own_name,
+            {"continue": "Continuing the discussion.", "conclude": "Concluding the discussion.",
+             "cancel": "Cancelling the discussion."}[action],
+            payload={HANDLED_BY_KEY: "discussion", DISCUSSION_KEY: {"action": action}},
+        )
+    opening = min(
+        (m.start() for w in DISCUSSION_WORDS for m in [re.search(rf"\b{w}\b", text.lower())] if m),
+        default=0,
+    )
+    named = _names_after(text, opening, names)
+    subject = _discussion_subject(text, names)
+    if not subject:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "What should we discuss? Name the subject - for example 'discuss the launch plan with everyone'.",
+        )
+    who = " and ".join(named) if named else "everyone in the room"
+    return TaskResult.success(
+        request.task, request.own_name,
+        f"Let's discuss {subject} - with {who}.",
+        payload={
+            HANDLED_BY_KEY: "discussion",
+            DISCUSSION_KEY: {"action": "open", "subject": subject, "with": list(named) or None},
+        },
+    )
+
+
+DISCUSSION = ManagerCapability(
+    authority="manager",
+    authority_reason=(
+        "opening a discussion decides who speaks with whom and in what order - "
+        "orchestration, which a specialist holding it would turn into a second Manager"
+    ),
+    name="discussion",
+    capabilities=frozenset({"discussion", "roundtable"}),
+    handle=discussion_request,
+    description="Opens, continues, concludes or cancels a discussion among the room's participants.",
+    claims=discussion_intent,
+    # Reachable only through its own shape check: "discuss" alone is ordinary
+    # conversation and must stay open_conversation's.
+    scoreable=False,
+)
+
+
+def _dismissed_name(text: str, names: Sequence[str]) -> str | None:
+    """The registered name directly after "dismiss"/"excuse", or None."""
+    match = _DISMISS.search(str(text or ""))
+    if match is None:
+        return None
+    rest = match.group("rest")
+    named = _names_after(rest, 0, names)
+    if not named:
+        return None
+    first = named[0]
+    return first if rest.lower().startswith(first.lower()) else None
+
+
+def dismissal_intent(task: Task, participants: Sequence[str] = ()) -> bool:
+    """"dismiss <agent>", "excuse <agent>" - the verb directly followed by a
+    registered name. Names arrive from the roster at call time."""
+    return _dismissed_name(task.description, participants) is not None
+
+
+def dismiss_participant(request: CapabilityRequest) -> TaskResult:
+    """Work out which registered specialist a person is asking to remove from
+    the room. Resolves and returns the name; removes nothing - the room's
+    owner does. The orchestrator itself is never dismissable from here, being
+    the one who answers in the room."""
+    name = _dismissed_name(request.task.description, tuple(a.name for a in request.specialists()))
+    named = (name,) if name else ()
+    if not named:
+        return TaskResult.success(
+            request.task, request.own_name,
+            "I have no specialist by that name in the room to excuse.",
+            payload={HANDLED_BY_KEY: "participant_dismissal", DISMISSED_KEY: None},
+        )
+    return TaskResult.success(
+        request.task, request.own_name,
+        f"{named[0]} can leave the conversation.",
+        payload={HANDLED_BY_KEY: "participant_dismissal", DISMISSED_KEY: named[0]},
+    )
+
+
+PARTICIPANT_DISMISSAL = ManagerCapability(
+    authority="manager",
+    authority_reason=(
+        "deciding who stays in the room is the orchestrator's role, the mirror of "
+        "invitation - a specialist able to remove its peers would be a second Manager"
+    ),
+    name="participant_dismissal",
+    capabilities=frozenset({"dismiss", "excuse"}),
+    handle=dismiss_participant,
+    description="Resolves which registered specialist a person is asking to remove from the room.",
+    claims=dismissal_intent,
+    scoreable=False,
+)
 
 
 # Bringing somebody into a conversation. Declared here because a capability
@@ -1599,6 +1846,9 @@ def open_conversation(request: CapabilityRequest) -> TaskResult:
         tuple(request.recognition.notes())
         + _recent_conversation_notes(request)
         + evidence.with_settlement_note()
+        # Phase 10: context another participant deliberately shared on this
+        # task - attributed and marked shared, never anybody's memory.
+        + shared_notes(request.task)
     )
 
     decision = request.converse(request.task, notes)
@@ -10676,6 +10926,9 @@ MANAGER_CAPABILITIES: dict[str, ManagerCapability] = {
     SELF_DESCRIPTION.name: SELF_DESCRIPTION,
     ROSTER_REPORT.name: ROSTER_REPORT,
     PARTICIPANT_INVITATION.name: PARTICIPANT_INVITATION,
+    # Phase 10: discussions among the room's participants, and removal.
+    DISCUSSION.name: DISCUSSION,
+    PARTICIPANT_DISMISSAL.name: PARTICIPANT_DISMISSAL,
     CONVERSATIONAL_FLOOR.name: CONVERSATIONAL_FLOOR,
     GENERAL_ASSISTANCE.name: GENERAL_ASSISTANCE,
     OPEN_CONVERSATION.name: OPEN_CONVERSATION,
@@ -10819,6 +11072,16 @@ def select_capability(
 
         if crisis_signal(task.description):
             return guidance
+
+    # Phase 10, the second and last exception, and also not preference: a
+    # request to *discuss* a piece of work with others is about the work, never
+    # the work itself. "Let's discuss whether to build a 3D model of a chair
+    # with <agent>" also has the shape the 3D capability claims, and the claim
+    # pass below breaks ties by name - so without this the discussion request
+    # built the chair. Talking about doing something must never do it.
+    discussion = registry.get(DISCUSSION.name)
+    if discussion is not None and discussion.claims is not None and discussion.claims(task, participants):
+        return discussion
 
     # A handler that recognises its own request is asked first. Sorted by name
     # so the answer is total and repeatable, exactly as the scoring below is,

@@ -593,6 +593,15 @@ class ConversationTurn:
     # no message was sent. The answering "yes" runs the real action and is
     # recorded then, once.
     awaiting_confirmation: bool = False
+    # Phase 10: a discussion the Manager was asked to open, continue, conclude
+    # or cancel - read from the payload the discussion capability writes, the
+    # same honest-absence shape ``invited`` has. The capability resolves who
+    # and what; whoever owns the room acts on it (scripts/exchange.py). None
+    # for every turn that was not about a discussion.
+    discussion: dict[str, object] | None = None
+    # Phase 10: whoever the Manager resolved a request to excuse from the room
+    # to, the mirror of ``invited``. Read from the payload, never inferred.
+    dismissed: str | None = None
 
 
 # ---------------------------------------------------------------------------

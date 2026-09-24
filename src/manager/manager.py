@@ -70,6 +70,12 @@ from src.core.contracts import (
 from src.events.events import EventLog, delegation
 from src.manager.assessor import Assessor, ContractAssessor
 from src.manager.brain import BrainDecision, ManagerBrain, NullBrain
+from src.manager.delegation import (
+    DELEGATED_BY_KEY,
+    DELEGATION_OF_KEY,
+    DelegatedWork,
+    delegation_request,
+)
 from src.manager.memory_policy import ManagerMemoryPolicy, MemoryCategory
 from src.manager.router import CapabilityRouter, Router
 from src.registry.agent_registry import AgentRegistry
@@ -267,6 +273,14 @@ class ManagerAgent:
         log = task_logger(logger, task.id)
         log.info("received: %s", summarize(task.description))
 
+        # Phase 10: the person named who should do the work ("ask <agent> to
+        # ..."). The named agent is handed the work itself, through the same
+        # take action -> assess -> record loop below it, never the sentence
+        # that asked for it.
+        handed = self.delegation_for(task, addressed)
+        if handed is not None:
+            return self._delegate(task, handed)
+
         decision = self.decide(task, addressed)
         if decision is None:
             log.warning(
@@ -424,6 +438,13 @@ class ManagerAgent:
                     "'%s' was addressed but is not registered; routing normally",
                     addressed,
                 )
+        handed = self.delegation_for(task, addressed)
+        if handed is not None:
+            return RoutingDecision(
+                agent_name=handed.target,
+                score=1,
+                reason="handed over at the person's request",
+            )
         if self.own_skills is not None:
             claims = getattr(self.own_skills, "claims", None)
             if claims is not None and claims(task):
@@ -456,6 +477,52 @@ class ManagerAgent:
             score=1,
             reason="no specialist's declared capabilities matched; the Manager takes unclaimed work by default",
         )
+
+    def delegation_for(self, task: Task, addressed: str | None = None) -> DelegatedWork | None:
+        """The explicit hand-over this request asks for, or None.
+
+        Only the orchestrator's own decision can be overridden this way: a
+        request addressed to a specialist is that specialist's work, so it is
+        never re-read as an instruction to hand work on - a specialist has no
+        authority over another's work, and a sentence cannot grant it any.
+        The target must be registered; the result names it as registered."""
+        own = self.own_skills.name if self.own_skills is not None else None
+        if addressed and (own is None or addressed.strip().lower() != own.lower()):
+            return None
+        handed = delegation_request(
+            task.description, (agent.name for agent in self.registry.all_agents()), orchestrator=own
+        )
+        if handed is None:
+            return None
+        agent = self.registry.get(handed.target)
+        if agent is None or (own is not None and agent.name == own):
+            return None
+        return DelegatedWork(target=agent.name, work=handed.work)
+
+    def _delegate(self, task: Task, handed: DelegatedWork) -> TaskResult:
+        """Hand ``handed.work`` to its target and assess what comes back -
+        the assemble, take action and assess steps, and both records, exactly
+        as any other delegation. The delegated task carries who handed it
+        over and which request it came from, and keeps whatever context the
+        original request carried (shared context included)."""
+        log = task_logger(logger, task.id)
+        agent = self.assemble(handed.target)
+        if agent is None:
+            return TaskResult.no_agent(task, error=f"Agent '{handed.target}' is not registered.")
+        own = self.own_skills.name if self.own_skills is not None else "manager"
+        inner = Task(
+            description=handed.work,
+            payload={**task.payload, DELEGATED_BY_KEY: own, DELEGATION_OF_KEY: task.id},
+        )
+        decision = RoutingDecision(
+            agent_name=agent.name, score=1, reason="handed over at the person's request"
+        )
+        log.info("D: handed to '%s' at the person's request", agent.name)
+        result = self.take_action(agent, inner)
+        verdict = self.assess(inner, agent.name, result)
+        self._record_delegation_event(decision, verdict)
+        self._remember_delegation(inner, verdict)
+        return verdict
 
     def diagnose(self, task: Task) -> RoutingDecision | None:
         """D - Ask the router which agent should handle this task."""

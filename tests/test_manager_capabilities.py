@@ -239,6 +239,9 @@ class TestHandlersAreSelectedThroughTheRegistry:
             "create_diagram",
             "create_task",
             "current_datetime",
+            # Phase 10: opens, continues, concludes or cancels a discussion
+            # among the room's participants (Manager-only).
+            "discussion",
             "forget",
             "general_assistance",
             # Phase 3 (Knowledge, Research & Live Information): composes a
@@ -273,6 +276,9 @@ class TestHandlersAreSelectedThroughTheRegistry:
             "media_production",
             "milestone_recognition",
             "open_conversation",
+            # Phase 10: excusing a participant from the room, the mirror of
+            # invitation (Manager-only).
+            "participant_dismissal",
             "participant_invitation",
             # Generalized user knowledge/personal-context checkpoint: a
             # self-declared, updatable fact about the person - a skill,

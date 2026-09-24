@@ -41,6 +41,7 @@ from src.agents.brain import (
 from src.agents.memory_policy import SpecialistMemoryPolicy
 from src.agents.tools.toolset import ToolSet
 from src.core.contracts import Task, TaskResult, tokenize
+from src.core.shared_context import shared_notes
 from src.services.conversation_floor import (
     GREETING_WORDS,
     THANKS_WORDS,
@@ -346,7 +347,11 @@ class CognitiveAgent(BaseAgent):
         without one, this says so plainly rather than guessing or
         silently falling back to unrelated domain work.
         """
-        insight = self.brain.converse(task, notes)
+        # Phase 10: context another participant deliberately shared on this
+        # task (a discussion's earlier contributions, work handed over with
+        # context) reaches this agent's own brain, attributed and marked as
+        # shared - never anybody's memory, which nothing copies onto a task.
+        insight = self.brain.converse(task, (*notes, *shared_notes(task)))
         if not insight.is_useful or not insight.summary.strip():
             # When the request is really a registered capability this agent
             # is not authorised for, that is the true reason - said instead of

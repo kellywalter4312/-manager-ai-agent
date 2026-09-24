@@ -720,6 +720,39 @@ ARCHITECTURE.md SS52.75. Phase 10 not started.
 
 ---
 
+## P10. Phase 10 - Multi-Agent Intelligence (2026-09-24)
+
+Every participant used to verify this was a temporary specialist created
+through the governed `agent create`; nothing in production knows any current
+agent. Runtime checks drive the real composition root (`build_live_system`)
+with every store sandboxed, and a "restart" is a genuine rebuild. Full entry:
+ARCHITECTURE.md SS53. Phase 11 not started.
+
+| ID | Requirement | Status | Evidence | Runtime verified? |
+|---|---|---|---|---|
+| P10-DEL-01 | The orchestrator hands a named, registered participant a piece of work through the governed loop | VERIFIED WORKING | "ask/tell/get <agent> to ...", "have/let <agent> ..."; the target receives the work itself with `delegated_by`/`delegation_of`; assessed, evented, remembered like any delegation; the orchestrator is never a target; an unregistered name is not a delegation | YES |
+| P10-DEL-02 | Only the orchestrator delegates | VERIFIED WORKING | A request addressed to a specialist - by voice or by the agent selector - is never re-read as a hand-over; the peer's `execute` is never called | YES |
+| P10-DEL-03 | Hand-overs are recorded with both runtime identities, and persist | VERIFIED WORKING | `DelegationRecord(originator, target, request, succeeded, outcome, reason)` in the session; a direct address is not recorded as one; survives restart and resume | YES |
+| P10-CTX-01 | Shared context is explicit, attributed, scoped and marked shared | VERIFIED WORKING | `SharedNote` on `Task.payload`; each line begins `[shared in <scope>] <source> (<kind>):`; nothing is shared unless put there; no agent's memory is ever copied onto a task | YES |
+| P10-CTX-02 | Shared context reaches each participant's own brain | VERIFIED WORKING | Specialist `general_conversation` and orchestrator `open_conversation`/discussion turns pass it to their own brain. Real local model: first speaker 0 shared lines, second 1, chair 2 | YES (real model) |
+| P10-ROOM-01 | A session (room, discussions, hand-overs) persists and resumes from any surface | VERIFIED WORKING | Saved after every turn to its own store (not agent memory); `sessions`, `sessions current`, `sessions resume <id\|latest>`; a new start is a new room; resume restores transcript, participants (the dismissed stay out), discussions and hand-overs, and a resumed open discussion carries on | YES |
+| P10-TURN-01 | Turn-taking is data-driven | VERIFIED WORKING | `Floor`: any order, any count (40-speaker test), only the holder speaks, nobody outside the room gets a turn, a departed participant is skipped on the record, a person interjects without anybody losing their place, cancellation, round trip | YES |
+| P10-DISC-01 | A discussion is held through each participant's own runtime, each shown what the others said | VERIFIED WORKING | Scripted and real-model runs: second speaker's prompt carries the first's words, the chair's carries both; real model: chair "I agree with Probebeta's view"; contributions carry `relates_to` | YES (real model) |
+| P10-DISC-02 | Discussing a piece of work never performs it | VERIFIED WORKING, after repair | Turns go through the participant's conversation path, never `execute()`; an explicit discussion request is answered before any action capability's claim (repair: it had built a 3D chair) | YES |
+| P10-DISC-03 | Honest without a model | VERIFIED WORKING | Every turn an honest decline, nothing published; conclusion states that no synthesis was made; a failed answer is never published as a view (repair) | YES |
+| P10-DISC-04 | Opening, continuing, concluding, cancelling | VERIFIED WORKING | `discussion` capability (Manager-only, stated reason); claims require a participant name after the discussion word or "everyone/everybody/all of you", never scheduling words | YES |
+| P10-DISC-05 | Works with a reasoning brain | VERIFIED WORKING, after repair | The Full Brain objective loop had swallowed the act and the discussion never opened (found with the real local model; the same loss affected invitation). `hands_act_to_room` completes such a request in its resolving step | YES (real model) |
+| P10-PART-01 | Participants are added and removed during a meeting | VERIFIED WORKING, after repair | Invite during an open discussion admits from the next round (repair); `dismiss/excuse <agent>` removes from the room and the next round; an agent removed from the ecosystem is not given the floor (repair) | YES |
+| P10-USER-01 | The person is a participant, distinct from agents | VERIFIED WORKING | `ParticipantKind.PERSON`; the person's words during a discussion become attributed contributions the next round is shown (real model: "Given the budget constraints ..."); a person writing "<agent>: ..." is recorded as the person | YES |
+| P10-GOV-01 | Specialists cannot open discussions, delegate, invite or excuse | VERIFIED WORKING | Existing capability authority: `discussion` and `participant_dismissal` are Manager-only with stated reasons; a specialist asked to open one refuses naming who can | YES |
+| P10-VOI-01 | Each speaker is heard in its own VoiceProfile through the configured provider | VERIFIED WORKING | Each discussion turn delivered in its speaker's resolved voice; Windows engine: David / Hazel / David on this machine's three voices; a participant's own override (pace, chosen voice) reaches only its speech | YES (real engine) |
+| P10-SRF-01 | One session beneath every surface | VERIFIED WORKING | The terminal (`run_command`) and the served page (`route_message`) share one process store; a discussion opened through one is continued and shown through the other; the surfaces render the same report | YES |
+| P10-GEN-01 | No current entity is known to the architecture | VERIFIED WORKING | Every new module scanned for agent names in executable code (none); every new capability resolves names from the registry; a never-used specialist went through registration, grant, discussion, context, hand-over, identity, voice, rebuild and resume, revocation and removal - 13/13, no source change. The final gate also found and repaired a pre-existing name branch (`component_id == "alfred"`, which never matched the canonical role id and reported an orchestrator identity evolution as applied live) - now `is_manager_component()` | YES |
+| P10-OBS-01 | An ordinary remark in Full Brain with the small local model ran the objective loop to its 5-step bound | CLASSIFIED - PRE-EXISTING, NOT A PHASE 10 DEFECT | Same remark, same scripted reasoning provider: at e69f75f with no discussion, now with no discussion, now during a discussion - identical (orchestrator, `open_conversation`, 8 model calls, 2 objective judgements). The remark still joined the discussion and the next round was shown it | YES |
+| P10-OBS-02 | Distinct participants may share one engine voice when the provider has few voices | CLASSIFIED - ENVIRONMENT/PROVIDER CONSTRAINT, NOT ARCHITECTURAL | No installed voice name in executable production code; installed voices come from the engine at run time; each participant resolves its own VoiceProfile; an override reaches only that participant; no multi-agent code names a provider | YES |
+
+---
+
 ## O. Explicit Scope Boundaries (non-requirements, preserve these)
 
 | ID | Statement | Source | Status |

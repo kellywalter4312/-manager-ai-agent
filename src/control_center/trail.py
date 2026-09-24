@@ -37,7 +37,7 @@ from typing import Any
 
 from src.control_center.views import ConversationTurn, TrailStep
 from src.core.contracts import Task, TaskResult, TaskStatus
-from src.manager.capabilities import HANDLED_BY_KEY, INVITED_KEY
+from src.manager.capabilities import DISCUSSION_KEY, DISMISSED_KEY, HANDLED_BY_KEY, INVITED_KEY
 from src.manager.cognition import assess_cognition, assess_manager
 from src.manager.collaboration_entry import answer_with_collaboration
 from src.manager.manager import ManagerAgent
@@ -279,6 +279,8 @@ def observe(
         tool_used=tool_used,
         tool_available=tool_available,
         invited=_invited_in(result),
+        discussion=_discussion_in(result),
+        dismissed=_dismissed_in(result),
         celebration=_celebration_of(result),
         speak_in_full=bool((result.payload or {}).get("speak_in_full")),
         # Read from the payload the confirming capability already writes,
@@ -310,6 +312,22 @@ def _invited_in(result: TaskResult) -> str | None:
     """
     invited = (result.payload or {}).get(INVITED_KEY)
     return invited if isinstance(invited, str) and invited.strip() else None
+
+
+def _discussion_in(result: TaskResult) -> dict[str, object] | None:
+    """The discussion request the Manager's own capability resolved, if any -
+    read from its payload, never inferred. Only a successful resolution is a
+    request anybody should act on."""
+    if not result.succeeded:
+        return None
+    request = (result.payload or {}).get(DISCUSSION_KEY)
+    return dict(request) if isinstance(request, dict) and request.get("action") else None
+
+
+def _dismissed_in(result: TaskResult) -> str | None:
+    """Whoever the Manager resolved a request to excuse from the room to."""
+    dismissed = (result.payload or {}).get(DISMISSED_KEY)
+    return dismissed if isinstance(dismissed, str) and dismissed.strip() else None
 
 
 def _executed_capability(result: TaskResult) -> str | None:

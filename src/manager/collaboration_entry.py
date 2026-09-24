@@ -117,6 +117,11 @@ def collaboration_candidates(manager: ManagerAgent, task: Task) -> tuple[str, ..
     """
     if manager.own_skills is None:
         return ()
+    # Phase 10: the person already said who should do this ("ask <agent> to
+    # ..."). Collaboration is the orchestrator deciding whom to consult; an explicit
+    # hand-over is that decision already made, so nobody else is drafted in.
+    if manager.delegation_for(task) is not None:
+        return ()
     claims = getattr(manager.own_skills, "claims", None)
     if claims is not None and claims(task):
         return ()

@@ -196,6 +196,43 @@ class Conversation:
         for participant in participants:
             self.join(participant)
 
+    @classmethod
+    def restore(
+        cls,
+        participants: Iterable[Participant],
+        utterances: Iterable[Utterance],
+        *,
+        id: str,
+        started_at: datetime,
+    ) -> "Conversation":
+        """A conversation rebuilt from a saved record of one.
+
+        Not a way around ``say``: a saved transcript may hold somebody who has
+        since left, and ``say`` would rightly refuse them today. What was said
+        stays said - the same rule ``leave`` keeps - so the record is taken as
+        it was written, in order.
+        """
+        conversation = cls(participants, id=id, started_at=started_at)
+        for utterance in utterances:
+            if not isinstance(utterance, Utterance):
+                raise ConversationError("a restored transcript holds only Utterances")
+            conversation._utterances.append(utterance)
+        return conversation
+
+    def adopt(self, other: "Conversation") -> None:
+        """Become ``other``: its identity, who is in it, and what was said.
+
+        In place, so every surface already holding this room sees the resumed
+        session without being handed a new object - resuming is continuing a
+        conversation, not opening a second one beside it.
+        """
+        if not isinstance(other, Conversation):
+            raise ConversationError("only a Conversation may be adopted")
+        self.id = other.id
+        self.started_at = other.started_at
+        self._participants = list(other._participants)
+        self._utterances = list(other._utterances)
+
     # ------------------------------------------------------------------
     # Who is here
     # ------------------------------------------------------------------
