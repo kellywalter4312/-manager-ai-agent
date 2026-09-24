@@ -12263,3 +12263,99 @@ tests/test_architecture_audit.py - the file that exists for whole-system
 invariants "that no single step owns". It reads the Manager's name from
 `IDENTITY.md` rather than hardcoding it, so it keeps working for whatever the
 identity document declares next.
+
+### 52.74 What the record is, and what it is not - a naming correction, and the extensibility principle it exists to protect (2026-09-24)
+
+A recovery audit read this repository to answer where two names came from. Both
+answers are small. They are recorded here anyway, because correcting them
+invites a larger error than the one being corrected: mistaking what this
+repository does not yet contain for what the ecosystem has decided against.
+
+**Nova is a test fixture, not an agent.** It first appears on 2026-09-22 in
+commit `608acbf`, the commit that made owner-defined specialists data
+(`agent create <key> <Name>|<area>` -> `GeneralSpecialist`, "No specialist-type
+list anywhere"). Nova is the name those tests use to exercise that generic
+mechanism. The area given to it varies from test to test - "3D modelling and
+spatial design", "3D modelling", "languages" - which is what a fixture name
+looks like and what a design concept does not. An AST scan of every
+non-docstring string constant in `src/` and `scripts/` finds zero executable
+literals containing it; all nine production mentions are comments or docstrings
+illustrating how an addressed request ("<Name>, do X") is parsed.
+
+Nova is therefore not a production agent, capability, subsystem, workspace,
+environment or 3D concept. It is not registered, instantiated, persisted,
+routed to, granted anything or branched on, and no production behaviour depends
+on it. Nothing is to be created, deleted, registered, persisted or otherwise
+modified on its account.
+
+Recorded once, as the same class of misreading: `Fresnel` occurs only in
+`ui/vendor/three.module.min.js` - the Fresnel reflectance term in Three.js's
+physical material, vendored on 2026-09-05 in `dfd3616`. It is third-party
+shader mathematics, not a project concept, and has no relationship to Nova.
+
+**`Environment` currently means an agent's presentational environment.**
+`EnvironmentProfile` and `EnvironmentProvider` describe the space an agent is
+*presented within* - mood, lighting, backdrop, as in `quiet_study` and
+`open_workspace` - the sibling `DefaultAvatarProvider` already plays for
+appearance. It does **not** currently mean a physical home, room, IoT
+environment, appliance, or physical-device control.
+
+That is a statement about what is implemented today, not a definition of what
+`Environment` may mean later. Nothing here reserves the word against a broader
+meaning arriving through the same governed, catalog-shaped seam.
+
+**The principle both corrections exist to protect.** This repository records
+what is implemented and verified today. It does not define a closed list of
+what the ecosystem may eventually accommodate. A concrete example, a temporary
+test fixture, a current implementation, or an absent integration must not be
+mistaken for an architectural boundary. New agents, workspaces, capabilities,
+connections, providers, devices, environments, surfaces and interaction
+modalities should be introducible through the generalized governed mechanisms
+as they become available - without hardcoded knowledge of today's entities, and
+without rebuilding the underlying ecosystem.
+
+Phase 9 is this failure in miniature and worth keeping in view: the names were
+never in the logic, they were in the text, "which is how today's example
+survives into a system meant to outgrow it" (SS52.73).
+
+The one genuinely closed list is short, deliberate, and written down as such:
+REQUIREMENT_LEDGER.md Section O, "Explicit Scope Boundaries (non-requirements,
+preserve these)". A thing absent from this repository and absent from Section O
+is not-yet, never declined.
+
+**VR/AR, physical homes and environments, appliances, and future device and
+surface interaction are architectural possibilities not currently implemented
+in this repository.** Their absence from the current repository is not a
+rejection of those possibilities. They must not be hardcoded into the present
+architecture; the ecosystem should remain extensible enough to accommodate new
+surfaces, devices, environments and interaction modalities as they become
+available.
+
+The seams that would carry them are already open rather than closed by
+construction, and none of them names a device: `SurfaceKind` is "an open,
+normalised name, never a closed list"; translation outputs are an open registry
+where "earbuds and televisions are endpoints of one path, not features";
+workspace types are data created from the Control Center; and `agent create`
+makes a specialist without a specialist-type list. No roadmap item is opened by
+this paragraph, and no implementation is implied by it.
+
+**Memory: an extensible contract, with a retrieval ceiling that is not a
+contract defect.** The Memory data contract is intentionally extensible and is
+currently verified. `MemoryRecord` requires only `content`; `kind`, `tags`,
+`source` and a deliberately opaque `context` carry whatever a caller means
+without this contract having to understand it - which is what lets a new entity
+type or context type be represented without redesigning memory.
+
+Retrieval is the separate question. Recall is plain token overlap - "no
+embeddings, no semantic search, no model", stated at the contract itself - so
+retrieval *quality* has a known ceiling for large or semantically varied
+captured information, where the words used to ask will not literally match the
+words captured. This is recorded as a **future intelligence/memory capability
+gap, not a failure of the Memory data contract**: the contract grows; the
+retrieval strategy is the part that will need more one day. Embeddings,
+semantic search and an LLM memory layer are deliberately **not** implemented
+now, and this entry does not schedule them.
+
+Documentation only. No production code was modified, and no agent, capability,
+workspace, environment, device, surface, provider or integration was created,
+deleted or changed by this entry. Phase 9 stays closed.

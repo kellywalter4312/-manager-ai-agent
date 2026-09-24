@@ -653,6 +653,27 @@ ARCHITECTURE.md SS52.73. Regression: `TestNoAgentsNameIsBakedIntoProductionCode`
 | Y-AGENT-14 | Connection and credential isolation between agents | OUT OF SCOPE HERE - already closed in Phase 7 | Verified at commit `e0dc446` (17/17 runtime checks, two routing defects repaired). Not re-verified in Phase 9, deliberately, rather than duplicated | Recorded as a boundary so the two phases are not conflated |
 | Y-AGENT-15 | The rendered interface is generic too - it does not draw or name a fixed cast | VERIFIED WORKING, with one label repaired | `ui/index.html`'s `identityOf()` reserves the Manager's cyan core on `agent.is_manager` - a real structural fact - and **never** on a name; every specialist's hue and polygon count come from `hashOf(name)`, so "a future specialist gets its own look with nothing here changing". Of 19 mentions of the shipped name, 18 are comments and the single user-facing one - a voice-agent input placeholder reading "agent, e.g. Alfred" - is now "agent name" | The 3D/visual layer itself is Phase 12's, not Phase 9's; only the agent-genericity of it was inspected here |
 
+---
+
+## Z. Architecture recovery audit - naming corrections and the extensibility principle (2026-09-24)
+
+Documentation-only. No production code, agent, capability, workspace,
+environment, device, surface, provider or integration was created, deleted or
+changed. Phase 9 stays closed; Phase 10 is not opened. Full entry:
+ARCHITECTURE.md SS52.74.
+
+| ID | Finding | Status | Evidence |
+|---|---|---|---|
+| REC-01 | "Nova" is a test-fixture name used to exercise the generic `agent create` mechanism - not a production agent, capability, subsystem, workspace, environment or 3D concept | RECORDED - no change made, none required | First appears 2026-09-22 in `608acbf`. Its area varies per test ("3D modelling and spatial design", "3D modelling", "languages"). AST scan of every non-docstring string constant in `src/` + `scripts/`: **0** executable literals containing it; all 9 production mentions are comments or docstrings. Not registered, instantiated, persisted, routed to, granted or branched on |
+| REC-02 | "Fresnel" is third-party shader mathematics, not a project concept, and is unrelated to Nova | RECORDED - no change made, none required | Occurs only in `ui/vendor/three.module.min.js` (Fresnel reflectance term, Three.js physical material), vendored 2026-09-05 in `dfd3616` |
+| REC-03 | `Environment` **currently** means an agent's presentational environment (mood, lighting, backdrop), not a physical home, room, IoT environment, appliance or device control | RECORDED as a statement of present implementation only - it does **not** fix the architectural meaning of the word | `src/providers/default_environment_provider.py`; `EnvironmentProfile` / `EnvironmentProvider`, the sibling of `DefaultAvatarProvider` |
+| REC-04 | Absence from this repository is not rejection. A concrete example, a temporary fixture, a current implementation or an absent integration must not be mistaken for an architectural boundary | STANDING PRINCIPLE | The only closed list is Section O below, and it is deliberate and short. Anything absent from both the repository and Section O is not-yet, never declined |
+| REC-05 | VR/AR, physical homes and environments, appliances, and future device/surface interaction are architectural possibilities not currently implemented here; their absence is not a rejection, and they must not be hardcoded into the present architecture | OPEN POSSIBILITY - not implemented, not scheduled, not declined | Seams already open and device-agnostic: `SurfaceKind` ("an open, normalised name, never a closed list"); `register_translation_output` ("earbuds and televisions are endpoints of one path, not features"); workspace types as data; `agent create` with no specialist-type list |
+| REC-06 | The Memory **data contract** is intentionally extensible and currently verified | VERIFIED WORKING | `MemoryRecord` requires only `content`; `kind`, `tags`, `source` and an opaque `context` ("stored and handed back; it never reads inside it") carry new entity and context types without redesign |
+| REC-07 | Memory **retrieval** is token-overlap based and has a known retrieval-quality ceiling for large or semantically varied captured information | FUTURE INTELLIGENCE/MEMORY CAPABILITY GAP - explicitly **not** a defect of the Memory data contract | "no embeddings, no semantic search, no model", stated at the contract itself. Embeddings, semantic search and an LLM memory layer are deliberately not implemented now, and this row does not schedule them |
+
+---
+
 ## O. Explicit Scope Boundaries (non-requirements, preserve these)
 
 | ID | Statement | Source | Status |
