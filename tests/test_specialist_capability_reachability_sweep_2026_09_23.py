@@ -1346,3 +1346,53 @@ class TestASpecialistReachesADeclaredConnectionByName:
         _run(system, "capabilities revoke Rhea connected_action")
         turn = _say(system, "Rhea, check my library account: find the book", to="Rhea")
         assert turn.capability != "connected_action"
+
+
+class TestDisablingACapabilityStopsRealWorkNotJustRegistryMembership:
+    """``test_capability_authorization_and_defined_specialists.py`` already
+    pins that a disabled capability is gone from the filtered registry for
+    every agent. This pins the other half - that a specialist who *was*
+    granted it then actually produces nothing when asked - because "absent
+    from the registry" and "produces no artifact at runtime" are the two
+    facts this campaign exists to keep apart.
+    """
+
+    MAKE = "Nova, make a diagram of a two-stage water filtration system"
+
+    def test_a_granted_specialist_builds_nothing_once_it_is_disabled_and_builds_again_once_enabled(self, system):
+        _run(system, "agent create nova Nova|diagrams|create_diagram")
+        assert _say(system, self.MAKE, to="Nova").succeeded
+        assert len([a for a in system.runtime.artifacts.all() if a.type == "image"]) == 1
+
+        _run(system, "capabilities disable create_diagram")
+        turn = _say(system, self.MAKE, to="Nova")
+        assert not turn.succeeded
+        assert turn.capability != "create_diagram"
+        # The real evidence: nothing new was made.
+        assert len([a for a in system.runtime.artifacts.all() if a.type == "image"]) == 1
+        # And the owner is told why, in the access view.
+        access = _run(system, "capabilities access Nova")
+        assert "create_diagram - disabled for every agent" in access
+
+        _run(system, "capabilities enable create_diagram")
+        again = _say(system, self.MAKE, to="Nova")
+        assert again.succeeded and again.handled_by == "Nova"
+        assert len([a for a in system.runtime.artifacts.all() if a.type == "image"]) == 2
+
+    def test_holding_the_tool_is_not_being_authorized_for_the_capability(self, system):
+        """``manager_tools`` builds every tool unconditionally, for every
+        agent - so a specialist genuinely holds ``artifact_production``
+        whether or not it may create anything with it. The capability grant
+        is what decides, and this proves it at runtime rather than by
+        reading the composition root."""
+        _run(system, "agent create kai Kai|images|image_comparison")
+        kai = system.manager.registry.get("Kai")
+        tools = system.manager.specialist_capabilities.tools_for(kai)
+
+        assert tools.permits("artifact_production"), "the tool is built unconditionally"
+        assert system.manager.specialist_capabilities.authorised(kai) == ("image_comparison",)
+
+        turn = _say(system, "Kai, make a diagram of a water filter", to="Kai")
+        assert not turn.succeeded
+        assert "create_diagram, which I'm not authorised for" in turn.outcome
+        assert not [a for a in system.runtime.artifacts.all() if a.type == "image"]

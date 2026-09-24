@@ -12013,3 +12013,76 @@ Regression: 9 new tests in
 `tests/test_specialist_capability_reachability_sweep_2026_09_23.py` (61
 total), including a unit pin that the `null` default is never routed to by
 name, and that `named_connection` itself still skips the default.
+
+### 52.71 Phase 8 (Capability & Action System) re-audited - no defect found, and the two distinctions it turns on proven at runtime (2026-09-23, continued)
+
+Phase 8 is the governance layer the owner actually operates: enable or
+disable a capability for the whole system, grant or revoke it per agent,
+Manager-only authority, and whether any of it survives a restart. Re-audited
+against the stricter completion standard, through the real served system.
+**No defect was found and no production code changed.** What follows is the
+evidence, plus the two things that were only pinned at registry level and are
+now pinned at runtime.
+
+**Governance, measured end to end:**
+
+| Check | Result |
+|---|---|
+| `capabilities disable create_diagram` stops the Manager | Before: a real image artifact. After: refused, no new artifact, and the command says "live in this session now - every start uses the same choice" |
+| It survives a restart | A freshly built system still refuses |
+| It also stops a **granted** specialist | Nova, granted `create_diagram`, produces nothing; `capabilities access Nova` reports "create_diagram - disabled for every agent (capabilities enable)" |
+| `capabilities enable` restores it for both | Manager and Nova each produce a real artifact again |
+| A Manager-only capability cannot be granted | `capabilities grant Nova calendar` -> "FAILED: 'calendar' is Manager-only: ... Nothing was granted" |
+| A Manager-only capability cannot be reached by a specialist | "Nova, what's on my calendar this week?" -> "That's calendar, which only Alfred does (...)" |
+| A grant survives a restart | Kai's `image_comparison` grant is live in a freshly built system |
+
+**The two distinctions this campaign turns on, now proven at runtime rather
+than by reading the composition root:**
+
+*Tool existence is not capability authorization.* `manager_tools` builds every
+tool unconditionally for every agent, so Kai genuinely holds
+`artifact_production` while being granted only `image_comparison`. Asked to
+make a diagram, Kai refuses and **no artifact exists afterwards**. The tool
+was there the whole time; the grant is what decided.
+
+*Registry membership is not runtime behaviour.* The suite already pinned that
+a disabled capability is absent from the filtered registry for every agent.
+It now also pins that a specialist who *was* granted it produces nothing when
+actually asked - the difference between "gone from a dict" and "made no
+file", which is the whole thesis of this campaign.
+
+**Checked and found correct, recorded rather than changed:**
+
+*The crisis-safety bypass.* `SpecialistCapabilities.__call__` runs
+`personal_guidance` - a **Manager-only** capability - for any agent when
+`crisis_signal` matches, deliberately ("Safety, not authority"). Manager-only
+status exists because that capability works on the person's own calendar and
+commitments, "run for a specialist it would start a second, disconnected copy
+in that specialist's memory". That harm cannot occur here:
+`guidance_kind` tests `crisis_signal` **first** and returns `CRISIS`, and the
+`CRISIS` branch returns the crisis reply immediately, before touching memory,
+calendar or recall. So the bypass can only ever reach the one branch that
+writes nothing. Verified by reading both code paths, not assumed from the
+comment.
+
+*Voice.* With the real local Kokoro engine selected, 17 real voices are
+discovered live. Alfred, Nova and Kai each hold their own distinct
+`VoiceProfile` (`key`, `accent`, `language`, `preferred_voice`, `pace` as
+separate fields, no provider in any of them). Switching
+`provider speech_provider use none` applies live, and every agent's
+VoiceProfile, memory and grants survive it unchanged - the agent is not its
+provider. `select_voice_intent` was also checked against the vocative and
+handles it correctly (identical results with and without "Nova, " in front),
+so the address defect repaired elsewhere in this campaign does not exist
+here.
+
+**An honest limitation, not repaired because it is not a defect:** a
+capability the owner has disabled falls through to ordinary conversation
+rather than announcing "that is disabled". That is what disabling is
+supposed to mean - the system behaves as though it does not have the
+capability - and nothing fabricates success. The Control Center's access view
+is where the reason is stated, and it states it.
+
+Regression: 2 further tests in
+`tests/test_specialist_capability_reachability_sweep_2026_09_23.py` (63
+total).

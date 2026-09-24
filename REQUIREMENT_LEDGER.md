@@ -597,6 +597,22 @@ total).
 | Y-CONN-04 | A connection name the agent was never equipped with is refused, never invented | VERIFIED WORKING | "check my pharmacy account: collect the prescription" -> neither real server received anything | none |
 | Y-CONN-05 | The Control Center's two connection surfaces are each truthful | VERIFIED WORKING - and a suspected defect here was the audit's own error, corrected rather than "fixed" in code | `services` lists both declared services; `connections` lists `library` (which has an account) and honestly omits `clinic` (which has none). `run_connections_command`'s own docstring scopes it to connect/disconnect/list/status/validate - it is the credential surface, `services` is the declaration surface. Two truthful views, not one broken one | A declared service with no credential is visible under `services`, not under `connections` - correct, and worth knowing when looking for one |
 
+### Phase 8 (Capability & Action System), same standard (2026-09-23)
+
+Re-audited through the real served system. **No defect found, no production
+code changed.** ARCHITECTURE.md §52.71. Regression: 2 further tests in
+`tests/test_specialist_capability_reachability_sweep_2026_09_23.py` (63
+total).
+
+| ID | Requirement | Status | Evidence | Dependencies / Limitations |
+|---|---|---|---|---|
+| Y-GOV-01 | Disabling a capability for the system really stops it - for the Manager and for an agent that was granted it | VERIFIED WORKING | `capabilities disable create_diagram`: the Manager stops producing artifacts, the choice survives a restart, and Nova - *granted* the capability - produces nothing while `capabilities access Nova` reports "disabled for every agent (capabilities enable)". `capabilities enable` restores real production for both | A disabled capability falls through to ordinary conversation rather than announcing itself as disabled - which is what disabling means; the access view is where the reason is stated |
+| Y-GOV-02 | Manager-only authority cannot be granted away or reached around | VERIFIED WORKING | `capabilities grant Nova calendar` -> "FAILED: 'calendar' is Manager-only ... Nothing was granted"; "Nova, what's on my calendar this week?" -> "That's calendar, which only Alfred does" | none |
+| Y-GOV-03 | Grants and disables persist across a restart | VERIFIED WORKING | Kai's `image_comparison` grant and the `create_diagram` disable are both live in a freshly built system | none |
+| Y-GOV-04 | Tool existence is not capability authorization | VERIFIED WORKING - now at runtime, not only by reading the composition root | `manager_tools` builds every tool unconditionally, so Kai genuinely holds `artifact_production` while granted only `image_comparison`; asked to make a diagram Kai refuses and **no artifact exists afterwards** | none |
+| Y-GOV-05 | The crisis-safety bypass cannot reach the harm that made `personal_guidance` Manager-only | VERIFIED WORKING - by reading both code paths, not by trusting the comment | `SpecialistCapabilities.__call__` deliberately runs `personal_guidance` for any agent on `crisis_signal` ("Safety, not authority"). `guidance_kind` tests `crisis_signal` **first** and returns `CRISIS`, and the `CRISIS` branch returns the reply immediately, before any memory, calendar or recall access - so the bypass can only ever reach the one branch that writes nothing | none |
+| Y-VOICE-01 | An agent's VoiceProfile is its own and survives a provider change | VERIFIED WORKING - against the real local Kokoro engine | 17 real voices discovered live; Alfred/Nova/Kai each hold distinct `VoiceProfile`s with `key`/`accent`/`language`/`preferred_voice`/`pace` as separate fields and no provider in any of them; `provider speech_provider use none` applies live and every agent's VoiceProfile, memory and grants survive unchanged. `select_voice_intent` handles the vocative correctly (identical with and without "Nova, "), so the address defect repaired elsewhere this campaign does not exist here | The default engine is `none` (honestly silent) until the owner selects one |
+
 ## O. Explicit Scope Boundaries (non-requirements, preserve these)
 
 | ID | Statement | Source | Status |
