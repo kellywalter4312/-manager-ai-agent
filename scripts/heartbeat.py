@@ -260,7 +260,12 @@ def check_proactive_events(
     # Post-Pre-Stage-9: a due reminder also reaches the person when no page is
     # open - a desktop notification per fresh event, honouring the owner's
     # governed choice. Delivery is observed, never assumed.
-    notified = _notify_desktop(settings, fresh)
+    # The Manager's own declared name, not today's example baked in: the
+    # notification is from whichever agent this identity document names.
+    notified = _notify_desktop(
+        settings, fresh,
+        agent_name=manager.own_skills.name if manager.own_skills is not None else "the Manager",
+    )
 
     # General Time/Event Awareness + Proactive Visual Experience
     # checkpoint: the identical governed selection+persistence step a
@@ -290,10 +295,16 @@ def check_proactive_events(
     return f"proactive events: {len(fresh)} due today -> {path}{note}"
 
 
-def _notify_desktop(settings: Settings, events) -> int:
+def _notify_desktop(settings: Settings, events, agent_name: str = "the Manager") -> int:
     """Show each fresh due event as a desktop notification; how many Windows
     confirmed delivered. The governed choice ('provider
-    desktop_notification_provider use windows') wins over the environment."""
+    desktop_notification_provider use windows') wins over the environment.
+
+    ``agent_name`` is the notification's title - the Manager's own declared
+    name, passed in by the caller that already holds it. It is a parameter
+    rather than a literal because IDENTITY.md's `## Name` is the owner's to
+    change: every other surface follows that rename, and this one used to
+    keep announcing the name the project happened to ship with."""
     from dataclasses import replace
 
     from src.providers.desktop_notifier import build_desktop_notifier
@@ -307,7 +318,7 @@ def _notify_desktop(settings: Settings, events) -> int:
     shown = 0
     for event in events:
         # A ProactiveEvent's label is its person-facing text (a reminder's own words).
-        if notifier.notify("Alfred", str(event.label), tag=str(event.dedup_key)):
+        if notifier.notify(agent_name, str(event.label), tag=str(event.dedup_key)):
             shown += 1
     return shown
 

@@ -12167,3 +12167,99 @@ tests/test_capability_enable_disable.py - the class that already exists for
 exactly this class of gap. Verified by mutation: with the equipping removed
 the test fails on `assert () == ('create_diagram',)`, which is the defect
 itself.
+
+### 52.73 Phase 9 reassessed from the current system: the architecture is generic, and thirteen labels were not (2026-09-24)
+
+52.72 closed one entry-point defect. This is the wider Phase 9 reassessment
+asked for afterwards: recover what the Agent Architecture *now* is, rather
+than check off the roadmap written on 8 September, and test the one property
+the roadmap could not have named - that this ecosystem can grow past the
+agents it ships with.
+
+**What the original intent was.** An Agent Registry; Alfred; Arthur; future
+specialists. Every agent independently owning its own identity, personality,
+Brain, memory, voice, capabilities, connections, avatar and environment, with
+changes to one never reaching another.
+
+**What it has become.** That list is now mostly *older* than the system. An
+owner-defined agent is **data, not code** (`agent_definition.<key>` in the
+governed config), built by `build_defined_specialist` with its own identity,
+its own Brain from its own area over the one shared connection, its own
+memory, its own voice and the person's context read-only - and what it may
+*do* is not part of its definition at all but a separate governed grant, read
+at the moment of asking. Capability/Tool, Capability/Provider,
+Brain/Provider, Memory/Brain, VoiceProfile/voice provider and Agent/Workspace
+were all separated after the roadmap was written and are covered by their own
+sections and tests. `AgentPresence` (avatar + digital-human profile) arrived
+at Stage 17.4 and is *read from* the canonical agent rather than built beside
+it. So the honest Phase 9 question today is not "do these nine things exist"
+- they do, and are individually tested - but "are they per-agent, isolated,
+and free of today's cast".
+
+**Extensibility: the architecture is genuinely generic.** An AST scan of
+every executable string constant in `src/` and `scripts/` (docstrings
+recognised and skipped; comments never reach an AST) plus a source scan for
+name comparisons found **no** `if agent == "..."` anywhere, no hardcoded
+production agent registry, and no agent-specific routing, capability, voice,
+memory or provider branch. Renaming the Manager in `IDENTITY.md`'s `## Name`
+- the one supported way - and building the real served system produced a
+registry of `['Jarvis', 'Arthur']`, with `agent list` naming Jarvis and not
+mentioning the shipped name at all. A future agent needs no core-code change.
+
+**What was not generic: thirteen labels in eight files.** The names were
+never in the *logic*; they were in the *text*, which is exactly how today's
+example survives into a system meant to outgrow it. After a rename each of
+these told the person about an agent that no longer exists:
+
+| Where | What it said |
+|---|---|
+| `scripts/heartbeat.py` | the desktop notification's title, hardcoded |
+| `scripts/control_center.py` | "ask Alfred about it" after a file upload |
+| `scripts/control_center.py` | `HELP` - seven separate lines |
+| `scripts/control_center.py` | "so Alfred keeps reasoning"; "what you would like Alfred to do"; a discovery label |
+| `src/services/evolution/inventory.py` | "Alfred's own reasoning mode", sitting beside "default specialist reasoning mode" - the sibling that already said the role |
+| `src/agents/tools/knowledge.py`, `live_information.py` | tool descriptions handed to the model |
+| `src/heartbeat/reporting.py` | the proactive report's own closing line |
+| `src/services/ecosystem/registry_factory.py` | "what Alfred or Arthur is allowed to remember" |
+
+Repaired by reading the live name where the caller already held it
+(`centre.runtime.identity.name`, `manager.own_skills.name` - both already in
+scope at their call sites) and by naming the *role* where the string is a
+module-level constant with no agent in reach. No plumbing was invented.
+
+**Deliberately still named:** the product is called Alfred OS. `AlfredOS-*`
+user agents, `"Alfred OS (assembled product)"` and the local development
+certificate authority in `scripts/dev_tls.py` are a product and an
+installation identity, not an agent identity, and stay.
+
+**Isolation, proven at runtime rather than by reading.** Two agents created
+through the same generic `agent create` the owner uses - deliberately
+unremarkable names, added to no production code - then each dimension mutated
+on one and checked on the other: identity, personality, Brain/domain, voice
+profile, capabilities, grant *revocation*, memory (a retained fact is not
+recallable through the other's memory), persisted definition, avatar,
+environment, digital-human style, and removal. Every dimension isolated, and
+no specialist write reached the Manager's own presence.
+
+Two things that looked like leaks were the probe's error, not the product's,
+and are recorded because the distinction matters: two agents that declare no
+personality share `None` as a *declared* value while their **effective**
+personalities - what actually builds each Brain - are `default_personality(name)`
+and genuinely distinct (`key='ayla'` vs `key='brix'`), because
+`SpecialistWiring.personality` falls back per name precisely so that "two
+specialists that both declare nothing must still be distinguishable by key".
+And `digital_human_style_for` returns a full dict of empty strings, which is
+truthy: the other agent was untouched.
+
+**Boundaries kept, not pulled into Phase 9.** Connection and credential
+isolation between agents is Phase 7's (commit `e0dc446`) and was not
+re-verified here. Workspaces never owning capabilities, and a specialist
+never coordinating peers, already have their own tests. `main.py` registers
+no owner-defined agents because it is a demonstration composition root and
+says so in its first line.
+
+Regression: `TestNoAgentsNameIsBakedIntoProductionCode` in
+tests/test_architecture_audit.py - the file that exists for whole-system
+invariants "that no single step owns". It reads the Manager's name from
+`IDENTITY.md` rather than hardcoding it, so it keeps working for whatever the
+identity document declares next.

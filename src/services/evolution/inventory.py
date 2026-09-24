@@ -285,7 +285,11 @@ def _brain_components(settings: Settings) -> tuple[ComponentSnapshot, ...]:
         ComponentSnapshot(
             component_id="brain.manager",
             category="brain",
-            label="Alfred's own reasoning mode",
+            # The Manager's role, never today's declared name: IDENTITY.md's
+            # `## Name` is data the owner may change, and this label sits
+            # beside "default specialist reasoning mode", which already says
+            # the role rather than a name.
+            label="the Manager's own reasoning mode",
             version=settings.brain,
         ),
         ComponentSnapshot(
@@ -605,7 +609,7 @@ def brain_development_snapshot(agent_name: str, memory, *, reasoning_mode: str) 
         "\n"
         "  Read-only by design: which vendor answers is a provider (see "
         "'ecosystem provider.llm_provider'), never Brain development; and "
-        "no safe, real way exists yet to version Alfred's own reasoning "
+        "no safe, real way exists yet to version the Manager's own reasoning "
         "code without editing source, so this is reported, never proposed "
         "against."
     )

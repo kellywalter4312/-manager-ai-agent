@@ -36,7 +36,7 @@ class LiveInformationTool(Tool):
             name="live_information",
             description=(
                 "Retrieves current, external information for a query, with "
-                "provenance - never Alfred's own remembered or trained knowledge."
+                "provenance - never the agent's own remembered or trained knowledge."
             ),
             schema={"query": str},
         )

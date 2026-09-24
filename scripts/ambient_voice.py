@@ -53,7 +53,8 @@ def main(argv: list[str] | None = None) -> int:
 
     activation = manager.own_skills.activation if manager.own_skills is not None else None
     if activation is None:
-        print("Alfred has no declared voice activation phrase to listen for.")
+        speaker = manager.own_skills.name if manager.own_skills is not None else "the Manager"
+        print(f"{speaker} has no declared voice activation phrase to listen for.")
         return 1
 
     session = VoiceActivationSession(channel, activation, presence=runtime.presence_registry)

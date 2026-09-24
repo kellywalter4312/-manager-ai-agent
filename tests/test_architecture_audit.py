@@ -785,3 +785,137 @@ class TestNoFuturePhaseHasStarted:
                             if literal in class_source:
                                 claimed_names.add(literal.strip("'\""))
         assert claimed_names == {"code_assistant"}, claimed_names
+
+
+class TestNoAgentsNameIsBakedIntoProductionCode:
+    """Phase 9 (2026-09-24). Alfred OS is an ecosystem, not a fixed cast.
+    IDENTITY.md's ``## Name`` is data the owner may change - the composition
+    root says so in as many words, calling it "only whatever IDENTITY.md's
+    declared name currently is ('Alfred', today)" - and a renamed Manager
+    really does register, route and report under the new name.
+
+    Three surfaces did not follow it, and each one told the person to go and
+    talk to an agent that, after a rename, does not exist:
+
+      * the heartbeat's desktop notification title (hardcoded)
+      * the Control Center's "ask <name> about it" upload guidance
+      * the ecosystem inventory's "<name>'s own reasoning mode" label,
+        which sat directly beside "default specialist reasoning mode" -
+        the sibling that already said the role instead
+
+    None of them was a branch on an agent's name: the scan below found no
+    ``if agent == "..."`` anywhere, and the architecture is genuinely generic.
+    They were labels, which is how today's example gets baked into a system
+    that is supposed to outgrow it.
+
+    The product itself is still called Alfred OS, deliberately. That is a
+    product name, not an agent identity, so the forms below are allowed.
+    """
+
+    # scripts/dev_tls.py names a local development certificate authority -
+    # an installation identity for a TLS certificate, not an agent.
+    ALLOWED_FILES = {"scripts/dev_tls.py"}
+
+    def _declared_name(self) -> str:
+        """Read the name rather than assume it, so this test keeps working
+        for whatever the identity document declares."""
+        from src.services.identity.identity import load_identity
+
+        return load_identity(REPO_ROOT / "IDENTITY.md").name
+
+    def _executable_literals(self):
+        """Every string constant in src/ and scripts/ that is real code.
+
+        Docstrings are skipped by recognising them; comments never reach the
+        AST at all. So what this yields is only text that executes.
+        """
+        files = sorted(SRC.rglob("*.py")) + sorted((REPO_ROOT / "scripts").rglob("*.py"))
+        for path in files:
+            rel = path.relative_to(REPO_ROOT).as_posix()
+            if rel in self.ALLOWED_FILES:
+                continue
+            try:
+                tree = ast.parse(read(path))
+            except SyntaxError:  # pragma: no cover - a broken file is another test's problem
+                continue
+            docstrings = set()
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                    body = getattr(node, "body", None)
+                    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \
+                       and isinstance(body[0].value.value, str):
+                        docstrings.add(id(body[0].value))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Constant) and isinstance(node.value, str) \
+                   and id(node) not in docstrings:
+                    yield rel, node.lineno, node.value
+
+    def test_no_executable_literal_names_the_manager(self):
+        name = self._declared_name()
+        product_forms = (f"{name} OS", f"{name}OS")
+        offenders = []
+        for rel, lineno, value in self._executable_literals():
+            if name not in value:
+                continue
+            # Blank out the product's own name, then see if the agent's name
+            # still appears on its own.
+            residue = value
+            for form in product_forms:
+                residue = residue.replace(form, "")
+            if re.search(rf"\b{re.escape(name)}\b", residue):
+                offenders.append(f"{rel}:{lineno}: {value[:70]!r}")
+        assert not offenders, (
+            "production code names today's Manager instead of asking who it is:\n  "
+            + "\n  ".join(offenders)
+        )
+
+    def test_no_production_code_branches_on_an_agents_name(self):
+        """The pattern the ecosystem cannot afford: a future agent needing a
+        core-code change to be treated correctly."""
+        name = self._declared_name()
+        pattern = re.compile(
+            rf'(==|!=)\s*["\']{re.escape(name)}["\']|["\']{re.escape(name)}["\']\s*(==|!=)'
+        )
+        offenders = []
+        files = sorted(SRC.rglob("*.py")) + sorted((REPO_ROOT / "scripts").rglob("*.py"))
+        for path in files:
+            for number, line in enumerate(read(path).splitlines(), start=1):
+                stripped = line.strip()
+                if stripped.startswith("#"):
+                    continue
+                if pattern.search(line):
+                    offenders.append(f"{path.relative_to(REPO_ROOT).as_posix()}:{number}: {stripped[:70]}")
+        assert not offenders, "production code branches on an agent's name:\n  " + "\n  ".join(offenders)
+
+    def test_the_inventory_names_the_role_not_the_agent(self):
+        """The label the Control Center renders for the Manager's brain."""
+        from src.services.evolution.inventory import _brain_components
+
+        labels = [component.label for component in _brain_components(settings())]
+        name = self._declared_name()
+        assert labels, "the inventory declares brain components"
+        assert not any(name in label for label in labels), labels
+
+    def test_the_desktop_notification_is_titled_by_whoever_is_asking(self, monkeypatch):
+        """The heartbeat titles its notification with the name it is given,
+        which the caller reads from the live Manager - not with a literal."""
+        import src.providers.desktop_notifier as notifier_module
+        import scripts.heartbeat as heartbeat_module
+
+        titles = []
+
+        class _Notifier:
+            def notify(self, title, body, tag=None):
+                titles.append(title)
+                return True
+
+        monkeypatch.setattr(notifier_module, "build_desktop_notifier", lambda _settings: _Notifier())
+
+        class _Event:
+            label = "the greenhouse delivery arrives today"
+            dedup_key = "evt-1"
+
+        shown = heartbeat_module._notify_desktop(settings(), [_Event()], agent_name="Jarvis")
+
+        assert shown == 1
+        assert titles == ["Jarvis"], titles

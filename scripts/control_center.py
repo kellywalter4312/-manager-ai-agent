@@ -208,7 +208,7 @@ from src.services.schedule.loader import load_schedule  # noqa: E402
 from src.utils.logging import configure_logging  # noqa: E402
 
 HELP = """
-  talk <what you want>     ask Alfred to do something
+  talk <what you want>     ask the Manager to do something
   status                   the overview
   status <agent>           one agent: brain, memory, capabilities, tools
   status system            heartbeat, permissions, tools, health
@@ -217,7 +217,7 @@ HELP = """
   actions                  the last 20 consequential tool actions, durably
                            recorded across restarts (see 'Memory' step
                            in a talk trail for when one is recorded)
-  unresolved               personal facts Alfred knows only as uncertainty
+  unresolved               personal facts the Manager knows only as uncertainty
   personal                 self-declared personal context taught in conversation
                            (skills, schedules, ...) - current state, per topic
   governance               the real, most-recent Context-Aware Agent Capability
@@ -258,11 +258,11 @@ HELP = """
   profile <agent>          that agent's fuller presentation style
   profile <agent> <field> <value>
                            set one presentation style dimension
-  voice                    whether Alfred can hear and speak
+  voice                    whether the Manager can hear and speak
   voice <agent>            that agent's current voice, and its choices
-  voice <agent> <name>     choose that agent's voice - never Alfred's Brain
-  review                   what Alfred has noticed about his own system
-  capabilities             the real capability matrix - what Alfred can
+  voice <agent> <name>     choose that agent's voice - never its Brain
+  review                   what the Manager has noticed about its own system
+  capabilities             the real capability matrix - what the Manager can
                            actually do right now, and why not otherwise
   capabilities access <agent>
                            every capability and that agent's access to it:
@@ -410,8 +410,8 @@ HELP = """
                            the matching MANAGER_<FIELD> environment
                            variable to make it the default on every
                            future start.
-  ecosystem                the whole ecosystem's real inventory: Alfred,
-                           every specialist, every provider/connection
+  ecosystem                the whole ecosystem's real inventory: the
+                           Manager, every specialist, every provider/connection
                            category, Brain mode, and the system/schema
                            Upgrade Manifest
   ecosystem <component>    one component's detail, version, and every
@@ -420,7 +420,7 @@ HELP = """
                            propose a governed component upgrade (risk:
                            low/medium/high/critical)
   ecosystem <component> propose-content <path.md> <risk> <reason>|<benefit>
-                           specialist/Alfred identity evolution only -
+                           specialist/Manager identity evolution only -
                            the real new document content, staged and
                            hashed, never a bare version string
   ecosystem <component> run <proposal-id> yes|no
@@ -616,7 +616,7 @@ def _reasoning_mode_note(settings: Settings, backend: str) -> str:
     """
     if settings.brain == "null" and backend.strip().lower() != "null":
         return (
-            f" Note: the Manager's own reasoning mode is still 'null', so Alfred keeps reasoning "
+            f" Note: the Manager's own reasoning mode is still 'null', so it keeps reasoning "
             f"deterministically (Half Brain) and this backend answers nothing yet. Turn reasoning on with: "
             "ecosystem brain.manager propose llm low <reason>|<benefit>, then 'ecosystem brain.manager run "
             "<proposal-id> yes'."
@@ -3087,7 +3087,7 @@ def run_services_command(centre: "ControlCenter", rest: str) -> str:
         dropped = found.declared_operation_count - len(d.operations)
         op_spec = ",".join(_op_spec(op) for op in d.operations)
         source_label = {
-            "alfred-service": "a real .well-known/alfred-service.json this service published for Alfred",
+            "alfred-service": "a real .well-known/alfred-service.json this service published for this system",
             "openapi": "a real OpenAPI/Swagger document this service already publishes for anyone",
         }.get(found.source_kind, found.source_kind)
         lines = [
@@ -4124,9 +4124,13 @@ def run_command(
                 ),
                 addressed=owner,
             )
+            # ``owner`` is the Manager's own declared name, read live above.
+            # Naming it literally here made this guidance tell the person to
+            # ask for an agent that, once IDENTITY.md's `## Name` is changed,
+            # does not exist.
             pointer = (
-                "ask Alfred about it - \"read this file to me\", \"what does this file say\""
-                if shared else f"ask Alfred about it with 'artifact {added.artifact_id}'"
+                f"ask {owner} about it - \"read this file to me\", \"what does this file say\""
+                if shared else f"ask {owner} about it with 'artifact {added.artifact_id}'"
             )
             return (
                 f"{state}: {added.artifact_id} [{added.type}] {added.latest.title!r} "
@@ -4578,7 +4582,8 @@ def run_command(
 
     if verb == "talk":
         if not rest:
-            return "say what you would like Alfred to do, for example: talk scan my inbox"
+            return (f"say what you would like {centre.runtime.identity.name} to do, "
+                    "for example: talk scan my inbox")
         return render_turn(
             exchange(channel, conversation, rest, action_log_path=DEFAULT_ACTION_LOG_PATH), columns
         )

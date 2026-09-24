@@ -45,7 +45,7 @@ class KnowledgeLookupTool(Tool):
             description=(
                 "Finds passages in the documents, books and notes the user "
                 "supplied, each carrying the document it came from - never "
-                "current information, and never Alfred's own trained knowledge."
+                "current information, and never the agent's own trained knowledge."
             ),
             schema={"query": str},
         )

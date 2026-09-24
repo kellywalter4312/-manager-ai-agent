@@ -175,6 +175,6 @@ def render_proactive_report(
     lines.append("---")
     lines.append(
         "_Recognition only. Whether and how this is actually mentioned is "
-        "decided the next time you talk to Alfred, never by this report._"
+        "decided the next time you talk to the Manager, never by this report._"
     )
     return "\n".join(lines)

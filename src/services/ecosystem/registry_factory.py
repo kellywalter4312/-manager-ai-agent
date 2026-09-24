@@ -265,7 +265,7 @@ def build_ecosystem_registry(settings: Settings) -> EcosystemRegistry:
             dependents=(
                 "every agent's own retained personal-context knowledge (see "
                 "src/services/memory/) - switching this backend is provider "
-                "replacement only; what Alfred or Arthur is allowed to remember "
+                "replacement only; what any agent is allowed to remember "
                 "remains each agent's own MemoryPolicy, entirely untouched by "
                 "which storage backend is selected",
             ),
