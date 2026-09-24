@@ -919,3 +919,200 @@ class TestNoAgentsNameIsBakedIntoProductionCode:
 
         assert shown == 1
         assert titles == ["Jarvis"], titles
+
+
+class TestTheInventoryFollowsTheLiveRegistry:
+    """Whole-ecosystem closure (2026-09-24). Which registered categories are
+    the provider axis - and so which backend keys are never external
+    connections - used to be decided twice, by hand: a category tuple in the
+    ecosystem inventory and a union of four backend lists in the Control
+    Center's `connections` command. Both had fallen behind the registry, by
+    different amounts, so one stored account could be classified two ways.
+
+    Both now read one derivation (src/services/ecosystem/provider_axis.py).
+    These tests hold the *rule*, not today's registry contents: every probe
+    category and backend below is temporary and test-local.
+    """
+
+    @staticmethod
+    def _adapter(category, backends, *, buildable):
+        from src.services.ecosystem.contracts import GenericCategoryAdapter
+
+        return GenericCategoryAdapter(
+            category,
+            list_backends=lambda: backends,
+            active_key=lambda: backends[0],
+            build=(lambda key, credential: key) if buildable else None,
+        )
+
+    def test_every_registered_selectable_category_is_on_the_provider_axis(self):
+        """The live registry, whatever it holds: nothing activatable is
+        dropped, and nothing else is included."""
+        from src.services.ecosystem.contracts import LifecycleOperation
+        from src.services.ecosystem.provider_axis import CONNECTION_CATEGORIES, provider_axis_categories
+        from src.services.ecosystem.registry_factory import build_ecosystem_registry
+
+        registry = build_ecosystem_registry(settings())
+        derived = set(provider_axis_categories(registry))
+        for category in CONNECTION_CATEGORIES:
+            # A declaration naming a category nothing registers is stale.
+            assert registry.adapter_for(category) is not None, category
+        for category in registry.categories():
+            selectable = LifecycleOperation.ACTIVATE in registry.adapter_for(category).supported_operations()
+            if category in CONNECTION_CATEGORIES or not selectable:
+                assert category not in derived, category
+            else:
+                assert category in derived, category
+
+    def test_a_category_with_a_construction_path_is_on_the_axis_with_its_backends(self):
+        from src.services.ecosystem.contracts import EcosystemRegistry
+        from src.services.ecosystem.provider_axis import provider_axis_backend_names, provider_axis_categories
+
+        registry = EcosystemRegistry()
+        registry.register(self._adapter("probe_axis", ("probe_one", "probe_two"), buildable=True))
+
+        assert provider_axis_categories(registry) == ("probe_axis",)
+        assert provider_axis_backend_names(registry) == {"probe_one", "probe_two"}
+
+    def test_a_read_only_catalog_is_not_a_backend_axis(self):
+        """A category with no construction path keeps the conservative
+        DISCOVER/SELECT default: its entries are never backends anything
+        activates, so they are neither listed as an axis nor reserved."""
+        from src.services.ecosystem.contracts import EcosystemRegistry
+        from src.services.ecosystem.provider_axis import provider_axis_backend_names, provider_axis_categories
+
+        registry = EcosystemRegistry()
+        registry.register(self._adapter("probe_catalog", ("probe_entry",), buildable=False))
+
+        assert provider_axis_categories(registry) == ()
+        assert provider_axis_backend_names(registry) == frozenset()
+
+    def test_a_declared_connection_category_stays_a_connection(self):
+        """Being a connection is declared, not inferred - an activatable
+        category carrying a declared connection name is still not the
+        provider axis, and its backends are not reserved as provider keys."""
+        from src.services.ecosystem.contracts import EcosystemRegistry
+        from src.services.ecosystem.provider_axis import (
+            CONNECTION_CATEGORIES,
+            provider_axis_backend_names,
+            provider_axis_categories,
+        )
+
+        assert CONNECTION_CATEGORIES, "connections are declared, never inferred - the declaration cannot be empty"
+        registry = EcosystemRegistry()
+        for category in CONNECTION_CATEGORIES:
+            registry.register(self._adapter(category, (f"probe_{category}",), buildable=True))
+        registry.register(self._adapter("probe_axis", ("probe_backend",), buildable=True))
+
+        assert provider_axis_categories(registry) == ("probe_axis",)
+        assert provider_axis_backend_names(registry) == {"probe_backend"}
+
+    def test_a_category_registered_later_needs_no_edit_here(self):
+        """The property the hand-kept tuple could not have: a category that did
+        not exist when this module was written appears on its own."""
+        from src.services.ecosystem.contracts import LifecycleOperation
+        from src.services.ecosystem.provider_axis import provider_axis_categories
+        from src.services.ecosystem.registry_factory import build_ecosystem_registry
+
+        registry = build_ecosystem_registry(settings())
+        existing = registry.adapter_for("llm_provider")
+
+        class _LaterCategory:
+            category = "holodeck_provider"
+
+            def available(self):
+                return existing.available()
+
+            def active(self):
+                return None
+
+            def supported_operations(self):
+                return frozenset({LifecycleOperation.DISCOVER, LifecycleOperation.SELECT,
+                                  LifecycleOperation.ACTIVATE, LifecycleOperation.VALIDATE})
+
+        registry.register(_LaterCategory())
+        assert "holodeck_provider" in set(provider_axis_categories(registry))
+
+    def test_inventory_and_connections_classify_one_stored_account_the_same_way(self, tmp_path, monkeypatch):
+        """The production paths themselves, not a copy of them: a temporary
+        provider category is added to the registry each consumer builds, an
+        account is stored under its backend and another under an ordinary
+        service name, and the ecosystem inventory and the `connections`
+        command must agree on both."""
+        from types import SimpleNamespace
+
+        import scripts.control_center as cc
+        import src.services.evolution.inventory as inventory
+        from src.services.credentials.account import CredentialStore, ProviderAccount
+        from src.services.credentials.account_store_file import load_credential_store, save_credential_store
+
+        real_build = cc.build_ecosystem_registry
+
+        def build_with_probe_axis(settings_):
+            registry = real_build(settings_)
+            registry.register(self._adapter("probe_axis_provider", ("probe_backend",), buildable=True))
+            return registry
+
+        monkeypatch.setattr(cc, "build_ecosystem_registry", build_with_probe_axis)
+        monkeypatch.setattr(inventory, "build_ecosystem_registry", build_with_probe_axis)
+
+        accounts = tmp_path / "accounts.json"
+        store = CredentialStore()
+        store.add(ProviderAccount(provider="probe_backend", account_id="a1", credential="k1"))
+        store.add(ProviderAccount(provider="probe_service", account_id="s1", credential="k2"))
+        save_credential_store(store, accounts)
+        monkeypatch.setattr(cc, "DEFAULT_ACCOUNTS_PATH", accounts)
+
+        runtime, manager = assembled(memory="ephemeral")
+        ids = {
+            c.component_id
+            for c in inventory.discover_components(
+                runtime, manager, accounts_path=accounts, config_path=tmp_path / "config.json"
+            )
+        }
+        assert "provider.probe_axis_provider" in ids
+        assert "connection.probe_service" in ids
+        assert "connection.probe_backend" not in ids
+
+        centre = SimpleNamespace(runtime=runtime)
+        listing = cc.run_connections_command(centre, "")
+        assert "probe_service: connected" in listing
+        assert "probe_backend" not in listing
+
+        redirected = cc.run_connections_command(centre, "probe_backend connect a2 k3")
+        assert "is a provider backend" in redirected
+        assert len(load_credential_store(accounts).accounts_for("probe_backend")) == 1
+
+    def test_use_refuses_a_category_this_control_center_does_not_govern_honestly(self, tmp_path, monkeypatch):
+        """`provider <category> use` saves only categories the Control Center
+        governs. For any other registered category the refusal must be true of
+        that category: a catalog has no backend to choose, and anything else is
+        a deployment setting - decided from the adapter's own contract, never
+        from the category's name. Nothing is saved either way."""
+        from types import SimpleNamespace
+
+        import scripts.control_center as cc
+        from src.services.evolution.governed_config import load_governed_config
+
+        real_build = cc.build_ecosystem_registry
+
+        def build_with_probes(settings_):
+            registry = real_build(settings_)
+            registry.register(self._adapter("probe_catalog", ("probe_entry",), buildable=False))
+            registry.register(self._adapter("probe_deployment", ("probe_one", "probe_two"), buildable=True))
+            return registry
+
+        monkeypatch.setattr(cc, "build_ecosystem_registry", build_with_probes)
+        monkeypatch.setattr(cc, "DEFAULT_ACCOUNTS_PATH", tmp_path / "accounts.json")
+        monkeypatch.setattr(cc, "DEFAULT_CONFIG_PATH", tmp_path / "config.json")
+        centre = SimpleNamespace(runtime=SimpleNamespace(settings=settings()))
+
+        catalog = cc.run_provider_command(centre, "probe_catalog use probe_entry")
+        assert "catalog" in catalog and "deployment setting" not in catalog
+
+        deployment = cc.run_provider_command(centre, "probe_deployment use probe_two")
+        assert "deployment setting" in deployment and "Nothing was changed" in deployment
+
+        config = load_governed_config(tmp_path / "config.json")
+        assert config.get("provider.probe_catalog") is None
+        assert config.get("provider.probe_deployment") is None

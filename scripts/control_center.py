@@ -113,14 +113,9 @@ from src.providers.base import LLMProvider  # noqa: E402
 from src.providers.connection import AuthorizationState, Connection  # noqa: E402
 from src.providers.connection_resolver import ConnectionResolver  # noqa: E402
 from src.providers.connection_factory import build_connection  # noqa: E402
-from src.providers.factory import ProviderConfigurationError, available_providers, build_provider  # noqa: E402
-from src.providers.media.factory import (  # noqa: E402
-    available_video_generation_backends,
-    available_video_understanding_backends,
-)
+from src.providers.factory import ProviderConfigurationError, build_provider  # noqa: E402
 from src.providers.speech_factory import (  # noqa: E402
     SpeechConfigurationError,
-    available_speech_providers,
     build_speech,
 )
 from src.manager.cognition import assess_manager  # noqa: E402
@@ -150,6 +145,8 @@ from src.services.connections.site_registry import (  # noqa: E402
     forget_site,
     load_site_registry,
 )
+from src.services.ecosystem.contracts import LifecycleOperation  # noqa: E402
+from src.services.ecosystem.provider_axis import CONNECTION_CATEGORIES, provider_axis_backend_names  # noqa: E402
 from src.services.ecosystem.registry_factory import build_ecosystem_registry  # noqa: E402
 from src.evolution import RiskLevel  # noqa: E402
 from src.services.evolution import ecosystem_evolution  # noqa: E402
@@ -2558,7 +2555,18 @@ def run_provider_command(centre: "ControlCenter", rest: str) -> str:
             # choice is saved for every start rather than swapped mid-session.
             field_name = GOVERNED_BACKEND_FIELDS.get(category)
             if field_name is None:
-                return f"'use' is not available for '{category}' - it has no single backend choice to save."
+                # Not an owner choice this Control Center governs. A catalog
+                # (no ACTIVATE) has no backend to choose at all; anything else
+                # registered here is a deployment setting - the live switch
+                # below rebinds backends while keeping the same memory,
+                # conversation and identity, so a category whose change would
+                # alter those is deliberately not saved from here.
+                if LifecycleOperation.ACTIVATE not in adapter.supported_operations():
+                    return f"'use' is not available for '{category}' - it is a catalog with no single backend to choose."
+                return (
+                    f"'use' is not available for '{category}' here - its backend is a deployment "
+                    "setting, not an owner choice this Control Center saves. Nothing was changed."
+                )
             # Built with the account the person stored for this backend here -
             # never only an environment variable (2026-09-21: an ElevenLabs key
             # added in the Control Center could not be used from it).
@@ -2703,17 +2711,19 @@ def run_provider_command(centre: "ControlCenter", rest: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _provider_axis_backend_names() -> set[str]:
-    """Backend keys belonging to the *provider* axis (LLM/voice/video) -
-    single-active-per-category, never an external app connection. Excluded
-    from the additive connections listing so 'anthropic'/'runway'/
-    'elevenlabs' are never mistaken for a connected service."""
-    return (
-        set(available_providers())
-        | set(available_speech_providers())
-        | set(available_video_generation_backends())
-        | set(available_video_understanding_backends())
-    )
+def _provider_axis_backend_names(settings: "Settings | None" = None) -> frozenset[str]:
+    """Backend keys belonging to the *provider* axis - single-active per
+    category, never an external app connection. Excluded from the additive
+    connections listing so a provider backend's account is never mistaken
+    for a connected service.
+
+    Asked of the live registry through the same derivation the ecosystem
+    inventory uses (src/services/ecosystem/provider_axis.py). This used to
+    union four hand-picked backend lists, so every other registered axis's
+    accounts were listed here as connections while the inventory, once
+    repaired, excluded them - two surfaces classifying one stored account
+    two ways."""
+    return provider_axis_backend_names(build_ecosystem_registry(settings or Settings()))
 
 
 def _gmail_connection_status(settings: Settings) -> list[str]:
@@ -2795,7 +2805,8 @@ def run_connections_command(centre: "ControlCenter", rest: str) -> str:
     settings = centre.runtime.settings
     args = rest.split()
     store = load_credential_store(DEFAULT_ACCOUNTS_PATH)
-    excluded = _provider_axis_backend_names() | {"null"}
+    provider_backends = _provider_axis_backend_names(settings)
+    excluded = provider_backends | {"null"}
     connected_services = sorted(p for p in store.providers() if p not in excluded and p != "gmail")
 
     if not args:
@@ -2832,9 +2843,9 @@ def run_connections_command(centre: "ControlCenter", rest: str) -> str:
             )
         return f"unknown connections action '{action}' for gmail. Try: status, validate"
 
-    if service in _provider_axis_backend_names():
+    if service in provider_backends:
         return (
-            f"'{service}' is a provider backend (LLM/voice/video), not an external app "
+            f"'{service}' is a provider backend, not an external app "
             f"connection - manage it with 'provider <category> ...' instead."
         )
 
@@ -2894,7 +2905,7 @@ def run_connections_command(centre: "ControlCenter", rest: str) -> str:
     if action == "validate":
         registry = build_ecosystem_registry(settings)
         credential = action_args[0] if action_args else None
-        for category in ("communication_provider", "connection"):
+        for category in CONNECTION_CATEGORIES:
             adapter = registry.adapter_for(category)
             if service in {descriptor.key for descriptor in adapter.available()}:
                 outcome = adapter.validate(service, credential=credential)

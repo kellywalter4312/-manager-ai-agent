@@ -57,6 +57,11 @@ from src.control_center.manifest import UpgradeManifest, upgrade_manifest
 from src.control_center.snapshot import SNAPSHOT_VERSION
 from src.services.credentials.account import CredentialStore
 from src.services.credentials.account_store_file import DEFAULT_ACCOUNTS_PATH, load_credential_store
+from src.services.ecosystem.provider_axis import (
+    CONNECTION_CATEGORIES,
+    provider_axis_backend_names,
+    provider_axis_categories,
+)
 from src.services.ecosystem.registry_factory import build_ecosystem_registry
 from src.services.evolution.governed_config import DEFAULT_CONFIG_PATH, load_governed_config
 from src.services.identity.specialist import identity_path
@@ -71,28 +76,10 @@ TOOL_DOCUMENT_GENERATION = "tool.document_generation"
 CONNECTION_GMAIL_ADAPTER = "connection.gmail"
 DEFAULT_GMAIL_ADAPTER_VERSION = "1"
 
-# Provider-axis categories: exactly one backend active per category, many
-# accounts may be retained - the identical set Independent Manageability's
-# own `_provider_axis_backend_names` (scripts/control_center.py) already
-# names for the identical reason, reused here rather than re-derived.
-_PROVIDER_CATEGORIES: tuple[str, ...] = (
-    "llm_provider",
-    "video_generation_provider",
-    "video_understanding_provider",
-    "speech_provider",
-    "media",
-    "avatar_provider",
-    "environment_provider",
-    "knowledge_provider",
-    "live_info_provider",
-    "celebration_provider",
-    "calendar_event_provider",
-    "document_rendering_provider",
-)
-# Additive, no single "active" slot across the axis - Gmail today, any
-# future service tomorrow (see 52.27's own `connections` command, which
-# this reads from the identical persisted CredentialStore).
-_CONNECTION_CATEGORIES: tuple[str, ...] = ("connection", "communication_provider")
+# Which categories are the provider axis, which are reported as connections,
+# and which backend keys the additive connections listing must exclude are
+# answered once, from the live registry, in src/services/ecosystem/provider_axis.py
+# - the same answer the Control Center's own `connections` command uses.
 
 
 def _short_hash(data: bytes) -> str:
@@ -476,21 +463,14 @@ def discover_components(
     for key, specialist in runtime.specialists.items():
         components.append(_specialist_component(key, specialist.name, settings))
 
-    for category in _PROVIDER_CATEGORIES:
-        if registry.adapter_for(category) is not None:
-            components.append(_provider_component(registry, category, store))
+    for category in provider_axis_categories(registry):
+        components.append(_provider_component(registry, category, store))
 
-    for category in _CONNECTION_CATEGORIES:
+    for category in CONNECTION_CATEGORIES:
         if registry.adapter_for(category) is not None:
             components.append(_connection_component(registry, category, store))
 
-    provider_backend_names = {
-        key
-        for category in _PROVIDER_CATEGORIES
-        if (adapter := registry.adapter_for(category)) is not None
-        for key in (d.key for d in adapter.available())
-    }
-    components.extend(additive_connections(store, exclude=frozenset(provider_backend_names)))
+    components.extend(additive_connections(store, exclude=provider_axis_backend_names(registry)))
     components.extend(_connection_adapter_components(config))
 
     components.extend(_brain_components(settings))

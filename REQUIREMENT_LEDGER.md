@@ -674,6 +674,52 @@ ARCHITECTURE.md SS52.74.
 
 ---
 
+## ZZ. Whole-ecosystem closure before Phase 10 (2026-09-24)
+
+Driven against the real composition root (`build_live_system`), every store
+redirected to a temp directory; a "restart" below is a genuine rebuild that
+re-reads every store from disk. 28 runtime checks (17 ecosystem, 10
+governance/capture/surface, 1 memory persistence across restart), re-run against
+the revised repair with the real `data/` and `identities/` fingerprinted
+byte-identical before and after; plus 20 checks of the repair itself against the
+real registry. One defect class found in two places and repaired, one incorrect
+refusal corrected, two items recorded as deferred. The first version of the
+repair was applied before the findings matrix was presented; it was reviewed as
+an unapproved change and revised under explicit authorisation. Full entry:
+ARCHITECTURE.md SS52.75. Phase 10 not started.
+
+| ID | Area | Status | Evidence | Runtime verified? |
+|---|---|---|---|---|
+| Z-WS-01 | Workspace create/rename/profile/archive/remove -> persist -> restart -> runtime | VERIFIED WORKING | `workspace create fieldlab ...` rehydrated after rebuild with label, panels and capability profile intact; reachable by the Manager; `workspace remove` also survived | YES |
+| Z-WS-02 | A workspace profile redirects work and never removes a capability | VERIFIED WORKING | In a narrow workspace the Manager still holds `create_3d_model` and is told where the work belongs ("It belongs in: Task board, 3D diagram") | YES |
+| Z-AG-01 | `agent create` -> persist -> restart -> registered, isolated, removable | VERIFIED WORKING | Specialist present after rebuild with its own memory, Brain and VoiceProfile; two specialists share no memory/Brain and neither is the Manager's; `agent remove` survived | YES |
+| Z-AG-02 | An invalid capability name refuses atomically | VERIFIED WORKING | `agent create ...\|retain` -> "FAILED: no capability called 'retain'. Nothing was created." - no config file written, nothing half-created | YES |
+| Z-CAP-01 | Grant -> persist -> restart -> reachable; revoke likewise; Manager never loses it | VERIFIED WORKING | After rebuild the specialist reaches `create_3d_model` and the Manager still does; revocation also survived | YES |
+| Z-CAP-02 | A created specialist executes a granted capability end to end | VERIFIED WORKING | `handled_by='Probefive'`, "Artifact created", artifact owner `Probefive` | YES |
+| Z-AUTH-01 | Alfred's authority is intact | VERIFIED WORKING | All 11 Manager-only capabilities refuse every grant with a registered reason; a live grant attempt is refused and the capability stays unreachable; a specialist's roster is empty | YES |
+| Z-PRV-01 | Provider account add/select -> persist -> restart | VERIFIED WORKING | Account listed after rebuild; two axes (account vs active backend) behave as documented | YES |
+| Z-PRV-02 | A provider switch reaches the runtime the served surface reads | VERIFIED WORKING | Through `POST /command`: `system.runtime.provider` = anthropic and `system.runtime is centre.runtime`. Administrative writes gated by a confirmation token | YES |
+| Z-VOI-01 | Voice dimensions reach runtime and stay honest about the engine | VERIFIED WORKING | `speech_provider use windows` applied live; `pace slow` applied live; `language Italian` **refused** - "The windows voice provider can't speak Italian. It speaks: English." A language is never an architectural boundary | YES |
+| Z-CONN-01 | Connection connect -> persist -> restart | VERIFIED WORKING | `connections telegram connect ...` listed after rebuild | YES |
+| Z-ENV-01 | Environment choice -> persist -> restart | VERIFIED WORKING | Selection shown by the Control Center after rebuild | YES |
+| Z-SRF-01 | Surfaces are open and served generically | VERIFIED WORKING | `SurfaceKind` accepts "holodeck"/"vr_room"; a workspace panel may reference an unanticipated surface; `/surface/<agent>/<kind>.json` refuses an unknown kind generically (404, no crash, no per-kind branch); Arthur's mailbox/opportunities serve 200 | YES |
+| Z-SRF-02 | One snapshot contract any surface can read | VERIFIED WORKING | 14 top-level keys, no Control-Center-specific shape | YES |
+| Z-OUT-01 | Output endpoints are an open registry | VERIFIED WORKING | `register_translation_output` added a brand-new endpoint live, 4 -> 5, no core change | YES |
+| Z-MEM-01 | Retain -> durable representation -> recall | VERIFIED WORKING | "Got it - I've remembered that: the windmill inspection is due on Friday"; recall returned it; direct `recall('windmill')` -> the exact record | YES |
+| Z-MEM-02 | The Memory contract accepts entity/context types invented later | VERIFIED WORKING | A record with a new `kind`, new `source` and a `context` carrying modality/surface/device accepted with no schema change | YES |
+| Z-MEM-03 | Memory persists across a real restart, per agent | VERIFIED WORKING | Persistent backend, `memory_dir` in a temp directory: after a genuine rebuild the Manager recalled "the kiln fires at dawn" and an owner-created specialist recalled its *own* "the glaze order arrives Tuesday", from separate stores on disk (`manager.json`, `persistprobe.json`) | YES |
+| Z-CAP-03 | Capture is generic across purpose and modality | VERIFIED WORKING | Purpose extracted generically, never matched against a known-purpose list; 47 open marker shapes; recording lifecycle answers honestly ("Ready to record ... use the Recording control") | YES |
+| Z-INV-01 | **Which registered categories are the provider axis was decided by hand in two places** | **DEFECT - REPAIRED** | (1) `inventory.py` listed 12 categories by hand; the registry holds 17 activatable non-connection categories, so `image_generation_provider`, `translation_provider`, `local_assist_provider`, `desktop_notification_provider` and `memory` were absent from `ecosystem`, and their backends from its connections exclusion. (2) The Control Center's `_provider_axis_backend_names()` unioned four hand-picked backend lists, missing `pollinations`, `media`, `ai_image`, `argos`, `persistent`, `ephemeral`, `default`, `documents`, `wikipedia`, `simple_pdf` - so after `provider translation_provider add argos ...`, `connections` listed "argos: connected" and `connections argos connect/disconnect` acted on it unredirected. Repaired by one derivation in `src/services/ecosystem/provider_axis.py` consumed by both; the new exclusion is a strict superset of the old (10 keys added, none removed); the redirect no longer names category families. Regression: `TestTheInventoryFollowsTheLiveRegistry` (7, test-local generic categories plus one live-registry invariant), mutation-verified five ways | YES - 20/20 against the real registry, including after restart |
+| Z-INV-02 | `CONNECTION_CATEGORIES` - which categories are reported as connections | VERIFIED - INTENTIONAL DECLARATION, now single-sourced | Not inferable: in the registry `connection` and `communication_provider` are ordinary single-active adapters. Previously written out in `inventory.py` and again in the Control Center's `connections <service> validate`; now declared once in `provider_axis.py` and consumed by both. A test fails if the declaration is emptied or names an unregistered category | YES |
+| Z-INV-03 | `provider <category> use` refusal for categories the Control Center does not govern | **INCORRECT MESSAGE - CORRECTED** | One sentence - "has no single backend choice to save" - answered every such category: true of the `capability` catalog, false of `memory` and `connection`. Now answered from the adapter contract: no `ACTIVATE` -> "a catalog with no single backend to choose"; otherwise -> "its backend is a deployment setting, not an owner choice this Control Center saves. Nothing was changed." No category-specific branch | YES |
+| Z-MEM-04 | Memory backend selection from the Control Center | VERIFIED - INTENTIONAL BOUNDARY (deployment setting) | MEM-07 requires restart persistence; ARCHITECTURE 18.1 keeps `ephemeral` "for a test, a one-off inspection, or anywhere durability would surprise somebody", selected as `MANAGER_MEMORY`; the Control Center's live switch `rebind_backends` is defined to keep "the same Manager, memory, conversation"; `GOVERNED_BACKEND_FIELDS` was created as the categories "the owner can choose" and did not list the already-registered `memory`. `provider.memory` is listed in the inventory; `provider memory use` is refused and saves nothing | YES |
+| Z-CON-01 | `ACTIVATE` as the provider-axis marker | RECORDED - SOUND TODAY, NOT A DEFECT | `GenericCategoryAdapter` advertises `ACTIVATE` exactly when registered with a `build`; it is the only `CategoryAdapter` implementation and all 20 categories are registered in `registry_factory.py`. A future adapter implementing `CategoryAdapter` directly that forgets `supported_operations()` would be left off the axis; a declared axis marker is a deferred contract change | n/a |
+| Z-CON-02 | `GOVERNED_BACKEND_FIELDS` duplicates category -> Settings-field knowledge | DEFERRED - NOT REPAIRED | 16 hand-mapped entries in `scripts/control_center.py`, already implied by each registration's `active_key`. In step today (omitted: `llm_provider`, governed separately; `capability`, a catalog; `memory`, `connection`, deployment settings). Deriving it needs a declared Settings field on registration - a contract change | n/a |
+| Z-HW-01 | Camera/handwriting capture, phone GPU, playback | UNCHANGED - HARDWARE GATED | Already recorded (RD-04, VIS-05, VIS-06, REC-03, ...). Nothing in software is missing for them; image OCR (RD-04 printed) and scanned-PDF OCR (PDF-06) are verified working | n/a |
+| Z-VR-01 | VR/AR, homes, appliances, TVs, phones, wearables | NOT BLOCKED - and not implemented | No device concept exists in core (`device` in `src/` means audio hardware only); surfaces, output endpoints, workspaces, environments and agents are all open registries or governed data. Nothing was built for this row | n/a |
+
+---
+
 ## O. Explicit Scope Boundaries (non-requirements, preserve these)
 
 | ID | Statement | Source | Status |

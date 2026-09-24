@@ -12359,3 +12359,224 @@ now, and this entry does not schedule them.
 Documentation only. No production code was modified, and no agent, capability,
 workspace, environment, device, surface, provider or integration was created,
 deleted or changed by this entry. Phase 9 stays closed.
+
+### 52.75 Whole-ecosystem closure before Phase 10: the ecosystem is whole, and the provider axis was decided by hand in two places (2026-09-24)
+
+The integrity pass asked for before Multi-Agent Intelligence begins. Not a new
+roadmap and not a discovery campaign: the question was whether the ecosystem
+this repository actually runs is connected, extensible and working, and whether
+configuration the owner changes reaches the runtime that serves them.
+
+**Process note.** The first version of the repair below was applied before the
+findings matrix was presented, contrary to this pass's own inspect -> findings
+-> approve -> repair order. It was then reviewed as an unapproved change; that
+review found the same defect in a second place and the repair was revised and
+widened under explicit authorisation. What follows describes the revised repair.
+
+**Driven, not read.** Twenty-eight checks ran against the real composition root
+(`build_live_system` - the same function a terminal, the served page and a
+browser all enter through), each store redirected to a temp directory so no
+production path was touched: 17 ecosystem checks, 10 governance/capture/surface
+checks, and one memory persistence-across-restart check. A "restart" in these
+checks is a genuine rebuild: `build_live_system` re-reads every store from disk,
+so anything that survives one is persisted and rehydrated rather than merely
+held in memory. All 28 were re-run against the revised repair, with the real
+`data/` and `identities/` directories fingerprinted before and after
+(byte-identical).
+
+**What was proven whole.** Create -> persist -> restart -> runtime holds for a
+workspace, an owner-defined agent, a capability grant and its revocation, a
+provider account, a connection, and an environment choice. A specialist created
+through `agent create` executes a granted capability end to end and owns the
+artifact it makes (`handled_by='Probefive'`, `Artifact created`, owner
+`Probefive`). Two owner-created specialists share no memory and no Brain, and
+neither is the Manager's. All eleven Manager-only capabilities refuse every
+grant, with a registered reason; a specialist holds no roster. A workspace
+profile redirects work and never removes a capability - in a narrow workspace
+the Manager still *holds* `create_3d_model` and is told where the work belongs.
+`SurfaceKind` accepts kinds nothing anticipated ("holodeck", "vr_room") and the
+surface route refuses an unknown one generically rather than branching per kind.
+Translation outputs are an open registry: a brand-new endpoint registered live,
+4 -> 5, with no core change - which is what "earbuds and televisions are
+endpoints of one path, not features" means in practice.
+
+Memory persists across a real restart with the persistent backend (its
+`memory_dir` in a temp directory): the Manager recalled "the kiln fires at dawn"
+and an owner-created specialist recalled its *own* "the glaze order arrives
+Tuesday" after the rebuild, from separate stores on disk (`manager.json`,
+`persistprobe.json`).
+
+**Configuration reaches runtime, checked through the door the owner uses.**
+`POST /command` -> `route_command` -> `run_command`: after
+`provider llm_provider use anthropic`, `system.runtime.provider` is the
+Anthropic provider and `system.runtime is centre.runtime`. Calling `run_command`
+directly does *not* show this, and that is correct rather than a defect - the
+served path re-syncs the held system from the rebound Control Center runtime
+(`serve_ui.py`, Pre-Stage-9 Campaign 4), which is the path a person actually
+takes. Administrative writes require a confirmation token first.
+
+Voice is reached the same way and stays honest about what a backend can do:
+with the Windows engine active, `voice <agent> pace slow` applies live, while
+`voice <agent> language Italian` is *refused* - "The windows voice provider
+can't speak Italian. It speaks: English." A language is never an architectural
+boundary here; it is a fact about the engine currently selected.
+
+**THE DEFECT: WHICH CATEGORIES ARE THE PROVIDER AXIS WAS DECIDED BY HAND, TWICE.**
+Two consumers need to know which registered categories are the provider axis,
+and so which backend keys are never external connections. Both kept their own
+hand-maintained answer beside a live `EcosystemRegistry` that already knew:
+
+- `src/services/evolution/inventory.py` listed twelve categories in a tuple. The
+  registry holds seventeen activatable, non-connection categories, so five were
+  registered, selectable and entirely absent from `ecosystem` - the owner's own
+  list of "real, currently-installed components": `image_generation_provider`,
+  `translation_provider`, `local_assist_provider`,
+  `desktop_notification_provider` and `memory`. The same tuple computed the
+  exclusion for the additive connections listing, so their backend keys were
+  not excluded.
+- `scripts/control_center.py`'s `_provider_axis_backend_names()` - which decides
+  which stored accounts the `connections` command lists as connected services,
+  and which names it redirects to `provider <category> ...` - unioned the
+  backend lists of four hand-picked categories (reasoning, speech, video
+  generation, video understanding). The keys of every other axis were missing:
+  `pollinations`, `media`, `ai_image`, `argos`, `persistent`, `ephemeral`,
+  `default`, `documents`, `wikipedia`, `simple_pdf`. Because
+  `provider <category> add <backend>` accepts any registered backend, an account
+  added that way - `provider translation_provider add argos ...` - was then
+  listed by `connections` as "argos: connected", and `connections argos
+  connect/disconnect` operated on it with no redirect.
+
+The inventory's tuple claimed to be "the identical set" the Control Center
+function names. It was not: that function derives *backend keys* from four
+hand-picked lists, while the tuple listed *categories* by hand, and the two had
+fallen behind by different amounts - so once only the inventory was corrected,
+the two surfaces classified one stored account two ways.
+
+**Repair: one derivation, in the ecosystem layer, consumed by both.**
+`src/services/ecosystem/provider_axis.py`:
+
+- `CONNECTION_CATEGORIES` - the categories reported as connections rather than
+  provider backends (`connection`, `communication_provider`). Kept as an explicit
+  declaration, not inferred: in the registry both are ordinary single-active
+  adapters, so nothing there says "connection" - which categories are reported as
+  connections is architectural metadata, and it now has one source of truth. The
+  Control Center's `connections <service> validate`, which wrote the same pair
+  out again, reads it from here.
+- `provider_axis_categories(registry)` - every registered category not declared a
+  connection whose adapter advertises `ACTIVATE`.
+- `provider_axis_backend_names(registry)` - every backend key of those
+  categories.
+
+`inventory.discover_components` and the Control Center's
+`_provider_axis_backend_names(settings)` both use it. The new exclusion is a
+strict superset of the old Control Center one - ten keys added, none removed -
+so nothing previously excluded becomes listable. Every registered backend key is
+now reserved as a `connections` service name, including generic words such as
+`default` or `documents`; that is correct, because accounts share one key
+namespace: an account stored under `documents` *is* the `documents` backend's
+account. The redirect no longer names today's category families ("LLM/voice/
+video"); it says the name is a provider backend.
+
+A category registered later - with a real construction path - appears in the
+inventory and is reserved in `connections` with no source change anywhere.
+
+**`ACTIVATE`, and why inferring from it is sound today.**
+`CategoryAdapter.active()` already makes every category single-active; what
+`ACTIVATE` separates is a category with a real construction path from a
+read-only catalog. `GenericCategoryAdapter` advertises `ACTIVATE` (with
+`VALIDATE`) exactly when it is registered with a `build`, and keeps the
+conservative `DISCOVER`/`SELECT` default otherwise - `capability`, whose entries
+are the capability names themselves, is the one such category today. It is the
+only `CategoryAdapter` implementation, all twenty categories are registered in
+`registry_factory.py`, and two places read `ACTIVATE` semantically - the
+provider-axis derivation and the Control Center's `use` refusal below, both with
+the same meaning (`scripts/ecosystem_cli.py` only displays it). The remaining
+fragility is recorded, not repaired: a future hand-written adapter that
+implements `CategoryAdapter` directly and forgets to override
+`supported_operations()` would keep the default, be left off the axis, and be
+refused `use` as a catalog. A
+declared axis/kind marker on the contract is the deeper fix and belongs to
+whoever next changes that contract.
+
+**Memory backend selection is a deployment setting, not a Control Center
+choice.** `memory` is a registered, activatable category, so the inventory now
+lists `provider.memory` with its real backend. Choosing that backend from the
+Control Center stays unavailable, and the architecture says why:
+
+- MEM-07 (restart persistence) is a verified requirement, and 18.1 made
+  `persistent` the default because an agent that forgets every start "is not a
+  safer agent, it is a less useful one". `ephemeral` "remains fully supported and
+  is the right choice for a test, a one-off inspection, or anywhere durability
+  would surprise somebody" - selected as `MANAGER_MEMORY`, a deployment setting.
+- The Control Center's backend switch is `rebind_backends` (`src/composition.py`),
+  whose contract is to swap non-reasoning backends while keeping "the same
+  Manager, memory, conversation" - and the reply it gives says so. A memory
+  choice saved there could not be applied live without breaking that guarantee,
+  and applied at every start it would turn durability off as a side effect of a
+  Control Center command.
+- `GOVERNED_BACKEND_FIELDS` was created (Campaign 8, 52.38) as "every other
+  backend category the owner can choose"; `memory` was already registered then
+  and was not listed.
+
+The defect was the refusal text. One sentence answered every registered category
+outside `GOVERNED_BACKEND_FIELDS` - "has no single backend choice to save" -
+which is true of the `capability` catalog and false of `memory` and
+`connection`, each of which has exactly one. The branch now answers from the
+adapter's own contract, never from the category's name: a category that does
+not advertise `ACTIVATE` is refused as "a catalog with no single backend to
+choose"; any other is refused with "'use' is not available for '<category>'
+here - its backend is a deployment setting, not an owner choice this Control
+Center saves. Nothing was changed." No memory-specific branch was added.
+Proposals against `provider.memory` in the evolution lifecycle are unaffected:
+`ProviderModelHandler` changes only the active account's model and refuses
+honestly when there is no account on record, as it does for every
+credential-free axis.
+
+**Regression:** `TestTheInventoryFollowsTheLiveRegistry` (7 tests) in
+tests/test_architecture_audit.py, the file for whole-system invariants "that no
+single step owns". They hold the rule, not today's registry contents: apart from
+one invariant over the live registry (every activatable category is on the axis,
+nothing else is, and every declared connection category is actually registered),
+every category and backend is temporary and test-local - a category with a
+construction path joins the axis with its backends; one without it (a catalog)
+does not; a declared connection category stays a connection even when
+activatable; a category registered later needs no edit; and, through the
+production paths themselves, one stored account under a temporary provider
+backend is classified identically by `discover_components` and by the
+`connections` command, whose redirect writes nothing; and `provider <category>
+use` refuses a test-local catalog as a catalog and a test-local activatable
+category as a deployment setting, saving nothing. Mutation-verified five ways,
+each restored byte-identical afterwards: the axis reverted to the old twelve
+(5 of 7 fail), the connection declaration emptied (caught once the tests stopped
+reading only the constant they guard), the Control Center reverted to its four
+hand-picked lists, the refusal reverted to its old single sentence, and the
+catalog branch dropped (one failure each).
+
+**Runtime verification of the repair** against the real registry, through the
+real composition root, sandboxed: after `provider translation_provider add
+argos ...` and `connections probe_service connect ...`, the inventory lists
+`provider.translation_provider` and `connection.probe_service` and never
+`connection.argos`; `connections` lists `probe_service` and never `argos`; the
+`ecosystem` command agrees; `connections argos connect` redirects and writes
+nothing; `provider memory use ephemeral` is refused with the deployment-setting
+wording and saves nothing, while `provider capability use <entry>` is refused as
+a catalog - and after a genuine rebuild the classification is unchanged (20/20).
+
+**Recorded, not repaired.**
+
+- `GOVERNED_BACKEND_FIELDS` (`scripts/control_center.py`) maps sixteen categories
+  to their Settings fields by hand - knowledge each registration's
+  `active_key=lambda: settings.<field>` already encodes. In step today: of the
+  registered categories it omits, `llm_provider` is governed separately as the
+  reasoning backend, `capability` is a catalog, and `memory` and `connection` are
+  deployment settings. A future owner-choosable category needs an entry there,
+  or `use` refuses it with the deployment-setting wording above. Deriving it needs a declared Settings field
+  on registration - a contract change, deferred.
+- The `ACTIVATE` inference for adapters that implement `CategoryAdapter` directly,
+  above.
+- The hardware-gated rows the ledger already lists (camera/handwriting capture,
+  phone GPU, playback) stay hardware-gated: nothing in software is missing for
+  them.
+
+**Not started, deliberately:** Phase 10. This entry closes the integrity pass
+that precedes it.
