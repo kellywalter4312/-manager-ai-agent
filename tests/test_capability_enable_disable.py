@@ -248,6 +248,67 @@ class TestGovernanceHoldsAcrossEveryEntryPointNotJustControlCenter:
         result = manager.handle_task(Task(description="what time is it"))
         assert result.payload is not None and result.payload.get("handled_by") == "current_datetime"
 
+    def test_the_heartbeat_equips_the_owners_specialists_it_registers(
+        self, _isolated_config_file, monkeypatch, tmp_path
+    ):
+        """Phase 9 (2026-09-24). One layer further in than the finding above,
+        and the same class of gap: the heartbeat *registered* the owner's own
+        specialists and then left them unequipped. With no capability handler
+        bound, ``authorised_capabilities()`` was empty, so every capability
+        the owner had granted was both undeclared and unreachable here - while
+        the identical definition, read from the identical governed config, had
+        them in every other entry point.
+
+        Measured before the repair: Scout ``authorised=()`` and
+        ``capability_reply`` None on a tick, against ``('create_diagram',)``
+        and a real result through ``scripts/serve_ui.build_live_system``.
+
+        "No mission is given to them here" did not save it either: the tick's
+        mission is routed by capability-token overlap, and an area an owner
+        could plainly choose really does win that routing - so the mission was
+        handed to a specialist stripped of its grants, silently, every tick.
+        """
+        import scripts.heartbeat as heartbeat_module
+        from src.agents.specialists import AGENT_DEFINITION_PREFIX, SpecialistDefinition
+        from src.control_center.capability_access import with_grants
+        from src.heartbeat.runner import MISSION
+        from src.services.evolution.governed_config import save_governed_config
+        from src.services.profile.profile import UserProfile
+
+        monkeypatch.setattr(heartbeat_module, "DEFAULT_CONFIG_PATH", _isolated_config_file)
+        definition = SpecialistDefinition(
+            key="scout", name="Scout",
+            area="gmail inbox freelance job opportunities and new leads",
+        )
+        config = load_governed_config(_isolated_config_file)
+        config = config.with_value(AGENT_DEFINITION_PREFIX + "scout", definition.to_value())
+        grant, value = with_grants("Scout", ("create_diagram",))
+        save_governed_config(config.with_value(grant, value), _isolated_config_file)
+
+        build_tick = heartbeat_module.build_manager_factory(
+            Settings.from_env(
+                env={}, memory="ephemeral", media="local",
+                artifacts_dir=str(tmp_path / "artifacts"),
+                media_asset_dir=str(tmp_path / "assets"),
+            ),
+            dry_run=True,
+        )
+        manager = build_tick(UserProfile())
+        scout = manager.registry.get("Scout")
+        assert scout is not None, "the owner's specialist is registered on every tick"
+
+        # The owner's grant is live here, exactly as in every other entry point.
+        assert scout.authorised_capabilities() == ("create_diagram",)
+        assert "create_diagram" in scout.spec.capabilities
+        assert scout.capability_reply(Task(description="make a diagram of a water filter")) is not None
+
+        # And the exposure is real, not hypothetical: this tick's own mission
+        # is what reaches this agent.
+        decision = manager.router.route(
+            Task(description=MISSION), manager.registry.all_agents()
+        )
+        assert decision.agent_name == "Scout"
+
     def test_the_static_exports_own_composition_root_also_filters(self, _isolated_config_file, monkeypatch):
         """Completeness-review finding (2026-09-08): scripts/export_ui.py's
         take_snapshot() - the real function serve_ui.py's own docstring

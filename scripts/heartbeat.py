@@ -60,7 +60,11 @@ from src.services.evolution.governed_config import (  # noqa: E402
     DEFAULT_CONFIG_PATH,
     load_governed_config,
 )
-from scripts.control_center import filtered_manager_capabilities  # noqa: E402
+from scripts.control_center import (  # noqa: E402
+    SpecialistCapabilities,
+    equip_specialist,
+    filtered_manager_capabilities,
+)
 from src.utils.logging import configure_logging  # noqa: E402
 
 
@@ -144,8 +148,28 @@ def build_manager_factory(
             capabilities=capabilities,
         )
         # The owner's own specialists, registered exactly as every other
-        # entry point registers them - no mission is given to them here.
+        # entry point registers them.
         register_defined_specialists(runtime, manager, load_governed_config(DEFAULT_CONFIG_PATH).values, accounts=accounts)
+        # ...and equipped exactly as every other entry point equips them.
+        #
+        # Registering without equipping was the same governance-integrity gap
+        # this factory's `capabilities` wiring above already has a name for,
+        # one layer further in. A specialist registered here declared only its
+        # area's words and held no capability handler, so every capability the
+        # owner granted it was invisible and unreachable - while the identical
+        # definition, from the identical governed config, had them in every
+        # other entry point. "No mission is given to them here" was not true
+        # either: this tick's mission is routed by capability-token overlap,
+        # and an owner-defined specialist whose area overlaps it ("gmail inbox
+        # freelance job opportunities") really does win that routing and
+        # really did then run stripped of its grants.
+        #
+        # The handler is the same one, built the shape it already supports
+        # without a channel or conversation: this runner is headless.
+        manager.specialist_capabilities = SpecialistCapabilities(runtime=runtime, manager=manager)
+        for agent in manager.registry.all_agents():
+            if agent is not manager.own_skills:
+                equip_specialist(agent, runtime=runtime, manager=manager)
         return manager
 
     return build

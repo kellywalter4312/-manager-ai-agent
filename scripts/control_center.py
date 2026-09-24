@@ -1660,15 +1660,24 @@ class SpecialistCapabilities:
         return capability.handle(self.request_for(agent, task))
 
 
-def equip_specialist(agent, *, runtime, manager, channel) -> None:
+def equip_specialist(agent, *, runtime, manager, channel=None) -> None:
     """Give one specialist the routes every agent has - its own voice, its own
     recordings, and its authorised capabilities through the Manager's one
     shared handler. Used at start for every registered specialist and when the
-    owner creates one live, so both are equipped identically."""
+    owner creates one live, so both are equipped identically.
+
+    ``channel`` is optional because one real entry point has no speech surface
+    at all: ``scripts/heartbeat.py`` runs headless, with no conversation and
+    nothing to speak through. It still registers the owner's own specialists,
+    so it still has to equip them - a grant is a governed owner decision and
+    must not apply at one entry point and not another. Without a channel the
+    voice route is simply not bound, which is honest: there is nothing there
+    to speak. Recordings and authorised capabilities are bound exactly as
+    everywhere else."""
     # Every specialist chooses and configures its own voice through the same
     # capability, against the same provider - read through the channel at the
     # moment of asking, so a live provider switch is what it plans against.
-    if hasattr(agent, "bind_voice"):
+    if channel is not None and hasattr(agent, "bind_voice"):
         agent.bind_voice(specialist_voice_handler(
             discover_voices=lambda: tuple(getattr(channel.speech, "available_voices", lambda: ())()),
             voice_facts=lambda: voice_facts(channel.speech),

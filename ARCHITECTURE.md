@@ -12086,3 +12086,84 @@ is where the reason is stated, and it states it.
 Regression: 2 further tests in
 `tests/test_specialist_capability_reachability_sweep_2026_09_23.py` (63
 total).
+
+### 52.72 Phase 9 (Agent Architecture) - the owner's agent was registered on every tick and equipped on none of them (2026-09-24)
+
+Phase 9 is the agent itself: who an owner-defined specialist is, what it is
+given, and whether it is the same agent wherever the system is started from.
+Inspected against the stricter completion standard. **One genuine defect
+found and repaired; the rest of what was inspected was found correct and is
+recorded rather than changed.**
+
+**The defect: a grant that applied at four entry points and not the fifth.**
+
+`equip_specialist` (scripts/control_center.py) is what gives a specialist the
+routes every agent has - its voice, its recordings, and *its authorised
+capabilities* through the Manager's one shared `SpecialistCapabilities`
+handler. This project has five real entry points that build the system. Four
+called it: `control_center.build`, `export_ui`, `serve_ui` (which delegates to
+`control_center.build`) and `ambient_voice` (which imports the same `build`).
+`scripts/heartbeat.py` registered the owner's own specialists - deliberately,
+"exactly as every other entry point registers them" - and then equipped none
+of them, and never built a `SpecialistCapabilities` handler at all.
+
+The consequence is not cosmetic, because `authorised_capabilities()` returns
+`()` when no handler was bound (src/agents/cognitive_agent.py), and
+`AgentSpec.capabilities` is built from exactly that. So on every tick the
+owner's specialist both **declared** less than it was and **could do** none of
+it: `capability_reply` returns None with no handler, so every capability the
+owner had granted was unreachable there.
+
+Measured through the real entry points, from one identical governed config -
+one definition (`Scout`, area "gmail inbox freelance job opportunities and new
+leads"), granted `create_diagram`:
+
+| | `serve_ui.build_live_system` | `heartbeat.build_manager_factory` |
+|---|---|---|
+| `authorised_capabilities()` | `('create_diagram',)` | `()` |
+| capability handler bound | yes | **no** |
+| `spec.capabilities` | includes `create_diagram` | **omits it** |
+| `capability_reply(...)` | a real result | **None** |
+
+**"No mission is given to them here" was not a defence.** That comment sat
+directly above the registration. But `src/heartbeat/runner.py` calls
+`manager.handle_task(mission)`, and the Manager routes by capability-token
+overlap. With the area above, the tick's own `MISSION` ("check my gmail inbox
+for new job and freelance opportunities") routes to **Scout, score 6**,
+beating the shipped email specialist's 4 - measured, not reasoned about. So
+the heartbeat really did hand its mission to an agent stripped of its grants,
+silently, on every tick.
+
+**Why this is the same defect the file already had a name for.** This factory
+already carries two repairs of precisely this shape: the `accounts=` wiring
+("a currently-selected account should not silently apply to one entry point
+and not another") and the 2026-09-08 governance-integrity repair, where a
+*disabled* capability was still reachable on every tick because this factory
+never read the same `GovernedConfig`. This is that same principle one layer
+further in: enable/disable was honoured here, per-agent grants were not.
+
+**The repair, and why it is narrow.** `SpecialistCapabilities.__init__`
+already declared `channel=None, conversation=None`, and every use of both
+inside `request_for` was already guarded by `if ... is not None`. The
+channel-less, conversation-less shape was therefore an intended, pre-existing
+seam, not one invented for this. The repair uses it:
+
+* `equip_specialist` takes `channel=None` and binds the voice route only when
+  there is a channel. The heartbeat is headless - there is nothing there to
+  speak through, and not binding a voice is the honest answer rather than
+  binding one that would fail when called. Recordings and authorised
+  capabilities bind exactly as everywhere else.
+* `scripts/heartbeat.py` builds the same handler and equips every registered
+  agent except the Manager's own skills - mirroring `control_center.build`'s
+  own loop rather than writing a second, differently-shaped one, since a
+  second shape is how this drift began.
+
+No capability, registry, agent or handler system was added; nothing was
+duplicated. Two call sites and one default.
+
+Regression: `test_the_heartbeat_equips_the_owners_specialists_it_registers`,
+added to `TestGovernanceHoldsAcrossEveryEntryPointNotJustControlCenter` in
+tests/test_capability_enable_disable.py - the class that already exists for
+exactly this class of gap. Verified by mutation: with the equipping removed
+the test fails on `assert () == ('create_diagram',)`, which is the defect
+itself.
