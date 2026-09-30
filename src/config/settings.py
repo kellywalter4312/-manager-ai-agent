@@ -208,6 +208,14 @@ class Settings:
     # module's own docstring) is what an unconfigured installation
     # gets, the same choice avatar_provider's own default already makes.
     environment_provider: str = "default"
+    # Which engine runs a created artifact so that what it actually does can be
+    # observed - see src/providers/artifact_runtime.py's own docstring. A
+    # browser is one execution technology and is what this machine already has;
+    # a game engine, a simulation library or a native runner are others, and
+    # none of them is the architecture. "browser" is the default because
+    # constructing it starts nothing and an installation without one is told so
+    # honestly at the moment of asking rather than at startup.
+    artifact_runtime: str = "browser"
     # Reasoning is off by default, matching the router's conservative default.
     # "llm" is still safe: the brain receives whatever build_provider returned,
     # which is the null provider unless a provider was deliberately configured.
@@ -244,11 +252,16 @@ class Settings:
     memory_dir: str = "data/memory"
     # Which human calendar decides what "today" means. Storage stays UTC - a
     # MemoryRecord's created_at is never reinterpreted - and this only decides
-    # which local day an instant fell on. 23:30 UTC is already tomorrow in
-    # Lagos, and it is the person's day that matters when deciding what is
-    # still current. Validated where it is resolved, not here: Settings does
-    # not import the things it configures.
-    timezone: str = "Africa/Lagos"
+    # which local day an instant fell on. 23:30 UTC is already tomorrow an
+    # hour east of Greenwich, and it is the person's day that matters when
+    # deciding what is still current. Validated where it is resolved, not
+    # here: Settings does not import the things it configures.
+    #
+    # "local" (the default) is the machine's own local time. Phase 11 final
+    # gate: this used to be one person's city, so every installation reckoned
+    # days there unless told otherwise. A named zone (MANAGER_TIMEZONE) is
+    # still honoured exactly as before.
+    timezone: str = "local"
     model: str = "claude-opus-5"
     # Phase 1.4: each provider owns its own model configuration rather than
     # sharing the field above, which is anthropic's - a name like
@@ -463,6 +476,11 @@ class Settings:
             raise ValueError("Settings.environment_provider must not be empty")
         object.__setattr__(self, "environment_provider", environment_provider)
 
+        artifact_runtime = self.artifact_runtime.strip().lower()
+        if not artifact_runtime:
+            raise ValueError("Settings.artifact_runtime must not be empty")
+        object.__setattr__(self, "artifact_runtime", artifact_runtime)
+
         brain = self.brain.strip().lower()
         if not brain:
             raise ValueError("Settings.brain must not be empty")
@@ -595,6 +613,7 @@ class Settings:
             f"connection_provider={self.connection_provider} "
             f"avatar_provider={self.avatar_provider} "
             f"environment_provider={self.environment_provider} "
+            f"artifact_runtime={self.artifact_runtime} "
             f"brain={self.brain} "
             f"specialist_brain={self.specialist_brain} memory={self.memory} "
             f"timezone={self.timezone} model={self.model} "

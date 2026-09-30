@@ -223,6 +223,11 @@ def _third_person(text: str) -> str:
     return re.sub(r"\bmy\b", "their", re.sub(r"\bI\b", "they", str(text)))
 
 
+# "how to" / "to" in front of a learned skill - the way it is said, not the
+# skill itself.
+_HOW_TO_LEAD = re.compile(r"^\s*(?:how\s+)?to\s+", re.IGNORECASE)
+
+
 # "I've learned Python", "I have learned Python", "I learned Python",
 # "I've mastered X", "I know X now" - a completed, past-tense competency
 # statement, distinct from a study still under way.
@@ -395,13 +400,19 @@ def extract_skill_learned(text: str) -> "PersonalContextCandidate | None":
         match = pattern.search(stripped)
         if match is None:
             continue
-        topic = _reject_if_stopword(strip_trailing_filler(match.group("topic")))
+        said = strip_trailing_filler(match.group("topic"))
+        # "I've learned how to play the guitar": the skill is "play the
+        # guitar" - "how to" is how it was said, and a topic opening with
+        # "how" was refused as a stopword, so the whole statement was lost
+        # in Half Brain (Phase 11 closure sweep). The content keeps the
+        # person's own phrasing.
+        topic = _reject_if_stopword(_HOW_TO_LEAD.sub("", said))
         if topic is None:
             continue
         topic = _bounded(topic)
         return PersonalContextCandidate(
             topic=topic,
-            content=f"The user has learned {topic}.",
+            content=f"The user has learned {_third_person(_bounded(_clean_topic(said)))}.",
             category="skill",
             status=STATUS_CURRENT,
             activity="learned",
@@ -667,7 +678,11 @@ def extract_habitual_statement(text: str) -> "PersonalContextCandidate | None":
         return None
     return PersonalContextCandidate(
         topic=_bounded(topic),
-        content=f"The user {_third_person_verb(verb)} {rest}.",
+        # Pronouns converted like every other statement shape here: "I go to
+        # my gym" is stored as "The user goes to their gym", never "... my
+        # gym" - the Phase 11 closure sweep found "The user passeds my
+        # driving test." written to memory.
+        content=f"The user {_third_person_verb(verb)} {_third_person(rest)}.",
         category="routine",
         status=STATUS_CURRENT,
         activity=verb,
@@ -680,6 +695,12 @@ def _third_person_verb(verb: str) -> str:
     word = verb.lower()
     if word in _IRREGULAR_THIRD_PERSON:
         return _IRREGULAR_THIRD_PERSON[word]
+    # A past tense has no person agreement: "I passed" is "the user passed",
+    # never "passeds"; "I went" is "the user went", never "wents". Regular
+    # pasts end in -ed (but "feed", "need", "succeed" are present tense); the
+    # irregular ones are English grammar, not a vocabulary of life.
+    if (word.endswith("ed") and not word.endswith("eed") and len(word) > 3) or word in _IRREGULAR_PAST:
+        return word
     if word.endswith(("s", "x", "z", "ch", "sh", "o")):
         return word + "es"
     if word.endswith("y") and len(word) > 1 and word[-2] not in "aeiou":
@@ -688,6 +709,16 @@ def _third_person_verb(verb: str) -> str:
 
 
 _IRREGULAR_THIRD_PERSON = {"have": "has", "be": "is", "go": "goes", "do": "does"}
+
+# Irregular English past-tense forms (grammar, not a list of activities).
+_IRREGULAR_PAST = frozenset({
+    "went", "won", "ran", "got", "took", "gave", "came", "bought", "sold", "brought", "taught",
+    "caught", "left", "lost", "met", "paid", "spent", "built", "began", "became", "broke", "chose",
+    "drove", "ate", "fell", "flew", "found", "grew", "heard", "held", "led", "lent", "rode", "rose",
+    "sang", "sat", "shot", "slept", "spoke", "stood", "stole", "swam", "threw", "understood", "woke",
+    "wore", "wrote", "drew", "drank", "forgave", "hid", "fought", "sought", "bent", "sent", "shook",
+    "struck", "swore", "tore", "won", "withdrew",
+})
 
 
 # A full stop that ends an abbreviation, an initial or sits inside a number is

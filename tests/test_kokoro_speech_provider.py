@@ -39,7 +39,19 @@ from src.providers.kokoro_speech_provider import (
 )
 from src.services.identity.voice import VoiceProfile, parse_voice
 
-_MODEL_PRESENT = Path(DEFAULT_MODEL_PATH).exists() and Path(DEFAULT_VOICES_PATH).exists()
+def _kokoro_onnx_available() -> bool:
+    try:
+        import kokoro_onnx  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+_MODEL_PRESENT = (
+    Path(DEFAULT_MODEL_PATH).exists()
+    and Path(DEFAULT_VOICES_PATH).exists()
+    and _kokoro_onnx_available()
+)
 
 
 def adapter(monkeypatch, *, play_result: bool = True, engine=None):

@@ -833,10 +833,35 @@ def parse_objective(response: str, *, source: str = "") -> ObjectiveVerdict:
     )
 
 
+# What each field of the schema asks for, in the schema's own words - read out
+# of the schema itself, so the two can never drift apart.
+_OBJECTIVE_SCHEMA_WORDING = tuple(
+    hint.split(", or null")[0] for hint in re.findall(r':\s*"([^"]+)"', OBJECTIVE_RESPONSE_SCHEMA)
+)
+
+
+def _echoes_the_schema(text: str) -> bool:
+    """Whether a field's text is only the schema's own wording handed back.
+    Phase 11 closure, with the real local model: asked what to ask the person,
+    it answered "What should be attempted next?" - the next_step description -
+    and that question replaced a real answer."""
+    from difflib import SequenceMatcher
+
+    def norm(value: str) -> str:
+        return " ".join(re.sub(r"[^\w\s]", " ", str(value or "").lower()).split())
+
+    said = norm(text)
+    return bool(said) and any(SequenceMatcher(None, said, norm(hint)).ratio() >= 0.85 for hint in _OBJECTIVE_SCHEMA_WORDING)
+
+
 def parse_objective_or_unavailable(response: str, *, source: str = "") -> ObjectiveVerdict:
     try:
         verdict = parse_objective(response, source=source)
     except BrainError:
+        return ObjectiveVerdict.unavailable(source=source)
+    # A field that only repeats what the schema asked for says nothing -
+    # "decided but empty", the floor applied just below.
+    if any(_echoes_the_schema(text) for text in (verdict.next_step, verdict.question, verdict.final_answer)):
         return ObjectiveVerdict.unavailable(source=source)
 
     # A decided status that names none of the text a caller would need to

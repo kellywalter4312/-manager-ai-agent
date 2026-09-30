@@ -73,8 +73,9 @@ from src.services.identity.specialist import identity_path
 CAPABILITY_GENERAL_CONVERSATION = "capability.general_conversation"
 DEFAULT_CONVERSATION_HISTORY_LIMIT = "6"
 TOOL_DOCUMENT_GENERATION = "tool.document_generation"
-CONNECTION_GMAIL_ADAPTER = "connection.gmail"
-DEFAULT_GMAIL_ADAPTER_VERSION = "1"
+# A connection's adapter version is declared by the connection itself
+# (connection_factory.connection_adapter_versions) and read through
+# governed_adapter_versions below - no connection is named here.
 
 # Which categories are the provider axis, which are reported as connections,
 # and which backend keys the additive connections listing must exclude are
@@ -133,9 +134,11 @@ def _provider_component(registry, category: str, store: CredentialStore) -> Comp
     backend = active.key
     account = store.active(backend)
     if account is not None:
-        model = account.model or "(default model)"
+        from src.services.evolution.handlers import DEFAULT_MODEL_LABEL
+
+        model = account.model or DEFAULT_MODEL_LABEL
         version = f"{backend}:{account.account_id}:{model}"
-    elif backend in ("null", "none") or not active.requires_credential:
+    elif not active.requires_credential:
         version = backend
     else:
         version = f"{backend} (no account on record - using environment credential, if any)"
@@ -357,20 +360,38 @@ def _tool_config_components(config, settings: Settings) -> tuple[ComponentSnapsh
     )
 
 
+def governed_adapter_versions(config) -> "dict[str, str]":
+    """Each built-in connection's governed adapter version - every connection
+    that declares more than one (``connection_factory.connection_adapter_versions``),
+    at its governed value or its own default. What a session's connections
+    are built with (Phase 11: no connection is named here)."""
+    from src.providers.connection_factory import connection_adapter_versions
+
+    return {
+        name: str(config.get(f"connection.{name}", versions[0]))
+        for name, versions in connection_adapter_versions().items()
+    }
+
+
 def _connection_adapter_components(config) -> tuple[ComponentSnapshot, ...]:
     """A connection's own real adapter *implementation* version -
     distinct from, and never touching, ``connection.connection``
     (which backend/account 52.27's own single-active axis has
     selected) or the additive per-service account state
-    ``additive_connections`` already reports."""
-    return (
+    ``additive_connections`` already reports. One entry per connection
+    that declares more than one implementation."""
+    from src.providers.connection_factory import connection_adapter_versions
+
+    declared = connection_adapter_versions()
+    return tuple(
         ComponentSnapshot(
-            component_id=CONNECTION_GMAIL_ADAPTER,
+            component_id=f"connection.{name}",
             category="connection",
-            label="Gmail adapter implementation version",
-            version=config.get(CONNECTION_GMAIL_ADAPTER, DEFAULT_GMAIL_ADAPTER_VERSION),
-            detail="v1: limit-only reads; v2: also honours a label filter",
-        ),
+            label=f"{name} adapter implementation version",
+            version=version,
+            detail=f"known adapter versions: {', '.join(declared[name])} (default {declared[name][0]})",
+        )
+        for name, version in sorted(governed_adapter_versions(config).items())
     )
 
 

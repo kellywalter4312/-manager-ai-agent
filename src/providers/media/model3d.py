@@ -201,11 +201,12 @@ class Part:
     rotation: "list[float]" = field(default_factory=lambda: [0.0, 0.0, 0.0])  # degrees about x, y, z
     scale: "list[float]" = field(default_factory=lambda: [1.0, 1.0, 1.0])
     note: str = ""
+    motion: "str | None" = None  # a registered Motion's name - how this part moves over time
 
     def to_dict(self) -> dict:
         return {"name": self.name, "shape": self.shape, "dimensions": dict(self.dimensions), "colour": list(self.colour),
                 "position": [round(v, 4) for v in self.position], "rotation": list(self.rotation),
-                "scale": list(self.scale), "note": self.note}
+                "scale": list(self.scale), "note": self.note, "motion": self.motion}
 
 
 class Model3DError(ValueError):
@@ -267,12 +268,104 @@ def validate_parts(parts: Sequence[Part]) -> "list[str]":
 
 
 # ---------------------------------------------------------------------------
+# Motion - an open registry of how things move, never of what moves
+# ---------------------------------------------------------------------------
+#
+# Phase 11 final gate: parts had shape, size, colour, placement and orientation
+# but nothing could move - "a turtle swimming", "a balloon drifting" could only
+# ever be still. A Motion is geometry over time, named by the verbs people use
+# for it (spin, bob, sway, drift, orbit); a part's own clause gives it one, and a
+# motion in the request itself moves the whole model. Written as real glTF 2.0
+# animations (keyframed samplers and channels) and read back by inspect_glb like
+# every other claim. No subject is known here - a swimming turtle and a drifting
+# boat are both just "drift".
+
+MOTION_SECONDS = 4.0
+MOTION_KEYS = 17  # a closed loop: the last key equals the first
+
+
+@dataclass(frozen=True)
+class Motion:
+    name: str
+    # A regular expression of the words that ask for it. Built-in motions are
+    # asked for with an -ing word ("drifting", "rocking"): the bare forms are
+    # too often the name of a thing - a sail, a rock, a wave, a swing, a circle.
+    verbs: str
+    path: str   # "translation" or "rotation" - the glTF channel it drives
+    # (phase 0..1, size of what moves) -> a translation offset, or rotation degrees about x, y, z
+    sample: "Callable[[float, float], tuple[float, float, float]]" = field(repr=False)
+    examples: "tuple[str, ...]" = ()  # words shown to a person describing it
+
+
+MOTIONS: "dict[str, Motion]" = {}
+
+
+def register_motion(motion: Motion) -> None:
+    """Add a way of moving - new verbs, new paths - with no change to parsing,
+    writing or viewing. An existing name is never silently replaced."""
+    if motion.name in MOTIONS:
+        raise ValueError(f"a motion called {motion.name!r} is already registered")
+    if motion.path not in ("translation", "rotation"):
+        raise ValueError("a motion drives translation or rotation")
+    MOTIONS[motion.name] = motion
+
+
+_TAU = 2 * math.pi
+for _motion in (
+    Motion("spin", r"spinning|rotating|turning|revolving|twirling|whirling",
+           "rotation", lambda t, size: (0.0, 360.0 * t, 0.0), ('spinning', 'rotating', 'turning',)),
+    Motion("bob", r"bobbing|floating|hovering|bouncing|breathing",
+           "translation", lambda t, size: (0.0, 0.12 * size * math.sin(_TAU * t), 0.0), ('bobbing', 'floating', 'hovering')),
+    Motion("sway", r"swaying|rocking|flapping|waving|swinging|paddling|wobbling",
+           "rotation", lambda t, size: (0.0, 0.0, 14.0 * math.sin(_TAU * t)), ('swaying', 'rocking', 'flapping',)),
+    Motion("drift", r"drifting|gliding|swimming|sailing|flying|cruising|travell?ing|moving",
+           "translation", lambda t, size: (0.6 * size * math.sin(_TAU * t), 0.05 * size * math.sin(2 * _TAU * t), 0.0),
+           ('drifting', 'swimming', 'gliding', 'flying')),
+    Motion("orbit", r"orbiting|circling",
+           "translation", lambda t, size: (0.5 * size * math.cos(_TAU * t) - 0.5 * size, 0.0, 0.5 * size * math.sin(_TAU * t)), ('orbiting', 'circling',)),
+):
+    register_motion(_motion)
+
+
+def motion_in(text: str, *, except_words: str = "") -> "str | None":
+    """The registered motion a piece of text asks for, or None. ``except_words``
+    (a part's own name) are never read as its motion."""
+    lowered = str(text or "").lower()
+    for word in str(except_words or "").lower().split():
+        lowered = re.sub(rf"\b{re.escape(word)}\b", " ", lowered)
+    for motion in MOTIONS.values():
+        if re.search(rf"\b(?:{motion.verbs})\b", lowered):
+            return motion.name
+    return None
+
+
+def _motion_track(motion: Motion, base_position, base_rotation, size: float):
+    """The keyframe times and values (one per key) for ``motion`` around a node's
+    resting translation/rotation."""
+    times = [MOTION_SECONDS * k / (MOTION_KEYS - 1) for k in range(MOTION_KEYS)]
+    values = []
+    for k in range(MOTION_KEYS):
+        phase = k / (MOTION_KEYS - 1)
+        dx, dy, dz = motion.sample(phase, size)
+        if motion.path == "translation":
+            values.append([base_position[0] + dx, base_position[1] + dy, base_position[2] + dz])
+        else:
+            values.append(list(_quaternion([base_rotation[0] + dx, base_rotation[1] + dy, base_rotation[2] + dz])))
+    return times, values
+
+
+# ---------------------------------------------------------------------------
 # GLB writing and independent reading
 # ---------------------------------------------------------------------------
 
 
-def assemble_glb(parts: Sequence[Part], *, title: str = "model") -> bytes:
+def assemble_glb(parts: Sequence[Part], *, title: str = "model", motion: "str | None" = None) -> bytes:
+    """``motion`` moves the whole model (a registered Motion's name); each part's
+    own ``motion`` moves that part. Both become real glTF animations."""
     problems = validate_parts(parts)
+    for name in [motion] + [p.motion for p in parts]:
+        if name is not None and name not in MOTIONS:
+            problems.append(f"no motion called '{name}' (motions: {', '.join(MOTIONS)})")
     if problems:
         raise Model3DError("; ".join(problems))
     binary = bytearray()
@@ -300,14 +393,44 @@ def assemble_glb(parts: Sequence[Part], *, title: str = "model") -> bytes:
             "attributes": {"POSITION": 3 * index, "NORMAL": 3 * index + 1}, "indices": 3 * index + 2, "material": index, "mode": 4}]})
         nodes.append({"name": part.name, "mesh": index, "translation": [float(v) for v in part.position],
                       "rotation": [float(v) for v in _quaternion(part.rotation)], "scale": [float(v) for v in part.scale]})
+
+    scene_nodes = list(range(len(nodes)))
+    animated: "list[tuple[int, Motion, list, list, float]]" = []
+    for index, part in enumerate(parts):
+        if part.motion is not None:
+            low, high = world_bounds(part)
+            animated.append((index, MOTIONS[part.motion], part.position, part.rotation, float(max(high - low))))
+    if motion is not None:
+        lows, highs = zip(*(world_bounds(p) for p in parts))
+        size = float(max(np.max(highs, axis=0) - np.min(lows, axis=0)))
+        nodes.append({"name": title[:80] or "model", "children": scene_nodes})
+        scene_nodes = [len(nodes) - 1]
+        animated.append((len(nodes) - 1, MOTIONS[motion], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], size))
+
+    samplers, channels = [], []
+    for node_index, chosen, base_position, base_rotation, size in animated:
+        times, values = _motion_track(chosen, base_position, base_rotation, size)
+        time_view = add_view(np.array(times, "<f4").tobytes(), 0)
+        buffer_views[time_view].pop("target")
+        accessors.append({"bufferView": time_view, "componentType": 5126, "count": len(times), "type": "SCALAR",
+                          "min": [float(times[0])], "max": [float(times[-1])]})
+        value_view = add_view(np.array(values, "<f4").reshape(-1).tobytes(), 0)
+        buffer_views[value_view].pop("target")
+        accessors.append({"bufferView": value_view, "componentType": 5126, "count": len(values),
+                          "type": "VEC3" if chosen.path == "translation" else "VEC4"})
+        samplers.append({"input": len(accessors) - 2, "output": len(accessors) - 1, "interpolation": "LINEAR"})
+        channels.append({"sampler": len(samplers) - 1, "target": {"node": node_index, "path": chosen.path}})
+
     while len(binary) % 4:
         binary.append(0)
     document = {
         "asset": {"version": "2.0", "generator": "Alfred OS part assembly"},
-        "scene": 0, "scenes": [{"name": title[:80], "nodes": list(range(len(nodes)))}],
+        "scene": 0, "scenes": [{"name": title[:80], "nodes": scene_nodes}],
         "nodes": nodes, "meshes": meshes, "materials": materials, "accessors": accessors,
         "bufferViews": buffer_views, "buffers": [{"byteLength": len(binary)}],
     }
+    if channels:
+        document["animations"] = [{"name": "motion", "samplers": samplers, "channels": channels}]
     json_bytes = json.dumps(document, separators=(",", ":")).encode("utf-8")
     json_bytes += b" " * ((4 - len(json_bytes) % 4) % 4)
     total = 12 + 8 + len(json_bytes) + 8 + len(binary)
@@ -324,6 +447,9 @@ class Model3DReport:
     vertices: int
     bounds_min: "tuple[float, float, float]"
     bounds_max: "tuple[float, float, float]"
+    # Animated channels read back from the bytes, each checked: its node exists,
+    # its times rise and its keyframes are readable.
+    animated_channels: int = 0
 
     @property
     def extent(self) -> "tuple[float, float, float]":
@@ -339,7 +465,7 @@ class Model3DReport:
         return {"valid": self.valid, "genuinely_3d": self.genuinely_3d, "problems": list(self.problems), "meshes": self.meshes,
                 "triangles": self.triangles, "vertices": self.vertices,
                 "bounds_min": [round(v, 4) for v in self.bounds_min], "bounds_max": [round(v, 4) for v in self.bounds_max],
-                "extent": [round(v, 4) for v in self.extent]}
+                "extent": [round(v, 4) for v in self.extent], "animated_channels": self.animated_channels}
 
 
 _COMPONENTS = {"SCALAR": 1, "VEC2": 2, "VEC3": 3, "VEC4": 4, "MAT4": 16}
@@ -440,9 +566,25 @@ def inspect_glb(data: bytes) -> Model3DReport:
     if not lows:
         problems.append("no triangle mesh in the scene")
         return Model3DReport(False, tuple(problems), meshes, triangles, vertices, empty.bounds_min, empty.bounds_max)
+    animated_channels = 0
+    for animation in document.get("animations", []) or []:
+        try:
+            for channel in animation["channels"]:
+                sampler = animation["samplers"][channel["sampler"]]
+                if not 0 <= channel["target"]["node"] < len(document["nodes"]):
+                    raise ValueError(f"an animation targets node {channel['target']['node']}, which does not exist")
+                times, values = read(sampler["input"]), read(sampler["output"])
+                width = {"translation": 3, "rotation": 4, "scale": 3}.get(channel["target"]["path"])
+                if width is None or values.ndim != 2 or values.shape[1] != width:
+                    raise ValueError(f"an animation's {channel['target']['path']} keyframes have the wrong shape")
+                if len(times) < 2 or len(values) != len(times) or np.any(np.diff(times) <= 0):
+                    raise ValueError("an animation's keyframe times do not rise, or do not match its values")
+                animated_channels += 1
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            problems.append(f"animation: {exc}")
     low, high = np.min(lows, axis=0), np.max(highs, axis=0)
     return Model3DReport(not problems, tuple(problems), meshes, triangles, vertices,
-                         tuple(float(v) for v in low), tuple(float(v) for v in high))
+                         tuple(float(v) for v in low), tuple(float(v) for v in high), animated_channels)
 
 
 # ---------------------------------------------------------------------------
@@ -632,9 +774,10 @@ def parse_part_description(text: str) -> PartDescription:
         explicit = _explicit_position(clause)
         name = _name(clause, match, shape_name, {p.name for p in parts})
         group = []
+        moves = motion_in(clause, except_words=name)
         for k in range(count):
             part_name = name if count == 1 else f"{name} {k + 1}"
-            group.append(Part(part_name, shape_name, dict(dims), colour, rotation=list(rotation)))
+            group.append(Part(part_name, shape_name, dict(dims), colour, rotation=list(rotation), motion=moves))
         _place(group, parts, relation, explicit, clause)
         parts.extend(group)
     return PartDescription(tuple(parts), tuple(unknown))
@@ -716,5 +859,7 @@ def shape_grammar() -> str:
         + ". Dimensions: box W x H x D (or width/height/depth N), sphere radius N, cylinder/cone radius N height N, "
         "torus radius N tube N. Placement relative to an earlier part: on top of the <part>, under the <part>, "
         "left of / right of / in front of / behind the <part>, around the <part>, at the corners of the <part>, "
-        "at each end of the <part>, inside the <part>, or at (x, y, z). Optional: rotated N degrees about x|y|z, lying on its side."
+        "at each end of the <part>, inside the <part>, or at (x, y, z). Optional: rotated N degrees about x|y|z, lying on its side. "
+        "Movement (optional, per part or for the whole subject): " + "; ".join(
+            f"{m.name} ({', '.join(m.examples) or m.name})" for m in MOTIONS.values()) + "."
     )

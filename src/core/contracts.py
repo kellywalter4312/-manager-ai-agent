@@ -24,6 +24,30 @@ def tokenize(text: str) -> frozenset[str]:
     return frozenset(_TOKEN_PATTERN.findall(text.lower()))
 
 
+# Words too common to make any text distinctive. Plain language vocabulary, so
+# it lives beside ``tokenize`` - the thing it is always used with - rather than
+# inside any one consumer.
+#
+# It was declared in ``src/services/memory/query.py``, which is still where
+# memory relevance reads it from (that module re-exports this name, so nothing
+# that already imported it there changed). It moved here when the orchestration
+# layer needed it too: ``objective_loop`` must not import from
+# ``src.services.memory`` at all (tests/test_specialist_memory.py::
+# TestMemoriesDoNotLeak), and a stopword list is not memory - reaching through
+# the memory package for it put a real boundary at risk for a vocabulary.
+STOPWORDS: frozenset[str] = frozenset(
+    {
+        "a", "an", "and", "any", "are", "as", "at", "be", "been", "but", "by",
+        "can", "did", "do", "does", "for", "from", "get", "had", "has", "have",
+        "how", "i", "if", "in", "into", "is", "it", "its", "last", "me", "my",
+        "no", "not", "of", "on", "or", "our", "out", "so", "than", "that",
+        "the", "their", "them", "then", "there", "these", "they", "this",
+        "to", "up", "us", "was", "we", "were", "what", "when", "which", "who",
+        "will", "with", "would", "you", "your",
+    }
+)
+
+
 # The agreed key under which any specialist reports structured findings in a
 # TaskResult payload. Domain-neutral on purpose: the Manager must be able to
 # ask "did this turn anything up?" without knowing what the specialist hunts

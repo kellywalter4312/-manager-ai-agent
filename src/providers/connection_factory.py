@@ -75,6 +75,51 @@ _BUILDERS: "dict[str, Callable[..., Connection]]" = {
     "gmail": _build_gmail,
 }
 
+# Which built-in connections have more than one real adapter implementation,
+# and which - declared here, beside the builder that honours them, so the
+# governed evolution layer can change any of them without knowing which
+# exist (Phase 11). The first entry is the default. A connection absent here
+# has exactly one implementation.
+_ADAPTER_VERSIONS: "dict[str, tuple[str, ...]]" = {
+    "gmail": ("1", "2"),
+}
+
+DEFAULT_ADAPTER_VERSION = "1"
+
+
+def register_connection(
+    name: str, builder: "Callable[..., Connection]", *, adapter_versions: "tuple[str, ...]" = (),
+) -> None:
+    """Add a built-in connection by name - one with its own authentication
+    code, unlike a declared service - with no change to this module or to
+    anything that selects, lists or governs one. ``adapter_versions`` names
+    its implementations when it has more than one (the first is the
+    default). An existing name is never silently replaced."""
+    key = str(name or "").strip().lower()
+    if not key:
+        raise ValueError("a connection needs a name")
+    if key in _BUILDERS:
+        raise ValueError(f"a connection called {key!r} is already registered")
+    _BUILDERS[key] = builder
+    if len(tuple(adapter_versions)) > 1:
+        _ADAPTER_VERSIONS[key] = tuple(str(v) for v in adapter_versions)
+
+
+def connection_adapter_versions() -> "dict[str, tuple[str, ...]]":
+    """Every built-in connection with more than one adapter implementation,
+    and its versions (default first)."""
+    return {name: versions for name, versions in _ADAPTER_VERSIONS.items() if name in _BUILDERS}
+
+
+def _adapter_version_for(name: str, adapter_version: "str | Mapping[str, str]") -> str:
+    """One connection's adapter version: a single string applies as given
+    (every caller before Phase 11), a mapping is looked up by connection
+    name, falling back to that connection's own default."""
+    if isinstance(adapter_version, Mapping):
+        default = _ADAPTER_VERSIONS.get(name, (DEFAULT_ADAPTER_VERSION,))[0]
+        return str(adapter_version.get(name, default))
+    return adapter_version
+
 
 def available_connection_providers() -> list[str]:
     """Every connection provider name that can currently be configured."""
@@ -82,7 +127,8 @@ def available_connection_providers() -> list[str]:
 
 
 def build_connection(
-    settings: Settings, env: "Mapping[str, str] | None" = None, adapter_version: str = "1"
+    settings: Settings, env: "Mapping[str, str] | None" = None,
+    adapter_version: "str | Mapping[str, str]" = DEFAULT_ADAPTER_VERSION,
 ) -> Connection:
     """Construct the connection named by ``settings.connection_provider``.
 
@@ -117,7 +163,7 @@ def build_connection(
             "(see Control Center)."
         ) from None
 
-    connection = builder(settings, adapter_version)
+    connection = builder(settings, _adapter_version_for(settings.connection_provider, adapter_version))
     logger.info("connection ready: %s", connection.name)
     return connection
 
@@ -154,7 +200,9 @@ def _build_declared(name: str) -> "Connection | None":
     return DeclaredConnection(descriptor, account)
 
 
-def build_all_connections(settings: Settings, adapter_version: str = "1") -> ConnectionResolver:
+def build_all_connections(
+    settings: Settings, adapter_version: "str | Mapping[str, str]" = DEFAULT_ADAPTER_VERSION,
+) -> ConnectionResolver:
     """Every connection this session is genuinely equipped to reach -
     Phase 7's own Universal Connection Layer, built once, here, at
     process-construction time: the identical, sole sanctioned moment

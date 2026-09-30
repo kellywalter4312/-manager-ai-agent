@@ -213,6 +213,17 @@ def available_video_understanding_backends() -> list[str]:
     return ["local_whisper", "null", "whisper", "windows"]
 
 
+# The transcription backends that run on this machine with no credential -
+# declared beside the builder that constructs them, so nothing that lists or
+# manages providers has to know one by name (Phase 11).
+_KEYLESS_VIDEO_UNDERSTANDING = frozenset({"null", "windows", "local_whisper"})
+
+
+def video_understanding_requires_credential(name: str) -> bool:
+    """Whether the transcription backend ``name`` needs a credential to build."""
+    return name not in _KEYLESS_VIDEO_UNDERSTANDING
+
+
 def _build_video_generation(
     settings: Settings,
     env: Mapping[str, str] | None = None,

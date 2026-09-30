@@ -115,6 +115,14 @@ class _DeclarationHandler(EvolutionHandler):
         self.marked.pop(proposal.target, None)
         return HandlerResult(True, f"{proposal.target} is no longer marked active")
 
+    # Phase 11: where this handler keeps its state, so the engine verifies the
+    # real mark rather than trusting apply's report - and what no mark means.
+    def observe(self, component_id, *, context):
+        return self.marked.get(component_id)
+
+    def default_version(self, component_id):
+        return "absent"
+
 
 @pytest.fixture
 def declaration(tmp_path, monkeypatch):

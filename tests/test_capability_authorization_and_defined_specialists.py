@@ -226,8 +226,23 @@ class TestCreatingASpecialist:
         assert nova.brain_domain == "3D modelling and spatial design"
 
     def test_it_works_as_itself_and_the_manager_keeps_the_capability(self, system):
+        """P11Z-09 changed this test's *vehicle*, not its claim.
+
+        An unaddressed "build a 3D model of ..." used to land on the Manager,
+        because `create_3d_model` recognised the request's shape and
+        recognition pre-empted the router. It no longer does: the capability
+        does not declare itself the Manager's own work, the specialist created
+        for this domain is granted it, and its declared words overlap - so the
+        request reaches the specialist, which is the repair working.
+
+        The claim being protected is unchanged and is now asserted directly:
+        granting a capability never takes it away, and the Manager still does
+        the work when no granted specialist is there to receive it.
+        """
         _run(system, self.CREATE)
         assert "Artifact created" in _say(system, CHAIR, to="Nova").outcome
+        assert "create_3d_model" in system.manager.own_skills._capabilities
+        _run(system, "agent remove nova")
         assert "Artifact created" in _say(system, CHAIR).outcome
         assert sorted(a.owner_agent for a in system.runtime.artifacts.all()) == sorted(["Nova", _manager_name(system)])
 

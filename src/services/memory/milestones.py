@@ -41,8 +41,14 @@ MILESTONE_KIND = "milestone"
 # phrase>" - never a list of achievements. "got", "achieved", "landed",
 # "reached", "launched", "completed", "hit", "earned", "graduated" are
 # verbs of accomplishment in general, not any one domain's vocabulary.
+# Phase 11 closure: "passed" and "won" joined the verbs - "I just passed my
+# driving test!" and "I won the tournament" were not recognised at all, and
+# were stored as a daily routine instead. "passed" is an achievement only
+# when something was passed: "passed away/out/by/through/on/along/over/up"
+# are other verbs entirely and are never read as one.
 _ACHIEVEMENT = re.compile(
-    r"\bi (?:just )?(?P<verb>got|achieved|landed|reached|launched|completed|hit|earned|graduated)\s+"
+    r"\bi (?:just )?(?P<verb>got|achieved|landed|reached|launched|completed|hit|earned|graduated|won"
+    r"|passed(?!\s+(?:away|out|by|through|on|along|over|up)\b))\s+"
     r"(?:my |a |the )?(?P<first>first\s+)?(?P<rest>[^.!?]+)",
     re.IGNORECASE,
 )

@@ -17,9 +17,9 @@ and one more concept, reported the same way rather than reinvented:
 
     visual environment version   {id, version} per surface, from the
                                  Visual Environment Registry (ui/index.html
-                                 Sec.37) - Alfred's own identity emblem,
-                                 the specialist emblem, Brain, Memory, and
-                                 the Conversation Room.
+                                 Sec.37) - every registry declaration of
+                                 the {id, version} descriptor shape,
+                                 discovered rather than listed (Phase 11).
 
 **What this is not, stated once, plainly, because a manifest is exactly the
 kind of thing that quietly grows past its own edges:**
@@ -77,28 +77,37 @@ logger = get_logger(__name__)
 
 DEFAULT_UI_PATH = "ui/index.html"
 
-# One pattern per surface, matching the exact {id, version} shape the
-# Visual Environment Registry (ui/index.html Sec.37) already declares -
-# not a looser pattern that might match something this module was never
-# told about. A future rename of any of these five constants, or the
-# `core`/`polygon` keys, is meant to make its own surface disappear from
-# the manifest (see visual_environment_versions' own docstring) rather
-# than silently keep matching stale text.
-_VISUAL_ENVIRONMENT_PATTERNS: dict[str, str] = {
-    "agent:core": r'core:\s*\{\s*id:\s*"([^"]+)",\s*version:\s*(\d+)',
-    "agent:polygon": r'polygon:\s*\{\s*id:\s*"([^"]+)",\s*version:\s*(\d+)',
-    "brain": r'BRAIN_VISUAL_ENVIRONMENT\s*=\s*\{\s*id:\s*"([^"]+)",\s*version:\s*(\d+)',
-    "memory": r'MEMORY_VISUAL_ENVIRONMENT\s*=\s*\{\s*id:\s*"([^"]+)",\s*version:\s*(\d+)',
-    # The Conversation Room's own environment. Declared in the registry
-    # beside the other four and readable by the identical pattern, but
-    # missing from this table - so the Room was the one installed
-    # compatibility contract the Upgrade Manifest could not report, and a
-    # future replacement of it would have been invisible to the Upgrade
-    # Planner. The Room is not an agent (it has no Identity/Brain/Memory
-    # of its own), which is why it takes no lookup table - it is not a
-    # reason for it to go unversioned.
-    "room": r'ROOM_VISUAL_ENVIRONMENT\s*=\s*\{\s*id:\s*"([^"]+)",\s*version:\s*(\d+)',
-}
+# Every registry declaration of the Visual Environment Registry's own
+# {id, version} descriptor shape (ui/index.html Sec.37), discovered rather
+# than listed (Phase 11). Before, one pattern per named surface meant the
+# avatar-body, symbolic and hair environments the page already versions were
+# invisible here, and a new environment needed this file edited. Two shapes:
+#
+#     const BRAIN_VISUAL_ENVIRONMENT = { id: "...", version: N, ... }
+#         -> surface "brain"
+#     const AGENT_VISUAL_ENVIRONMENTS = { core: { id: "...", version: N }, ... }
+#         -> surfaces "agent:core", "agent:polygon", ...
+#
+# Surface names are the constant's own name, lower-cased, less the
+# conventional _VISUAL_ENVIRONMENT(S) suffix - exactly the five surface ids
+# this manifest always reported, so every version already on record (the
+# ledger's system.visual_environment.<surface>) keeps its id.
+_SINGLE_DECLARATION = re.compile(
+    r'const\s+([A-Z][A-Z0-9_]*)\s*=\s*\{\s*id:\s*"([^"]+)",\s*version:\s*(\d+)'
+)
+_MAP_DECLARATION = re.compile(r'const\s+([A-Z][A-Z0-9_]*)\s*=\s*\{[ \t]*\r?\n')
+_MAP_ENTRY = re.compile(
+    r'^\s*"?([A-Za-z0-9_:\-]+)"?\s*:\s*\{\s*id:\s*"([^"]+)",\s*version:\s*(\d+)', re.MULTILINE
+)
+_MAP_END = re.compile(r'^\s*\};', re.MULTILINE)
+_REGISTRY_SUFFIXES = ("_VISUAL_ENVIRONMENTS", "_VISUAL_ENVIRONMENT")
+
+
+def _surface_prefix(constant: str) -> str:
+    for suffix in _REGISTRY_SUFFIXES:
+        if constant.endswith(suffix):
+            return constant[: -len(suffix)].lower()
+    return constant.lower()
 
 
 @dataclass(frozen=True)
@@ -169,18 +178,28 @@ def visual_environment_versions(
         return ()
 
     found: list[VisualEnvironmentVersion] = []
-    for surface, pattern in _VISUAL_ENVIRONMENT_PATTERNS.items():
-        match = re.search(pattern, text)
-        if match is None:
-            logger.warning(
-                "visual environment '%s' was not found in '%s'; omitted from the "
-                "upgrade manifest",
-                surface, path,
-            )
+    for match in _SINGLE_DECLARATION.finditer(text):
+        found.append(VisualEnvironmentVersion(
+            surface=_surface_prefix(match.group(1)), id=match.group(2), version=int(match.group(3)),
+        ))
+    for declaration in _MAP_DECLARATION.finditer(text):
+        closing = _MAP_END.search(text, declaration.end())
+        body = text[declaration.end(): closing.start() if closing else len(text)]
+        entries = list(_MAP_ENTRY.finditer(body))
+        prefix = _surface_prefix(declaration.group(1))
+        if not entries:
+            if declaration.group(1).endswith(_REGISTRY_SUFFIXES):
+                # Named as a registry but no longer in the descriptor shape -
+                # said out loud, and omitted, never guessed at.
+                logger.warning(
+                    "visual environment registry '%s' in '%s' declares no {id, version} entry this "
+                    "manifest recognises; omitted from the upgrade manifest", declaration.group(1), path,
+                )
             continue
-        found.append(
-            VisualEnvironmentVersion(surface=surface, id=match.group(1), version=int(match.group(2)))
-        )
+        for entry in entries:
+            found.append(VisualEnvironmentVersion(
+                surface=f"{prefix}:{entry.group(1)}", id=entry.group(2), version=int(entry.group(3)),
+            ))
     return tuple(found)
 
 

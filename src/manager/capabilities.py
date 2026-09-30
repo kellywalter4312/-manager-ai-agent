@@ -177,6 +177,7 @@ from src.services.memory.personal_context import (
     personal_context_query_intent,
 )
 from src.services.memory.query import STOPWORDS as _QUERY_STOPWORDS
+from src.services.memory.query import distinctive_terms
 from src.services.memory.session import retention_requests
 from src.services.memory.correction import (
     ACTION_INVALIDATE,
@@ -394,7 +395,7 @@ class CapabilityRequest:
     # ManagerAgent itself uses when none is configured.
     calendar: "Calendar | None" = None
     # Natural Conversation: a bound way to read the recent conversation as
-    # plain, already-attributed lines ("Kelly: ...", "Alfred: ...") -
+    # plain, already-attributed lines ("Sam: ...", "<agent>: ...") -
     # never the Conversation object itself, the same narrowing every
     # other collaborator here already lives under. This is evidence for a
     # Brain that already reasons over notes (open_conversation,
@@ -578,6 +579,63 @@ class ManagerCapability:
     authority: str = "grantable"
     authority_reason: str = ""
     own_path: str = ""
+    # Phase 11 closure: whether a *successful* run of this capability is the
+    # whole of what the person asked - one governed record, lookup or act
+    # (add a task, answer the date, remember a fact) rather than a step toward
+    # something larger. Declared here, by the capability, so the objective
+    # loop needs no list of names: it never pursues such a request further.
+    # Found with the real local model: "add a task to call the plumber" was
+    # completed, then "continued" five times by a model that judged more was
+    # needed, adding four tasks nobody asked for and reporting failure.
+    # False by default - composing capabilities (open conversation, research,
+    # media, documents, connected services) may still be one step of more.
+    completes_request: bool = False
+    # Phase 11 closure: whether this capability is an act on *who is in the
+    # room* (invite, excuse, open a discussion) - the orchestrator's own even
+    # when the sentence is said to a participant. "Arthur, you can go" is
+    # addressed to Arthur, and an address hands the turn to him - who can
+    # neither leave the room himself nor excuse anyone. Declared here so the
+    # Manager's routing names no capability.
+    room_act: bool = False
+    # Phase 11 closure: whether this capability's request carries words that
+    # are *material* - a phrase to translate, a message to send - rather than
+    # anything the person is telling Alfred. Memory capture reads each remark
+    # for "remember that ..." and "my name is ..."; without this, "translate my
+    # name is Sam into Spanish" and "send Kai a message saying my name is Sam"
+    # each stored the person's name as Sam, the second before the send was
+    # even confirmed. Declared here so the capture names no capability.
+    carries_material: bool = False
+    # P11Z-09: whether this is a self-contained operation of the Manager's
+    # own - and may therefore pre-empt specialist delegation.
+    #
+    # ``claims`` above answers one question: does this handler recognise this
+    # request's shape? That is *recognition*, and it was silently doing a
+    # second job. ``ManagerAgent.decide`` asked it before the router, and
+    # ``collaboration_candidates`` returned nothing when it was true - so any
+    # capability that recognised a request also *owned* it, shutting an
+    # authorised specialist out of both delegation and collaboration.
+    #
+    # The reasoning for that (``ManagerSkills.claims``'s own docstring) named
+    # seven capabilities and said none of them benefits from specialist
+    # collaboration. That was true of seven. It became false once nearly every
+    # capability carried ``claims`` - research, knowledge, artifacts, diagrams,
+    # 3D, media, documents, translation, content analysis: exactly the work an
+    # owner creates and grants a specialist to do.
+    #
+    # So the two concepts are separated. Recognition stays ``claims``.
+    # *Ownership* is declared here, by the capability, and must say why - the
+    # same shape ``authority``/``authority_reason`` already uses, for the same
+    # reason: a rule that pre-empts delegation has to state its grounds, and a
+    # bare boolean would let a future capability acquire that power silently.
+    #
+    # False by default. A capability earns this by genuinely operating on the
+    # Manager's own state - his memory, his session, the room's roster, the
+    # person's own governed records, his own equipment, the clock - rather than
+    # by producing or reasoning about subject-matter work someone else could be
+    # authorised to do. Nothing about the count of capabilities, any domain, or
+    # any agent's name is consulted anywhere.
+    self_contained: bool = False
+    self_contained_reason: str = ""
 
     def __post_init__(self) -> None:
         if not self.name.strip():
@@ -592,6 +650,21 @@ class ManagerCapability:
                 f"ManagerCapability '{self.name}' is Manager-only but states no reason - "
                 "a restriction must say why it exists"
             )
+        # The identical discipline, for the identical reason: pre-empting
+        # specialist delegation is a restriction, so it states its grounds.
+        if self.self_contained and not self.self_contained_reason.strip():
+            raise ValueError(
+                f"ManagerCapability '{self.name}' declares itself self-contained but states no "
+                "reason - a capability that pre-empts specialist delegation must say why it is "
+                "the Manager's own work"
+            )
+        # No inverse rule, deliberately. A first version of this refused a
+        # reason stated without the flag, on the theory that one without the
+        # other is a typo. It is a restriction the idiom it copies does not
+        # have - `authority_reason` may be stated by any capability - and it
+        # would refuse a future capability that documents *why* it is open to
+        # delegation, which is legitimate metadata about the same axis. The
+        # field is documentation; only the claim of ownership is governed.
         if not self.capabilities:
             raise ValueError(
                 f"ManagerCapability '{self.name}' must answer to at least one word"
@@ -863,6 +936,46 @@ def _names_after(text: str, position: int, names: Sequence[str]) -> tuple[str, .
     return tuple(name for _, name in sorted(found))
 
 
+# The opening address of a message - "<name> and <name>, discuss ..." - when it
+# is nothing but names and conjunctions. Anything else before the comma is a
+# clause, not an address.
+_VOCATIVE_CLAUSE = re.compile(r"^(?P<names>[^,;:.!?]{1,80}),\s*\S")
+
+
+def _vocative_names(text: str, names: Sequence[str]) -> tuple[str, ...]:
+    """The participants this message opens by addressing, or ``()``."""
+    match = _VOCATIVE_CLAUSE.match(" ".join(str(text or "").split()))
+    if match is None:
+        return ()
+    clause = match.group("names")
+    found = _names_after(clause, 0, names)
+    # Every word of the address has to be one of those names or a connective -
+    # "<name>, before we start" opens with a name and is not an address list.
+    remainder = clause
+    for name in sorted(found, key=len, reverse=True):
+        remainder = re.sub(rf"(?<![\w]){re.escape(name)}(?![\w])", " ", remainder, flags=re.IGNORECASE)
+    if tokenize(remainder) - frozenset({"and", "plus"}):
+        return ()
+    return found
+
+
+# A discussion *now* is not a meeting to be put in a calendar - but a
+# scheduling word inside what is to be discussed ("whether I should answer
+# recruiters this week") is part of the subject, not a request to schedule
+# anything. So the calendar wins on its own evidence: a real extractable dated
+# item, or a scheduling word standing in front of the discussion word (where a
+# scheduling verb leads the sentence - "schedule a meeting with X on Friday").
+# Found by the Phase 11 closure sweep: the flat "any scheduling word anywhere"
+# guard silently dropped every discussion whose subject mentioned a day or a
+# week.
+def _defers_to_scheduling(text: str, opening: int) -> bool:
+    from src.services.memory.calendar_items import extract_calendar_item
+
+    if extract_calendar_item(text) is not None:
+        return True
+    return bool(tokenize(str(text or "")[:opening]) & SCHEDULING_WORDS)
+
+
 def discussion_intent(task: Task, participants: Sequence[str] = ()) -> bool:
     """Whether this asks the orchestrator to open, continue, conclude or
     cancel a discussion.
@@ -875,7 +988,7 @@ def discussion_intent(task: Task, participants: Sequence[str] = ()) -> bool:
     and "schedule a meeting with <agent> on Friday" stays the calendar's.
     No agent is named here - names arrive from the roster at call time."""
     tokens = tokenize(task.description)
-    if not (tokens & DISCUSSION_WORDS) or (tokens & SCHEDULING_WORDS):
+    if not (tokens & DISCUSSION_WORDS):
         return False
     if _discussion_action(tokens) is not None:
         return True
@@ -886,7 +999,16 @@ def discussion_intent(task: Task, participants: Sequence[str] = ()) -> bool:
     )
     if opening is None:
         return False
+    if _defers_to_scheduling(task.description, opening):
+        return False
     if _names_after(task.description, opening, participants):
+        return True
+    # A discussion can also be asked of the room by addressing it - "<name> and
+    # <name>, discuss whether ...". Two or more names in the opening address is
+    # what makes it a discussion rather than a remark to one agent, which is
+    # what keeps "<orchestrator>, let's discuss the budget" ordinary
+    # conversation exactly as this function's docstring promises.
+    if len(_vocative_names(task.description, participants)) >= 2:
         return True
     return bool(tokenize(words[opening:]) & ROOM_WORDS) or bool(_ROOM_PHRASE.search(words[opening:]))
 
@@ -962,6 +1084,20 @@ DISCUSSION = ManagerCapability(
         "orchestration, which a specialist holding it would turn into a second Manager"
     ),
     name="discussion",
+    self_contained=True,
+    self_contained_reason=(
+        "a room act - who is discussing what with whom is the orchestrator's, never a participant's"
+    ),
+    # Deliberately NOT a room_act, though the two below are. ``room_act`` means
+    # "changes who is in the room", and the orchestrator owns that whoever the
+    # sentence was addressed to - "<name>, you can leave now" is the
+    # orchestrator's act.
+    # Opening a discussion is not a membership change, it is work, and Phase 10
+    # settled that a specialist cannot open one: asked to, it answers for itself
+    # and honestly declines (tests/test_phase_10_multi_agent.py::
+    # TestADiscussionThroughTheRealSystem::test_a_specialist_cannot_open_one).
+    # Flagging it here intercepted that request for the Manager and quietly
+    # reversed the invariant.
     capabilities=frozenset({"discussion", "roundtable"}),
     handle=discussion_request,
     description="Opens, continues, concludes or cancels a discussion among the room's participants.",
@@ -972,17 +1108,37 @@ DISCUSSION = ManagerCapability(
 )
 
 
+def _leave_shapes(name: str) -> "tuple[re.Pattern[str], ...]":
+    """The other ordinary ways of excusing one named participant, each the
+    whole message (Phase 11 closure sweep: only "dismiss/excuse <name>" was
+    recognised, so "<name>, you can go" was answered by that agent as conversation
+    and "<name>, you can leave the room now" scored as a live-news request).
+    Anchored end to end, so "<name>, you can go ahead and check my inbox" is
+    work for Arthur, never a dismissal."""
+    n = re.escape(name)
+    leave = r"(?:leave(?:\s+(?:the\s+)?(?:room|conversation|chat|discussion))?|go)"
+    thanks = r"(?:(?:thanks?|thank\s+you|cheers)\s*,?\s*)?"
+    tail = r"(?:\s+(?:now|for\s+now))?\s*[.!]*\s*$"
+    return (
+        re.compile(rf"^\s*{thanks}{n}\s*,?\s*{thanks}(?:you\s+)?(?:can|may|are\s+free\s+to)\s+(?:now\s+)?{leave}{tail}", re.IGNORECASE),
+        re.compile(rf"^\s*{thanks}(?:you\s+)?(?:can|may)\s+(?:now\s+)?{leave}(?:\s+now)?\s*,\s*{n}\s*[.!]*\s*$", re.IGNORECASE),
+        re.compile(rf"^\s*(?:please\s+)?(?:send|let)\s+{n}\s+(?:out|go){tail}", re.IGNORECASE),
+    )
+
+
 def _dismissed_name(text: str, names: Sequence[str]) -> str | None:
-    """The registered name directly after "dismiss"/"excuse", or None."""
+    """The registered name directly after "dismiss"/"excuse" - or the one a
+    whole-message "<name>, you can go" / "send <name> out" excuses - or None."""
     match = _DISMISS.search(str(text or ""))
-    if match is None:
-        return None
-    rest = match.group("rest")
-    named = _names_after(rest, 0, names)
-    if not named:
-        return None
-    first = named[0]
-    return first if rest.lower().startswith(first.lower()) else None
+    if match is not None:
+        rest = match.group("rest")
+        named = _names_after(rest, 0, names)
+        if named and rest.lower().startswith(named[0].lower()):
+            return named[0]
+    for name in sorted({" ".join(str(n).split()) for n in names if str(n).strip()}, key=len, reverse=True):
+        if any(shape.match(str(text or "")) for shape in _leave_shapes(name)):
+            return name
+    return None
 
 
 def dismissal_intent(task: Task, participants: Sequence[str] = ()) -> bool:
@@ -1018,6 +1174,11 @@ PARTICIPANT_DISMISSAL = ManagerCapability(
         "invitation - a specialist able to remove its peers would be a second Manager"
     ),
     name="participant_dismissal",
+    self_contained=True,
+    self_contained_reason=(
+        "a room act - only the orchestrator excuses a participant"
+    ),
+    room_act=True,
     capabilities=frozenset({"dismiss", "excuse"}),
     handle=dismiss_participant,
     description="Resolves which registered specialist a person is asking to remove from the room.",
@@ -1033,6 +1194,11 @@ PARTICIPANT_INVITATION = ManagerCapability(
     authority='manager',
     authority_reason="coordinating the other agents is the orchestrator's role - a specialist that could list or invite its peers would be a second Manager",
     name="participant_invitation",
+    self_contained=True,
+    self_contained_reason=(
+        "a room act - only the orchestrator brings a participant in"
+    ),
+    room_act=True,
     capabilities=frozenset({"invite", "bring", "join", "participant", "participants"}),
     handle=invite_participant,
     description="Resolves which registered specialist a person is asking to bring in.",
@@ -1098,7 +1264,17 @@ _ROSTER_QUESTION = re.compile(
     r"|\b(?:list|show|name)\s+(?:me\s+)?(?:all\s+(?:of\s+)?)?(?:the|your|all|every)\s+(?:other\s+)?(?:agents?|specialists?)\b"
     r"|\bhow\s+many\s+(?:agents|specialists)\b"
     r"|\bwho(?:'s|\s+is|\s+are)\s+(?:on|in)\s+your\s+team\b"
-    r"|\bwho\s+(?:works\s+with\s+you|do\s+you\s+work\s+with)\b",
+    r"|\bwho\s+(?:works\s+with\s+you|do\s+you\s+work\s+with)\b"
+    # "What can you do?" asks after capabilities, and this capability is the
+    # one that reports them (with the team, which the question's answer needs
+    # anyway). ``identity_question`` also recognises the phrase, for the
+    # introduction it renders elsewhere; ``asks_who_you_are`` already yields
+    # to this predicate, so naming the shape here is the whole repair - found
+    # by the Phase 11 closure sweep answering it with a biography that
+    # mentioned no capability at all.
+    r"|\bwhat\s+(?:can|do|could)\s+you\s+do\b"
+    r"|\bwhat\s+are\s+you\s+(?:able\s+to\s+do|capable\s+of)\b"
+    r"|\bwhat\s+can\s+you\s+help\s+(?:me\s+)?with\b",
     re.IGNORECASE,
 )
 
@@ -1111,6 +1287,11 @@ ROSTER_REPORT = ManagerCapability(
     authority='manager',
     authority_reason="coordinating the other agents is the orchestrator's role - a specialist that could list or invite its peers would be a second Manager",
     name="roster_report",
+    self_contained=True,
+    self_contained_reason=(
+        "who is registered is a fact about this system, not work in any domain"
+    ),
+    completes_request=True,
     anywhere=True,
     capabilities=frozenset(
         {
@@ -1233,8 +1414,13 @@ def asks_who_you_are(task: Task, participants: Sequence[str] = ()) -> bool:
     phrase from being swallowed, both live in
     ``src/services/identity/introduction.py`` beside the rendering they
     guard.
+
+    A question that also asks after the team ("what can you do, and who is
+    on your team?") is the roster's to answer - it reports both - rather
+    than an introduction that silently drops its second half (Phase 11
+    closure sweep).
     """
-    return identity_question(task.description)
+    return identity_question(task.description) and not roster_intent(task)
 
 
 SELF_DESCRIPTION = ManagerCapability(
@@ -1247,6 +1433,11 @@ SELF_DESCRIPTION = ManagerCapability(
     # chosen so a total, repeatable order puts identity first for the one
     # kind of request that is unambiguously about identity.
     name="about_self",
+    self_contained=True,
+    self_contained_reason=(
+        "the Manager describing itself; nobody else can answer for it"
+    ),
+    completes_request=True,
     anywhere=True,
     # Deliberately NARROW. The first attempt declared "who", "name" and
     # "role" as well, and scoring - which runs for every task this claim
@@ -1282,6 +1473,11 @@ CONVERSATIONAL_FLOOR = ManagerCapability(
     # Alfred's own handlers, never a competitor for one that already
     # claims part of the same message.
     name="small_talk",
+    self_contained=True,
+    self_contained_reason=(
+        "talking with the Manager is not work that could be handed to anyone"
+    ),
+    completes_request=True,
     anywhere=True,
     capabilities=_CONVERSATIONAL_WORDS,
     handle=natural_acknowledgement,
@@ -2025,6 +2221,21 @@ def _reordered_subject(text: str, *, nouns: tuple[str, ...]) -> "str | None":
     return subject or None
 
 
+# Phase 11 final gate: a construction request is a verb, optional
+# descriptors, and the capability's own noun - "design an interactive diagram
+# of X", "draw me a labelled map showing X" - not one of a fixed list of
+# exact phrases. The verbs are shared; the nouns are each capability's own
+# vocabulary; nothing here names a subject. Declared beside
+# ``_reordered_subject`` above, the other order-free shape helper, because
+# several capabilities spread through this file read it (see
+# ``_construction_subject``, ``document_generation_intent``,
+# ``named_construction_request``).
+_CONSTRUCTION_VERBS = (
+    r"make|create|draw|build|design|prepare|produce|sketch|generate|render|illustrate"
+    r"|give\s+me|put\s+together|come\s+up\s+with"
+)
+
+
 # "Forget my passport expiry", "please forget about my old address", "stop
 # remembering my gym times", "delete what you know about my ex", "erase my
 # dentist from your memory". Anchored at the start, so "I always forget my
@@ -2120,7 +2331,11 @@ def forget_this(request: CapabilityRequest) -> TaskResult:
     if canonical is not None:
         return canonical
 
-    matches = request.recall(topic, limit=5)
+    # Asked with the topic's distinctive words only (memory/query.py: the
+    # caller decides what to ask about). Phase 11 closure: the raw topic
+    # matched any record sharing "the", and every match is forgotten.
+    query = distinctive_terms(topic)
+    matches = request.recall(query, limit=5) if query else ()
     if not matches:
         return TaskResult.success(
             request.task, request.own_name,
@@ -2198,7 +2413,10 @@ def recall_memory(request: CapabilityRequest) -> TaskResult:
             payload={"recalled": len(canonical), "source": "personal_context"},
         )
 
-    records = request.recall(topic, limit=5)
+    # Phase 11 closure: the raw topic matched any record sharing "the" - "what
+    # do you remember about the boiler?" answered with a note about a kiln.
+    query = distinctive_terms(topic)
+    records = request.recall(query, limit=5) if query else ()
     if not records:
         return TaskResult.success(
             request.task, request.own_name,
@@ -2216,6 +2434,11 @@ def recall_memory(request: CapabilityRequest) -> TaskResult:
 FORGET = ManagerCapability(
     authority='every_agent',
     name="forget",
+    self_contained=True,
+    self_contained_reason=(
+        "removes from this Manager's own memory store"
+    ),
+    completes_request=True,
     anywhere=True,
     capabilities=frozenset({"forget"}),
     handle=forget_this,
@@ -2232,6 +2455,11 @@ FORGET = ManagerCapability(
 RECALL_MEMORY = ManagerCapability(
     authority='every_agent',
     name="recall_memory",
+    self_contained=True,
+    self_contained_reason=(
+        "reads this Manager's own memory store"
+    ),
+    completes_request=True,
     anywhere=True,
     capabilities=frozenset({"recall"}),
     handle=recall_memory,
@@ -2778,7 +3006,11 @@ def correct_memory(request: CapabilityRequest) -> TaskResult:
         topic = " ".join(topic_match.group(1).split())
         new_value = " ".join(topic_match.group(2).split())
         existing = _canonical_for_topic(items, topic)
-        if existing is not None:
+        # A keyed fact is rewritten as one; a plain "remember that" note (no
+        # value - its topic is the whole note) is corrected as the note below.
+        # Phase 11 closure: a note went through the fact template and was
+        # stored as "The user's the kiln shelf is cracked is repaired."
+        if existing is not None and existing.value:
             candidate = PersonalContextCandidate(
                 topic=existing.topic, content=f"The user's {existing.topic} is {new_value}.",
                 category=existing.category, value=new_value,
@@ -2787,7 +3019,11 @@ def correct_memory(request: CapabilityRequest) -> TaskResult:
                 request, existing, candidate, reply=f"Updated what I remember about {topic}.",
                 payload={"handled_by": "correct_memory", "action": "updated", "topic": topic},
             )
-        matches = request.recall(topic, kind=MemoryCategory.USER_CONTEXT.value, limit=1)
+        # Phase 11 closure: the raw topic matched any note sharing "the", and
+        # the match is replaced - "update what you remembered about the boiler"
+        # deleted a note about a kiln shelf.
+        query = distinctive_terms(topic)
+        matches = request.recall(query, kind=MemoryCategory.USER_CONTEXT.value, limit=1) if query else ()
         if not matches:
             return TaskResult.success(
                 request.task, request.own_name,
@@ -2860,6 +3096,11 @@ CORRECT_MEMORY = ManagerCapability(
     authority='manager',
     authority_reason='writes the one canonical record of the person, which only the Manager writes - every specialist reads it (personal_context_reply) and keeps its own memory',
     name="correct_memory",
+    self_contained=True,
+    self_contained_reason=(
+        "corrects this Manager's own memory store"
+    ),
+    completes_request=True,
     anywhere=True,
     capabilities=frozenset({"correct", "correction"}),
     handle=correct_memory,
@@ -3079,6 +3320,10 @@ def live_information(request: CapabilityRequest) -> TaskResult:
 
 LIVE_INFORMATION = ManagerCapability(
     name="live_information",
+    self_contained=True,
+    self_contained_reason=(
+        "a deterministic read from the one source this Manager is configured with"
+    ),
     capabilities=CURRENT_INFORMATION_WORDS,
     handle=live_information,
     description=(
@@ -3116,8 +3361,30 @@ DOCUMENT_GENERATION_MARKERS: tuple[str, ...] = (
 )
 
 
+_DOCUMENT_GENERATION_NOUNS = ("report", "document", "write-up", "writeup")
+
+# "as a document", "as a report" - the same ask with the noun at the end
+# ("save your findings as a document"), which no forward-ordered verb+noun
+# pattern can reach.
+_DOCUMENT_GENERATION_AS = re.compile(
+    rf"\b(?:{_CONSTRUCTION_VERBS}|write|write\s+up|save|turn|export)\b[^.!?]*?"
+    rf"\bas\s+(?:an?\s+)?(?:{'|'.join(_DOCUMENT_GENERATION_NOUNS)})\b",
+    re.IGNORECASE,
+)
+
+
 def document_generation_intent(task: Task, participants: Sequence[str] = ()) -> bool:
-    return _marker_present(task.description, DOCUMENT_GENERATION_MARKERS)
+    if _marker_present(task.description, DOCUMENT_GENERATION_MARKERS):
+        return True
+    # The shared construction shape - a verb, optional descriptors, and this
+    # capability's own noun - rather than only the exact phrases above. The
+    # identical generalization ``create_diagram_intent`` already carries, and
+    # for the identical reason its own comment gives: the phrase list missed
+    # natural asks ("write up a report of your findings as a document",
+    # "save your findings as a document") that name this capability plainly.
+    if _construction_subject(task.description, nouns=_DOCUMENT_GENERATION_NOUNS) is not None:
+        return True
+    return bool(_DOCUMENT_GENERATION_AS.search(str(task.description or "")))
 
 
 def generate_document(request: CapabilityRequest) -> TaskResult:
@@ -3185,16 +3452,69 @@ def generate_document(request: CapabilityRequest) -> TaskResult:
 # genuinely distinct from storing one, extracting its path, OCR, or
 # metadata - honestly refused when the configured provider has no real
 # vision capability, never faked.
+#
+# Phase 11 closure (this pass): the medium became data. This capability
+# answers one question - "what can be seen in this" - and a still picture
+# and a moving one are two shapes of the same question, not two features.
+# Until now only a still could be looked at: a request about a *video*
+# reached no visual reasoning at all ("what do you see in this video?"
+# fell through to open_conversation, and "what is happening in this
+# video?" was claimed by live_information, an unrelated capability).
+# Nothing below knows what is *in* the picture - no subject, no species,
+# no scene category - and nothing below is video-specific: a moving
+# medium is sampled into stills through one generalized primitive
+# (``sample_frames``) and then read by the identical vision path a still
+# already went through, so a medium this list has never heard of becomes
+# one entry of data rather than a second handler.
+#
+# The capability keeps the name ``image_analysis`` deliberately. It is a
+# persisted governance key (``capabilities enable/disable <name>``, the
+# evolution ledger's own component ids), so renaming it would be a store
+# migration for a label - the name is historical, the contract is
+# "visual understanding".
 # ---------------------------------------------------------------------------
 
-IMAGE_ANALYSIS_MARKERS: tuple[str, ...] = (
-    "look at this image", "look at the image", "what do you see in this image",
-    "what is in this image", "what's in this image", "analyze this image",
-    "describe this image", "look at this picture", "what's in this picture",
-    "analyze this picture", "describe this picture",
+# What a person calls the thing they want looked at. Two groups because the
+# *medium* genuinely differs - a still is looked at once, a moving one is
+# looked at across time - never because the subject does.
+_STILL_VISUAL_NOUNS: tuple[str, ...] = ("image", "picture", "photo", "photograph", "screenshot")
+_MOVING_VISUAL_NOUNS: tuple[str, ...] = ("video", "clip", "footage", "animation")
+_VISUAL_NOUNS: tuple[str, ...] = _STILL_VISUAL_NOUNS + _MOVING_VISUAL_NOUNS
+
+# How the ask is phrased. Generated against the nouns above rather than
+# hand-written, so a new medium word is one entry, never eleven sentences -
+# and so the phrasings a hand-written list happened to miss ("what is in
+# this picture", "look at the photo") are covered for every noun equally.
+_VISUAL_ASK_SHAPES: tuple[str, ...] = (
+    "look at {d} {n}", "what do you see in {d} {n}", "what is in {d} {n}",
+    "what's in {d} {n}", "analyze {d} {n}", "describe {d} {n}",
+    # A moving medium's own natural ask. Harmless for a still (nobody says
+    # "what is happening in this photograph" and means something else), and
+    # it is the phrasing that was being mistaken for a request about the
+    # live world.
+    "what is happening in {d} {n}", "what's happening in {d} {n}",
+    "what is going on in {d} {n}", "what's going on in {d} {n}",
+)
+
+_VISUAL_DETERMINERS: tuple[str, ...] = ("this", "that", "the")
+
+IMAGE_ANALYSIS_MARKERS: tuple[str, ...] = tuple(
+    shape.format(d=determiner, n=noun)
+    for noun in _VISUAL_NOUNS
+    for determiner in _VISUAL_DETERMINERS
+    for shape in _VISUAL_ASK_SHAPES
 )
 
 _IMAGE_PATH_PATTERN = re.compile(r"\S+\.(?:png|jpg|jpeg|gif|webp)", re.IGNORECASE)
+
+# Any audio/video path a request may have named - the same shape
+# ``media_production.py``'s own ``_MEDIA_PATH_PATTERN`` matches, written here
+# rather than imported so this module keeps its existing import boundary
+# (capabilities.py imports that module's *functions* at call time, never at
+# module level). Used only to keep a path out of what a vision model is asked.
+_MEDIA_PATH_IN_PROMPT = re.compile(
+    r"\S+\.(?:mp4|mov|mkv|webm|avi|wav|mp3|m4a|ogg|oga|opus|flac|aac)", re.IGNORECASE
+)
 
 
 # Pre-Stage-9 Campaign 3: the stored rendition a media capability opens - in
@@ -3297,6 +3617,7 @@ def image_authenticity(request: CapabilityRequest) -> TaskResult:
 
 IMAGE_AUTHENTICITY = ManagerCapability(
     name="image_authenticity",
+    completes_request=True,
     capabilities=frozenset({"image", "authenticity"}),
     handle=image_authenticity,
     description=(
@@ -3308,7 +3629,10 @@ IMAGE_AUTHENTICITY = ManagerCapability(
 )
 
 
-_IMAGE_ANALYSIS_NOUNS = ("image", "photo", "picture")
+# The same nouns the marker table is generated from - one list, so the
+# reordered shape ("I have a clip I want you to look at, can you describe
+# it?") and the plain one recognise exactly the same media.
+_IMAGE_ANALYSIS_NOUNS = _VISUAL_NOUNS
 # A real word/intent collision, found live (2026-09-16) while extending the
 # identical reordered mechanism to media_production: "I would love an image
 # of a cat, can you make one?" and "I want a look at this picture, can you
@@ -3325,9 +3649,51 @@ _IMAGE_ANALYSIS_REORDERED_VERB = re.compile(
 )
 _IMAGE_CREATION_VERB = re.compile(r"\b(?:make|generate|create|produce|draw)\b", re.IGNORECASE)
 
+# A moving medium named anywhere in the sentence, in any order relative to
+# the ask - the identical order-free verb+noun shape
+# ``_CLIP_VIDEO_VERB_NOUN_PATTERN`` already established for clipping, and
+# for the same reason: requiring the noun to sit immediately after the verb
+# left the equally natural "tell me what is going on in this video" claimed
+# by nothing, and "say what it is doing in the footage" claimed by
+# `translate`. Built from the noun table above, so a moving medium that
+# does not exist yet is one entry of data.
+#
+# Deliberately moving-only. A still picture already has a mature marker
+# table and the reordered mechanism; broadening the same order-free rule to
+# "image"/"picture" would make this capability claim requests that are
+# about sending or showing a file rather than about what is in it.
+_MOVING_MEDIUM_REFERENCE = re.compile(
+    r"\b(?:this|that|the|my|these|those)\s+(?:\w+\s+){0,2}?(?:"
+    + "|".join(_MOVING_VISUAL_NOUNS)
+    + r")s?\b",
+    re.IGNORECASE,
+)
+
+
+def _asks_what_can_be_seen_in_a_moving_medium(text: str) -> bool:
+    """Whether ``text`` asks what is in a moving medium, whatever order the
+    words come in - an observation-shaped ask (or a request for Alfred to
+    speak for what is in it), a moving medium named, and no creation verb
+    that would make this a request to *make* one instead."""
+    words = str(text or "")
+    if _MOVING_MEDIUM_REFERENCE.search(words) is None:
+        return False
+    if _IMAGE_CREATION_VERB.search(words):
+        return False
+    return bool(
+        _IMAGE_ANALYSIS_REORDERED_VERB.search(words) or _SPEAK_FOR_SUBJECT.search(words)
+    )
+
 
 def image_analysis_intent(task: Task, participants: Sequence[str] = ()) -> bool:
     if _marker_present(task.description, IMAGE_ANALYSIS_MARKERS):
+        return True
+    # Phase 11 closure (this pass): the same ask about a moving medium, in
+    # any word order. Without it "tell me what the dog is doing in this
+    # video" reached ordinary conversation - where a Full Brain answers
+    # about a recording it never looked at - and "say what it is doing in
+    # the footage" was claimed by `translate`.
+    if _asks_what_can_be_seen_in_a_moving_medium(task.description):
         return True
     # Closure campaign (2026-09-16, N-06): "I have a photo I want you to
     # look at, can you tell me what it shows?" states the identical ask
@@ -3360,44 +3726,71 @@ def image_analysis(request: CapabilityRequest) -> TaskResult:
     ``request.task.description`` - never routed through a Tool that
     would then have to also hold the provider to reason about what it
     read.
+
+    **The medium is data.** A still picture is looked at once; a moving one
+    is sampled into real stills and looked at across time
+    (``_moving_visual_analysis``). Both go through the identical vision
+    above - one capability answering "what can be seen in this", never a
+    second handler because the file moves. Which one a request is about is
+    the artifact store's own recorded kind, or the file itself, never the
+    request's wording.
     """
     local_vision = getattr(request.assist, "describe_image", None) if request.assist is not None else None
     if request.analyze_image is None and local_vision is None:
         return TaskResult.failure(
             request.task, request.own_name,
-            "I don't have a way to reason about images yet - no vision-capable "
-            "reasoning is configured for me right now, so I would rather say "
-            "so than guess.",
+            "I don't have a way to reason about what I am shown yet - no "
+            "vision-capable reasoning is configured for me right now, so I "
+            "would rather say so than guess.",
         )
 
     from pathlib import Path
 
+    from src.agents.tools.media_production import find_video_path
+
+    moving = False
     match = _IMAGE_PATH_PATTERN.search(request.task.description)
+    named_video = find_video_path(request.task.description)
     if match is not None:
         image_path = Path(match.group(0))
+    elif named_video is not None:
+        # A moving medium named by path. `find_video_path` is the project's
+        # one shared answer to "is this a moving-image file" (the identical
+        # helper clip_video_intent already reads) - never a second list of
+        # container extensions kept in sync by hand.
+        image_path = Path(named_video)
+        moving = True
     else:
-        # Pre-Stage-9 Campaign 3: the image the person shared in this
+        # Pre-Stage-9 Campaign 3: the medium the person shared in this
         # conversation, resolved to its stored file - no server path needed.
-        _described, shared_path = _shared_media(request, ("image",))
+        # Both visual kinds are asked for: whether the newest shared file
+        # moves is the artifact store's own recorded fact, read from it,
+        # never guessed from the request's words.
+        described, shared_path = _shared_media(request, ("image", "video"))
         if shared_path is None:
             return TaskResult.failure(
                 request.task, request.own_name,
-                "I don't see an image in that request or shared in this conversation - "
-                "attach one, or name it with 'artifact <id>'.",
+                "I don't see an image or video in that request or shared in this "
+                "conversation - attach one, or name it with 'artifact <id>'.",
             )
         image_path = Path(shared_path)
+        moving = _is_moving_medium(described, shared_path)
     if not image_path.is_file():
         return TaskResult.failure(
             request.task, request.own_name,
-            f"I couldn't find an image at '{image_path}'.",
+            f"I couldn't find a {'video' if moving else 'image'} at '{image_path}'.",
         )
 
     try:
         image_bytes = image_path.read_bytes()
     except OSError as exc:
         return TaskResult.failure(
-            request.task, request.own_name, f"I couldn't read that image: {exc}",
+            request.task, request.own_name,
+            f"I couldn't read that {'video' if moving else 'image'}: {exc}",
         )
+
+    if moving:
+        return _moving_visual_analysis(request, image_bytes)
 
     decision = request.analyze_image(image_bytes, request.task.description) if request.analyze_image is not None else None
     if decision is not None and decision.is_decided and decision.reason.strip():
@@ -3425,14 +3818,186 @@ def image_analysis(request: CapabilityRequest) -> TaskResult:
     )
 
 
+# How many moments of a moving medium are looked at. Each look is one real
+# call to whatever vision the installation has, so this is a genuine cost,
+# not a free loop: a small local vision model on an ordinary laptop takes
+# minutes per frame. Three is enough for "what is going on here" to be
+# answerable across time rather than from a single instant, and few enough
+# that the answer arrives. Not a constant a caller has to accept - a
+# deployment with faster vision raises it.
+MOVING_VISUAL_SAMPLE_COUNT = 3
+
+# What is said about an account built from sampled moments, every time. It
+# is not a hedge: a description of three instants out of a recording is
+# genuinely a description of three instants, and saying so is the
+# difference between evidence and a claim about the whole.
+_SAMPLED_LOOK_NOTE = (
+    "This is what is visible at the moments I looked at, not a frame-by-frame "
+    "account of the whole recording."
+)
+
+# When a person asks Alfred to speak *for* what is in the medium ("voice out
+# what it is doing", "say what he is thinking", "what is it telling us") the
+# honest answer is still only what can be seen. Naming the subject, its
+# intent or its words as fact would be inventing them. Nothing here is about
+# any particular kind of subject - a person, an animal, a machine, a crowd
+# all get the identical treatment.
+_SPEAK_FOR_SUBJECT = re.compile(
+    r"\b(?:voice(?:\s+(?:out|over))?|narrate|speak\s+for|say\s+what|tell\s+me\s+what\s+(?:it|he|she|they)"
+    r"|in\s+(?:its|his|her|their)\s+(?:own\s+)?words|what\s+(?:is|are|'s)\s+(?:it|he|she|they)\s+"
+    r"(?:saying|thinking|feeling))\b",
+    re.IGNORECASE,
+)
+
+_INTERPRETIVE_NOTE = (
+    "That is my reading of what is visible - not words or intentions the "
+    "subject actually expressed."
+)
+
+
+def _is_moving_medium(described: "dict | None", path: str) -> bool:
+    """Whether the resolved medium is a moving one.
+
+    The artifact store's own recorded kind is the authority - a file is a
+    video because it was registered as one, never because of how a person
+    worded the request. The path is only consulted when nothing was
+    recorded (a medium resolved straight from a filesystem path), through
+    the identical shared helper the rest of this project already uses.
+    """
+    from src.agents.tools.media_production import find_video_path
+
+    for key in ("content_kind", "type"):
+        value = str((described or {}).get(key, "") or "").strip().lower()
+        if value in _MOVING_MEDIUM_KINDS:
+            return True
+        if value in _STILL_MEDIUM_KINDS:
+            return False
+    return find_video_path(str(path)) is not None
+
+
+# What the artifact store calls a medium that moves, and one that does not.
+# Read from the store's own recorded kinds rather than inferred: "video" and
+# "video_recording" are what registration already writes (see
+# src/services/artifacts/*), and a kind this list has never heard of is
+# decided by the file itself rather than assumed either way.
+_MOVING_MEDIUM_KINDS = frozenset({"video", "video_recording"})
+_STILL_MEDIUM_KINDS = frozenset({"image", "diagram", "screenshot"})
+
+
+def _look_once(request: CapabilityRequest, image_bytes: bytes, prompt: str) -> "tuple[str, str] | None":
+    """One real look at one still picture - ``(what was seen, who saw it)``,
+    or None when no vision could answer.
+
+    The identical two-step every single-image look already takes: the
+    Manager's own Brain first (real, attributed reasoning), then the local
+    vision model beside it (attributed as such). Factored out here, not
+    reimplemented, so a moving medium is read by exactly the same vision a
+    still one is - the whole point of treating the medium as data.
+    """
+    decision = request.analyze_image(image_bytes, prompt) if request.analyze_image is not None else None
+    if decision is not None and decision.is_decided and decision.reason.strip():
+        return decision.reason.strip(), decision.source
+    local_vision = getattr(request.assist, "describe_image", None) if request.assist is not None else None
+    if local_vision is not None:
+        seen = local_vision(image_bytes, prompt)
+        if seen:
+            return str(seen).strip(), "local_vision"
+    return None
+
+
+def _moving_visual_analysis(request: CapabilityRequest, video_bytes: bytes) -> TaskResult:
+    """What can be seen in a moving medium, read across time.
+
+    Sampled into stills by one generalized primitive and then looked at by
+    the identical vision path a single picture already goes through - never
+    a second vision provider, never a second kind of reasoning, and nothing
+    here that knows what the subject is. A medium with no visual content at
+    all is reported as exactly that, never described from its filename.
+    """
+    from src.providers.media.video import VideoError, sample_frames
+
+    try:
+        frames = sample_frames(video_bytes, count=MOVING_VISUAL_SAMPLE_COUNT)
+    except VideoError as exc:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            f"I couldn't get a look at that - {exc}.",
+        )
+    except Exception as exc:  # noqa: BLE001 - a decoder failure is reported, never guessed around
+        return TaskResult.failure(
+            request.task, request.own_name,
+            f"I couldn't get a look at that: {type(exc).__name__}: {exc}",
+        )
+
+    prompt = _vision_prompt(request.task.description)
+    looks: "list[tuple[float, str]]" = []
+    sources: "list[str]" = []
+    for frame in frames:
+        seen = _look_once(request, frame.image_bytes, prompt)
+        if seen is None:
+            continue
+        looks.append((frame.at_seconds, seen[0]))
+        sources.append(seen[1])
+
+    if not looks:
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "I got real frames out of that, but nothing here could tell me what is in "
+            "them - no vision-capable reasoning is configured, so I would rather say "
+            "so than guess.",
+        )
+
+    lines = [f"At {seconds:g}s: {text}" for seconds, text in looks]
+    lines.append("")
+    lines.append(_SAMPLED_LOOK_NOTE)
+    if _SPEAK_FOR_SUBJECT.search(request.task.description or ""):
+        lines.append(_INTERPRETIVE_NOTE)
+    if "local_vision" in sources:
+        from src.providers.local_assistant import VISION_ATTRIBUTION
+
+        lines.append(f"({VISION_ATTRIBUTION})")
+
+    return TaskResult.success(
+        request.task, request.own_name, "\n".join(lines),
+        payload={
+            "handled_by": "image_analysis",
+            "medium": "moving",
+            "frames_looked_at": len(looks),
+            "sampled_at_seconds": tuple(seconds for seconds, _ in looks),
+            "brain": sources[0] if sources else "",
+            "assisted": "local_vision" in sources,
+        },
+    )
+
+
+_DEFAULT_VISION_PROMPT = (
+    "Describe this image in detail: the main subject, the setting, colours and any visible text."
+)
+
+
 def _vision_prompt(request_text: str) -> str:
     """What the small vision model is asked - the person's own question when it
-    is one, otherwise a plain request to describe the image."""
+    is one, otherwise a plain request to describe the image.
+
+    A filesystem path the request happened to name is removed first. The model
+    is being handed the picture itself; the path is how *this* process found
+    it, is meaningless to a vision model, and was measurably reaching one -
+    "voice out what the subject is doing in this video: C:\\...\\subject.mp4"
+    was asked verbatim, path and all (found in the live run of this pass).
+    """
     text = " ".join(str(request_text or "").split())
+    for pattern in (_IMAGE_PATH_PATTERN, _MEDIA_PATH_IN_PROMPT):
+        text = " ".join(pattern.sub(" ", text).split())
+    # A request that was nothing but a path, or a bare verb with the path
+    # removed ("describe <path>" -> "describe"), carries no question worth
+    # asking - the plain default is a better question than a fragment.
+    text = text.rstrip(" :,-")
+    if len(text.split()) < 3:
+        text = ""
     for marker in IMAGE_ANALYSIS_MARKERS:
         if text.lower().rstrip("?.! ") == marker:
-            return "Describe this image in detail: the main subject, the setting, colours and any visible text."
-    return text or "Describe this image."
+            return _DEFAULT_VISION_PROMPT
+    return text or _DEFAULT_VISION_PROMPT
 
 
 IMAGE_ANALYSIS = ManagerCapability(
@@ -3440,8 +4005,9 @@ IMAGE_ANALYSIS = ManagerCapability(
     capabilities=frozenset({"image_analysis", "vision"}),
     handle=image_analysis,
     description=(
-        "Analyzes a real image with genuine visual reasoning, when the "
-        "configured provider supports it - never OCR, never metadata, "
+        "Says what can be seen in a real still or moving image, with genuine "
+        "visual reasoning, when the configured provider supports it - a moving "
+        "one read across real sampled moments. Never OCR, never metadata, "
         "never a fabricated description."
     ),
     claims=image_analysis_intent,
@@ -3657,7 +4223,12 @@ _HANDOUT_NOUNS = ("handout",)
 def create_artifact_intent(task: Task, participants: Sequence[str] = ()) -> bool:
     if _marker_present(task.description, _HANDOUT_MARKERS) or document_conversion_intent(task.description):
         return True
-    return _reordered_subject(task.description, nouns=_HANDOUT_NOUNS) is not None
+    if _reordered_subject(task.description, nouns=_HANDOUT_NOUNS) is not None:
+        return True
+    # Any other kind the person names and fills in - see
+    # ``structured_construction_request`` for why the kind is open rather
+    # than a list this file keeps.
+    return structured_construction_request(task.description) is not None
 
 
 def create_artifact(request: CapabilityRequest) -> TaskResult:
@@ -3734,19 +4305,41 @@ def create_artifact(request: CapabilityRequest) -> TaskResult:
     content = _parse_document_content(text)
 
     if content is None:
+        # The content the request already carried, in the person's own shape
+        # ("a worksheet titled Fractions with: Monday - halves; Tuesday -
+        # quarters") - read deterministically, so this works with no model at
+        # all. Found by the Phase 11 closure sweep: the only structure this
+        # handler could read without a Brain was ``TITLE:``/``SECTION:``,
+        # which is the *Brain's* own answer format, so in Half Brain the
+        # handler failed and printed that internal instruction at the person
+        # as though it were something to type.
+        construction = named_construction_request(text)
+        if construction is not None:
+            content = document_from_construction(construction)
+
+    if content is None:
         if request.converse is None:
             return TaskResult.failure(
                 request.task, request.own_name,
                 "I don't have a way to organize this into a handout yet - no "
-                "language model is configured for me right now. Give me the "
-                f"content already structured instead:\n{_DOCUMENT_FORMAT_INSTRUCTION}",
+                "language model is configured for me right now. Tell me what "
+                "should go in it and I'll make it now - a title and the "
+                "entries, like: a handout titled Study Plan with: Monday - "
+                "the first item; Tuesday - the second.",
             )
         notes = (_DOCUMENT_FORMAT_INSTRUCTION,) + _recent_conversation_notes(request)
         decision = request.converse(request.task, notes)
         if not decision.is_decided:
             return TaskResult.failure(
                 request.task, request.own_name,
-                f"I couldn't organize that into a handout ({decision.reason or 'no usable answer'}).",
+                f"I couldn't organize that into a handout ({decision.reason or 'no usable answer'}). "
+                # Structured content needs no reasoning at all - said, so a
+                # declined Brain never hides the path that works without one,
+                # and said in the person's own shape rather than in the
+                # model-facing format instruction this handler sends inward.
+                "Tell me what should go in it and I'll make it now - a title "
+                "and the entries, like: a handout titled Study Plan with: "
+                "Monday - the first item; Tuesday - the second.",
             )
         content = _parse_document_content(decision.reason)
         if content is None:
@@ -3784,11 +4377,120 @@ CREATE_ARTIFACT = ManagerCapability(
 )
 
 
+_REVISION_VERBS = r"revise|update|edit|change|modify|redraw|amend"
+
+
+def _named_revision(text: str, nouns: "tuple[str, ...]") -> "tuple[str, str] | None":
+    """``(title words, the change asked for)`` when a revision names its
+    artifact by title - "revise the water cycle diagram to add labels",
+    "update my Study Plan handout: add Wednesday - chemistry" - or None.
+
+    Phase 11 closure sweep: only "revise the diagram"/"update the handout"
+    (no title) were recognised, so naming the thing - the natural way to
+    say which one - reached open conversation. At least one meaningful word
+    must stand between the article and the noun; the bare form keeps its
+    own markers."""
+    noun_group = "|".join(re.escape(n) for n in nouns)
+    match = re.search(
+        rf"\b(?:{_REVISION_VERBS})\s+(?:the|that|my|our|this)\s+(?P<title>(?:[\w'’-]+\s+){{1,8}}?)"
+        rf"(?:{noun_group})\b\s*[:,-]?\s*(?P<rest>.*)$",
+        str(text or ""), re.IGNORECASE,
+    )
+    if match is None:
+        return None
+    title = match.group("title").strip()
+    if not (tokenize(title) - _QUERY_STOPWORDS):
+        return None
+    return title, match.group("rest").strip()
+
+
+def _find_titled(request: CapabilityRequest, artifact_type: str, title: str) -> "tuple[str | None, str]":
+    """``(artifact id, "")`` for the owned artifact the title names, or
+    ``(None, why)`` - the tool's own honest answer when nothing matches."""
+    found = request.tools.invoke("artifact_production", {"operation": "find_titled", "content": f"{artifact_type}\n{title}"})
+    return (found.output.strip(), "") if found.ok else (None, str(found.error or "no match"))
+
+
+_HANDOUT_REVISION_NOUNS = ("handout", "document")
+
+
+# The revision counterpart of the generalized construction shape above: a
+# revision verb, the thing named by title and kind, and the change asked for.
+# The kind is open here for the same reason it is open there - an artifact
+# created as a "worksheet" has to be revisable as one - but which artifact is
+# meant is never guessed from the words: the store is the authority, so this
+# returns every plausible title/kind split and the handler asks the store
+# which one actually exists (see ``revise_artifact``).
+_NAMED_REVISION_OPENER = re.compile(
+    rf"^(?:please\s+)?(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?"
+    rf"(?:{_REVISION_VERBS})\s+(?:the|that|my|our|this)\s+(?P<rest>\S.*)$",
+    re.IGNORECASE,
+)
+_REVISION_CHANGE_COLON = re.compile(r"^(?P<phrase>[^:]+?)\s*:\s*(?P<change>\S.*)$")
+_REVISION_CHANGE_VERB = re.compile(
+    r"^(?P<phrase>.+?)\s+(?:to|and)\s+(?P<change>(?:add|include|append|remove|drop|delete|"
+    r"change|say|show|list|mention|replace|correct|fix|rename|reword)\b.*)$",
+    re.IGNORECASE,
+)
+# How many trailing words of the phrase may be the kind ("worksheet",
+# "study guide"): the rest is the title the store is asked for.
+_REVISION_KIND_WORD_LIMIT = 2
+
+
+def named_revision_candidates(text: str) -> "tuple[tuple[tuple[str, str], ...], str] | None":
+    """``((title, kind), ...), change`` for a revision that names its artifact
+    by title, longest title first - or ``None`` when the text is not that
+    shape. Every split is offered because "the Exam Prep study guide" is two
+    readings ("Exam Prep study"/"guide" and "Exam Prep"/"study guide") and
+    only the store knows which one was ever created.
+    """
+    raw = " ".join(str(text or "").split())
+    opener = _NAMED_REVISION_OPENER.match(_strip_vocative(raw).strip())
+    if opener is None:
+        return None
+    rest = opener.group("rest").strip()
+
+    change_match = _REVISION_CHANGE_COLON.match(rest) or _REVISION_CHANGE_VERB.match(rest)
+    if change_match is None:
+        return None
+    phrase = change_match.group("phrase").strip(" ,.;:-")
+    change = change_match.group("change").strip(" ,.;:")
+    words = phrase.split()
+
+    candidates: list[tuple[str, str]] = []
+    for kind_length in range(1, _REVISION_KIND_WORD_LIMIT + 1):
+        if len(words) <= kind_length:
+            break
+        title = " ".join(words[:-kind_length]).strip(" ,.;:-")
+        kind = " ".join(words[-kind_length:]).strip(" ,.;:-")
+        if not title or not (tokenize(title) - _QUERY_STOPWORDS):
+            continue
+        # The kinds other surfaces own are theirs here too, exactly as on the
+        # construction side - "update the Friday meeting to add Sam" is not a
+        # document revision.
+        if frozenset(re.findall(r"[\w'’-]+", kind.lower())) & {
+            n.lower() for n in _SCHEDULING_OBJECT_NOUNS + _TASK_OBJECT_NOUNS + _AGENT_OBJECT_NOUNS
+        }:
+            continue
+        candidates.append((title, kind))
+    if not candidates or not change:
+        return None
+    return tuple(candidates), change
+
+
 def revise_artifact_intent(task: Task, participants: Sequence[str] = ()) -> bool:
     text = task.description
     if _marker_present(text, _REVISE_HANDOUT_MARKERS) or _marker_present(text, _REVISE_CONTENT_MARKERS):
         return True
-    return bool(_REPLACEMENT_PATTERN.search(text)) and content_reference_intent(text)
+    if _named_revision(text, _HANDOUT_REVISION_NOUNS) is not None:
+        return True
+    if bool(_REPLACEMENT_PATTERN.search(text)) and content_reference_intent(text):
+        return True
+    if revise_diagram_intent(task):
+        # An image's own revision capability owns its kinds - asked directly
+        # rather than copied, the same deferral shape used everywhere here.
+        return False
+    return named_revision_candidates(text) is not None
 
 
 def revise_artifact(request: CapabilityRequest) -> TaskResult:
@@ -3822,8 +4524,43 @@ def revise_artifact(request: CapabilityRequest) -> TaskResult:
     text = request.task.description
     match = _ARTIFACT_ID_PATTERN.search(text)
     resolved = None
+    named = _named_revision(text, _HANDOUT_REVISION_NOUNS)
+    # Only when the request named neither the bare kind this file already owns
+    # ("update the handout") nor content in play does the open-kind reading
+    # apply - the identical precedence the branch chain below already keeps, so
+    # "update the handout" plus a structured block stays a revision of the most
+    # recent document rather than a search for one titled "handout".
+    open_kind = (
+        None
+        if named is not None
+        or _marker_present(text, _REVISE_HANDOUT_MARKERS)
+        or _marker_present(text, _REVISE_CONTENT_MARKERS)
+        else named_revision_candidates(text)
+    )
     if match:
         artifact_id = match.group(1)
+    elif named is not None:
+        # Named by its title: that one, never merely the most recent.
+        artifact_id, why = _find_titled(request, "document", named[0])
+        if artifact_id is None:
+            return TaskResult.failure(request.task, request.own_name, f"I couldn't find that handout to revise: {why}.")
+    elif open_kind is not None:
+        # Named by title and a kind this file never enumerated ("the Fractions
+        # worksheet"). The store decides which reading of the phrase was ever
+        # real - asked longest title first, and nothing is guessed when none
+        # of them exists.
+        candidates, _change = open_kind
+        artifact_id, why = None, ""
+        for title, _kind in candidates:
+            artifact_id, why = _find_titled(request, "document", title)
+            if artifact_id is not None:
+                break
+        if artifact_id is None:
+            tried = ", ".join(f"'{title}'" for title, _ in candidates)
+            return TaskResult.failure(
+                request.task, request.own_name,
+                f"I couldn't find anything of mine by that name to revise (I looked for {tried}): {why}.",
+            )
     elif not _marker_present(text, _REVISE_HANDOUT_MARKERS) and (
         content_reference_intent(text)
         or _marker_present(text, _REVISE_CONTENT_MARKERS)
@@ -3901,6 +4638,13 @@ def revise_artifact(request: CapabilityRequest) -> TaskResult:
             )
     else:
         new_content = _parse_document_content(text)
+    if new_content is None and open_kind is not None and resolved is not None:
+        # "revise the Fractions worksheet: add Wednesday - eighths" - the
+        # change is additive and already structured, so it is applied with no
+        # model at all, the same Half-Brain-safe path creation now has.
+        new_content = document_with_additions(
+            _document_from_content(resolved[0], resolved[1]), open_kind[1],
+        )
     if new_content is None:
         if request.converse is None:
             return TaskResult.failure(
@@ -3975,6 +4719,163 @@ REVISE_ARTIFACT = ManagerCapability(
 
 
 # ---------------------------------------------------------------------------
+# Running what was made, and reporting what actually happened.
+#
+# Phase 11 closure: the generalized creation path ended at a saved artifact.
+# That is the right place for *creation* to end and the wrong place for the work
+# to end, because a source file is evidence that something was written and never
+# evidence that it runs - and for an artifact meant to be interactive, whether it
+# runs is the whole question. A verified browser driver had existed in this
+# repository for some time (src/providers/browser/cdp_browser.py, already used by
+# WebsiteConnection); nothing connected it to anything Alfred created. This
+# capability is that connection, through the ArtifactRuntimeProvider axis, so the
+# engine stays replaceable and no artifact kind gets a runner of its own.
+#
+# Nothing here names a kind of artifact, a technology or a subject. "Run it" is
+# the same request whether it points at an optics simulation, a game, a web app
+# or something nobody has built yet.
+# ---------------------------------------------------------------------------
+
+# "does it work", asked of something already made.
+_RUN_QUESTION = re.compile(
+    r"\b(?:does|did|do)\s+(?:it|that|this)\s+(?:work|run|load|render)\b", re.IGNORECASE,
+)
+# ...but "why does that work?" asks for an explanation, not for a run. Found
+# live: this claimed "I moved the increment before the check like you suggested
+# and it fixed it - why does that work?" - a real reasoning question about code,
+# which belongs to the Brain. Asking whether something works and asking why it
+# works are different requests that share every word but this one.
+_ASKS_WHY_IT_WORKS = re.compile(
+    r"\b(?:why|how\s+come|how\s+does|how\s+did|how\s+do|what\s+makes)\b", re.IGNORECASE,
+)
+# A running verb in command position, pointing at what was made.
+_RUN_POINTED = re.compile(
+    r"^(?:please\s+)?(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?"
+    r"(?:run|launch|preview|execute|try|test|open)\s+(?:it|that|this|them)\b",
+    re.IGNORECASE,
+)
+# The same, naming what to run. Deliberately the narrower verb set: "open the
+# ..." and "test the ..." are ordinary enough to belong to whatever else owns
+# them, while "run"/"launch"/"preview"/"execute" are unambiguous asks to start
+# something.
+_RUN_NAMED = re.compile(
+    r"^(?:please\s+)?(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?"
+    r"(?:run|launch|preview|execute)\s+(?:the|my)\s+(?P<name>[\w'’-]+(?:\s+[\w'’-]+){0,5})\s*[.?!]*$",
+    re.IGNORECASE,
+)
+
+
+# The unambiguous running verbs, wherever they appear - read only together with
+# an explicit artifact id, which is what makes their position unnecessary there.
+_RUN_VERB_ANYWHERE = re.compile(r"\b(?:run|launch|preview|execute)\b", re.IGNORECASE)
+
+
+def run_artifact_intent(task: Task, participants: Sequence[str] = ()) -> bool:
+    text = str(task.description or "")
+    working = _strip_vocative(text).strip()
+    if _RUN_QUESTION.search(working) and not _ASKS_WHY_IT_WORKS.search(working):
+        return True
+    # "run artifact <id>" - an explicit reference is evidence enough on its own,
+    # the same convention every other capability here reads an artifact id under.
+    if _ARTIFACT_ID_PATTERN.search(working) and _RUN_VERB_ANYWHERE.search(working):
+        return True
+    has_verb = bool(_RUN_POINTED.match(working)) or bool(_RUN_NAMED.match(working))
+    if not has_verb:
+        return False
+    # The capabilities that own their own "start this" requests keep them - the
+    # same deferral discipline every other rule in this file states one for,
+    # asked of the predicates themselves rather than copied.
+    if (
+        start_recording_intent(text) or stop_recording_intent(text)
+        or cancel_recording_intent(text) or list_recordings_intent(text)
+        or workspace_navigation_intent(task, participants)
+        or communication_intent(task, participants)
+    ):
+        return False
+    return True
+
+
+def run_artifact(request: CapabilityRequest) -> TaskResult:
+    """Run an artifact this agent owns and report what actually happened.
+
+    Deterministic end to end - which artifact, the run, and the reading of it
+    all come from real evidence - so it works identically in Half Brain. The
+    artifact is never modified: an observation is a reading, and correcting a
+    failing artifact is a revision the person asks for separately.
+    """
+    if not request.tools.permits("artifact_runtime"):
+        equipped = ", ".join(request.tools.names()) or "none"
+        return TaskResult.failure(
+            request.task, request.own_name,
+            "I can run something I've made and tell you what it actually did, but the "
+            f"underlying 'artifact_runtime' capability is not installed. Currently equipped: {equipped}.",
+        )
+
+    text = request.task.description
+    match = _ARTIFACT_ID_PATTERN.search(text)
+    outcome = request.tools.invoke(
+        "artifact_runtime", {"operation": "run", "content": match.group(1) if match else ""}
+    )
+    if not outcome.ok:
+        return TaskResult.failure(request.task, request.own_name, f"I couldn't run that: {outcome.error}")
+
+    report = json.loads(outcome.output)
+    title, artifact_id = report.get("title") or "it", report.get("artifact_id")
+    summary, engine = report.get("summary") or "", report.get("engine") or "the runtime"
+
+    if not report.get("ran"):
+        # Not a failure of the artifact and not pretended to be one: nothing
+        # observed it, and that is what gets said.
+        # TaskResult.failure carries no payload by design (see contracts.py):
+        # a failed turn reports a reason, and nothing downstream should be able
+        # to read "results" off work that did not happen.
+        return TaskResult.failure(
+            request.task, request.own_name,
+            f"I couldn't actually run '{title}' (artifact {artifact_id}), so I can't tell you "
+            f"whether it works: {summary}",
+        )
+
+    errors = list(report.get("errors") or ())
+    observed = report.get("observations") or {}
+    seen = ", ".join(f"{k} {v}" for k, v in sorted(observed.items()) if k != "loaded")
+    payload = {
+        "handled_by": "run_artifact", "artifact_id": artifact_id, "ran": True,
+        "clean": bool(report.get("clean")), "errors": errors, "observations": observed,
+        "engine": engine,
+    }
+    if errors:
+        # Ran and failed: reported as a failure, because "it ran" is not the
+        # question that was asked.
+        listed = "; ".join(errors[:3])
+        return TaskResult.failure(
+            request.task, request.own_name,
+            f"I ran '{title}' (artifact {artifact_id}) in {engine} and it reported "
+            f"{len(errors)} error(s): {listed}. What loaded: {seen or 'nothing to count'}. "
+            "Tell me what it should do instead and I'll revise it.",
+        )
+    return TaskResult.success(
+        request.task, request.own_name,
+        f"I ran '{title}' (artifact {artifact_id}) in {engine} and it loaded with no errors. "
+        f"What's actually there: {seen or 'nothing countable'}.",
+        payload=payload,
+    )
+
+
+RUN_ARTIFACT = ManagerCapability(
+    name="run_artifact",
+    completes_request=True,
+    capabilities=frozenset({"run", "preview", "launch"}),
+    handle=run_artifact,
+    description=(
+        "Runs an artifact this agent owns in a real runtime and reports what actually "
+        "happened - loaded or not, what it contains, and any runtime errors."
+    ),
+    claims=run_artifact_intent,
+    scoreable=False,
+)
+
+
+# ---------------------------------------------------------------------------
 # Multimodal workspace/artifact checkpoint, image/diagram half: a real,
 # persistent, versioned image artifact - a diagram, a map, an
 # illustration, or any other real visual an ImageProvider can produce.
@@ -4017,8 +4918,326 @@ _DIAGRAM_PROMPT_MIN_CHARS = 12
 _DIAGRAM_NOUNS = ("diagram", "map")
 
 
+_SUBJECT_CONNECTIVE = re.compile(
+    r"^(?:of|about|on|for|showing|that\s+shows|which\s+shows|depicting|illustrating|explaining|with)\s+",
+    re.IGNORECASE,
+)
+
+
+def _construction_subject(text: str, *, nouns: "tuple[str, ...]", exclude: "str | None" = None) -> "str | None":
+    """What a "<verb> [me] [a|an|the] [up to four descriptors] <noun> [of|about|
+    showing ...] <subject>" request asks to be made, with its leading connective
+    removed - or None when the text is not that shape (or matches ``exclude``,
+    a more specific kind of request another capability owns)."""
+    raw = str(text or "")
+    if exclude and re.search(exclude, raw, re.IGNORECASE):
+        return None
+    noun_group = "|".join(re.escape(n) for n in nouns)
+    match = re.search(
+        rf"\b(?:{_CONSTRUCTION_VERBS})\s+(?:me\s+|us\s+)?(?:(?:an?|the|one|some)\s+)?"
+        rf"(?:[\w'-]+\s+){{0,4}}?(?:{noun_group})s?\b\s*[:,-]?\s*(?P<subject>[^?!]*)",
+        raw, re.IGNORECASE,
+    )
+    if match is None:
+        return None
+    return subject_without_connective(match.group("subject"))
+
+
+def subject_without_connective(subject: str) -> str:
+    """"of a lighthouse at dusk" -> "a lighthouse at dusk"."""
+    cleaned = " ".join(str(subject or "").split()).strip(" ,.:;")
+    return _SUBJECT_CONNECTIVE.sub("", cleaned).strip(" ,.:;")
+
+
+# ---------------------------------------------------------------------------
+# The generalized named-construction shape - shared by the capability that
+# makes a structured document and by every capability that must not mistake a
+# request to *make* something for a request of its own.
+#
+# A person asking for something persistent names it, or says what goes in it,
+# or both: "create a worksheet titled Fractions with: Monday - halves",
+# "make a checklist called Preflight with: fuel on; flaps set". The KIND word
+# is open on purpose - "handout", "worksheet", "syllabus", "briefing note", a
+# word this project has never seen - because the kind belongs to the person's
+# vocabulary, not to this file. What makes the request recognisable is its
+# shape: a production verb, a kind, and a name and/or a content list.
+#
+# The Phase 11 closure sweep measured the cost of the closed alternative.
+# ``_HANDOUT_NOUNS`` held "handout" alone, so "create a worksheet titled
+# Fractions with: Monday - halves; Tuesday - quarters" matched no
+# construction capability at all, fell through to the calendar - which sorts
+# earlier and does claim a weekday - and was written to real calendar state
+# as an event named "quarters", reported back as done. Adding "worksheet" to
+# the noun list would have fixed that one sentence and left the next unseen
+# noun failing in exactly the same way. The shape is the architecture; the
+# nouns were the example.
+#
+# What the guards below name is not a vocabulary of documents but the kinds
+# *other* capabilities already own - the identical "the more specific
+# capability wins" reasoning ``calendar_intent`` states five deferrals for,
+# and the identical way ``_DIAGRAM_NOUNS`` and ``_MEDIA_*_NOUNS`` each own
+# their own words. Nothing here names a subject, a topic or a title.
+# ---------------------------------------------------------------------------
+
+# The words a scheduling capability owns as its own object. Declared once
+# here and used by ``_CALENDAR_TIER2_PATTERN`` below, so "create a meeting
+# titled Q3 Review" stays with the capability that actually keeps meetings
+# instead of becoming a document that merely says "meeting".
+_SCHEDULING_OBJECT_NOUNS: tuple[str, ...] = (
+    "calendar", "schedule", "appointment", "appointments", "event", "events",
+    "meeting", "meetings", "deadline", "deadlines",
+)
+# The same, for the outstanding-work and agent-roster surfaces: TASK's own
+# object, and the specialist the Control Center's 'agent create' makes. A
+# named agent is a real member of the ecosystem, never a document about one.
+_TASK_OBJECT_NOUNS: tuple[str, ...] = (
+    "task", "tasks", "to-do", "todo", "to-dos", "todos", "reminder", "reminders",
+)
+_AGENT_OBJECT_NOUNS: tuple[str, ...] = (
+    "agent", "agents", "specialist", "specialists", "assistant", "assistants",
+    "teammate", "teammates", "workspace", "workspaces",
+)
+
+_CONSTRUCTION_OPENER = re.compile(
+    rf"^(?:please\s+)?(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?"
+    rf"(?:{_CONSTRUCTION_VERBS}|write|draft|compose|write\s+up|put\s+together)\s+"
+    r"(?:me\s+|us\s+|for\s+me\s+)?(?:(?:an?|the|one|some|another|my|our)\s+)?"
+    r"(?P<rest>\S.*)$",
+    re.IGNORECASE,
+)
+# "<kind> titled|called|named <title>" - the naming clause, any kind, any title.
+_NAMING_CLAUSE = re.compile(
+    r"^(?P<kind>.*?)\b(?:titled|entitled|called|named)\s+(?P<title>\S.*)$",
+    re.IGNORECASE,
+)
+# "<kind> with|containing|including: <items>" - the content clause, introduced
+# by a connective and a colon, and the bare-colon form ("a checklist: a; b").
+_CONTENT_CLAUSE = re.compile(
+    r"^(?P<head>.*?)(?:\s*,)?\s*(?:with|containing|holding|including|listing|"
+    r"that\s+contains|which\s+contains|that\s+lists|which\s+lists)"
+    # "with the sections:", "containing the following:" - a word or two naming
+    # what the list is, between the connective and the colon. Non-greedy, so
+    # the shortest reading wins and the title stays out of it.
+    r"(?:\s+[\w'’-]+){0,3}?\s*:\s*(?P<body>\S.*)$",
+    re.IGNORECASE,
+)
+_BARE_CONTENT_CLAUSE = re.compile(r"^(?P<head>[^:]*?)\s*:\s*(?P<body>\S.*)$")
+# How a person separates the entries of a list they typed inline. A semicolon
+# is unambiguous; a newline is what a pasted list carries.
+_CONTENT_ITEM_SEPARATOR = re.compile(r"\s*[;\n]\s*|\s+•\s*")
+# "Monday - the first item", "goal: ship", "part one -- the opening": an entry that names
+# its own heading. Every dash variant, and the colon, are the same convention.
+_ITEM_HEADING = re.compile(r"^(?P<heading>[^:–—-]{1,60}?)\s*(?::|–|—|--|-)\s*(?P<body>\S.*)$")
+# A kind is a short noun phrase. Longer than this and the match is a sentence
+# that merely began with a production verb, not a kind at all.
+_KIND_WORD_LIMIT = 4
+
+
+@dataclass(frozen=True)
+class NamedConstruction:
+    """A request to construct one named and/or filled thing, read off the
+    request's own shape.
+
+    ``kind`` is the person's own word for what to make, verbatim and
+    unvalidated - this type carries it rather than judging it, so a kind
+    nobody has ever typed before survives the trip to whichever capability
+    owns it. ``title`` is "" when the request named no title, and ``items``
+    is empty when it listed no content; at least one of the two is always
+    present, because a request carrying neither is not this shape (see
+    ``named_construction_request``).
+    """
+
+    kind: str
+    title: str
+    items: tuple[str, ...]
+
+    @property
+    def kind_words(self) -> frozenset[str]:
+        return frozenset(re.findall(r"[\w'’-]+", self.kind.lower()))
+
+    def kind_owned_by(self, nouns: "Sequence[str]") -> bool:
+        """Whether some other capability already owns this kind's noun."""
+        return bool(self.kind_words & {n.lower() for n in nouns})
+
+
+def _construction_items(body: str) -> tuple[str, ...]:
+    """The entries of an inline list, in the order they were typed."""
+    parts = (p.strip(" ,.;\t") for p in _CONTENT_ITEM_SEPARATOR.split(str(body or "")))
+    return tuple(p for p in parts if p)
+
+
+def named_construction_request(text: str) -> "NamedConstruction | None":
+    """The ``NamedConstruction`` this request is, or ``None`` when it is not
+    that shape at all.
+
+    Evidence, never vocabulary: a production verb in command position, a
+    short kind phrase, and a naming clause and/or an inline content list. A
+    request that names nothing and lists nothing ("create a meeting on
+    Friday at 3pm") is deliberately not this shape - it asks for a time, not
+    for content, and the capability that keeps times must keep it.
+    """
+    raw = " ".join(str(text or "").split())
+    if not raw or raw.rstrip().endswith("?"):
+        return None
+    opener = _CONSTRUCTION_OPENER.match(_strip_vocative(raw).strip())
+    if opener is None:
+        return None
+
+    rest = opener.group("rest").strip()
+    items: tuple[str, ...] = ()
+    content = _CONTENT_CLAUSE.match(rest)
+    if content is not None:
+        rest, items = content.group("head").strip(), _construction_items(content.group("body"))
+    else:
+        bare = _BARE_CONTENT_CLAUSE.match(rest)
+        if bare is not None:
+            rest, items = bare.group("head").strip(), _construction_items(bare.group("body"))
+
+    title = ""
+    naming = _NAMING_CLAUSE.match(rest)
+    if naming is not None:
+        rest = naming.group("kind").strip()
+        title = naming.group("title").strip(" ,.;:'\"‘’“”")
+
+    kind = rest.strip(" ,.;:-")
+    # A title alone is weak evidence on its own, so a request that named
+    # nothing needs a real list of at least two entries to be read as one
+    # thing being filled in rather than a single remark that happens to
+    # carry a colon ("make a note: buy milk" belongs to whoever keeps notes).
+    if not title and len(items) < 2:
+        return None
+    if not kind or len(kind.split()) > _KIND_WORD_LIMIT:
+        return None
+    if not re.search(r"[A-Za-z]", kind):
+        return None
+    return NamedConstruction(kind=kind, title=title, items=items)
+
+
+def structured_construction_request(text: str) -> "NamedConstruction | None":
+    """``named_construction_request`` narrowed to the kinds no other
+    capability owns - the open remainder that is a structured *document*.
+
+    The deferrals are the sibling capabilities' own claims, asked directly
+    so this rule needs no second copy of their vocabulary, plus the three
+    object-noun sets declared above for the surfaces that are not Manager
+    capabilities at all. ``calendar_intent`` is deliberately never asked:
+    it already defers here, and a rule cannot be both sides of its own
+    boundary - the scheduling nouns above are how this side states it.
+    """
+    construction = named_construction_request(text)
+    if construction is None:
+        return None
+    if construction.kind_owned_by(
+        _SCHEDULING_OBJECT_NOUNS + _TASK_OBJECT_NOUNS + _AGENT_OBJECT_NOUNS
+    ):
+        return None
+    task = Task(text)
+    if (
+        create_diagram_intent(task) or create_3d_model_intent(task)
+        or media_production_intent(task)
+    ):
+        return None
+    return construction
+
+
+# The heading a plain list of entries is kept under when the person gave the
+# entries no headings of their own. Named, because an addition to such a
+# document has to recognise it to extend the same list rather than inventing
+# a second one - see ``document_with_additions``.
+_COLLECTED_ITEMS_HEADING = "Contents"
+
+
+def document_from_construction(construction: NamedConstruction) -> "DocumentContent | None":
+    """Real, structured ``DocumentContent`` from what the request already
+    carried - no model consulted, so this path works in Half Brain.
+
+    An entry that names its own heading ("Monday - the first item") becomes a
+    section with that heading; entries that do not are kept together, in
+    order, under one honest heading rather than being given invented ones.
+    ``None`` when the request carried a name but no content at all - honest
+    absence, and the caller then asks the Brain to organize it.
+    """
+    from src.services.artifacts.models import DocumentContent, DocumentSection
+
+    title = construction.title or construction.kind.strip().capitalize()
+    if not title.strip() or not construction.items:
+        return None
+
+    headed = [(m.group("heading").strip(), m.group("body").strip())
+              for m in (_ITEM_HEADING.match(i) for i in construction.items) if m is not None]
+    sections: list[DocumentSection] = []
+    try:
+        if len(headed) == len(construction.items):
+            sections = [DocumentSection(heading=h, body=b) for h, b in headed]
+        else:
+            sections = [DocumentSection(heading=_COLLECTED_ITEMS_HEADING, body="\n".join(construction.items))]
+    except ValueError:
+        return None
+    if not sections:
+        return None
+    try:
+        return DocumentContent(title=title, sections=tuple(sections))
+    except ValueError:
+        return None
+
+
+# An additive revision names what to add and nothing else, so it needs no
+# reasoning to apply - the counterpart of document_from_construction for a
+# document that already exists.
+_ADDITIVE_CHANGE = re.compile(r"^(?:add|include|append|also\s+add)\b\s*(?P<added>\S.*)$", re.IGNORECASE)
+
+
+def document_with_additions(base: "DocumentContent", change: str) -> "DocumentContent | None":
+    """``base`` with the entries ``change`` asks to add appended, in order -
+    or ``None`` when the change is not purely additive, or names entries
+    without their own headings, in which case the caller asks the Brain to
+    compose the revision instead. Nothing existing is ever rewritten here.
+    """
+    from src.services.artifacts.models import DocumentContent, DocumentSection
+
+    additive = _ADDITIVE_CHANGE.match(" ".join(str(change or "").split()))
+    if additive is None:
+        return None
+    items = _construction_items(additive.group("added"))
+    if not items:
+        return None
+    matches = [_ITEM_HEADING.match(item) for item in items]
+    if not all(matches):
+        # Entries with no headings of their own extend the list this document
+        # already keeps them in, when that is the shape it has - the same
+        # collection ``document_from_construction`` builds. A document of real
+        # headed sections is never guessed at this way: it goes to the Brain.
+        last = base.sections[-1] if base.sections else None
+        if last is None or last.heading != _COLLECTED_ITEMS_HEADING or any(matches):
+            return None
+        try:
+            extended = DocumentSection(heading=last.heading, body="\n".join((last.body, *items)))
+        except ValueError:
+            return None
+        return DocumentContent(title=base.title, sections=base.sections[:-1] + (extended,))
+
+    added: list[DocumentSection] = []
+    for headed in matches:
+        try:
+            added.append(DocumentSection(heading=headed.group("heading").strip(), body=headed.group("body").strip()))
+        except ValueError:
+            return None
+    try:
+        return DocumentContent(title=base.title, sections=base.sections + tuple(added))
+    except ValueError:
+        return None
+
+
+# A three-dimensional request belongs to create_3d_model, never to a flat image.
+_THREE_DIMENSIONAL = r"\b(?:3d|3-d|three[\s-]dimensional)\b"
+
+
 def create_diagram_intent(task: Task, participants: Sequence[str] = ()) -> bool:
+    if re.search(_THREE_DIMENSIONAL, str(task.description or ""), re.IGNORECASE):
+        return False
     if _marker_present(task.description, _DIAGRAM_MARKERS):
+        return True
+    if _construction_subject(task.description, nouns=_DIAGRAM_NOUNS) is not None:
         return True
     return _reordered_subject(task.description, nouns=_DIAGRAM_NOUNS) is not None
 
@@ -4045,8 +5264,11 @@ def create_diagram(request: CapabilityRequest) -> TaskResult:
             f"save it as a real artifact yet. Currently equipped: {equipped}.",
         )
 
-    remainder = _after_marker(request.task.description, _DIAGRAM_MARKERS) or \
-        (_reordered_subject(request.task.description, nouns=_DIAGRAM_NOUNS) or "")
+    remainder = subject_without_connective(
+        _after_marker(request.task.description, _DIAGRAM_MARKERS)
+        or _construction_subject(request.task.description, nouns=_DIAGRAM_NOUNS)
+        or _reordered_subject(request.task.description, nouns=_DIAGRAM_NOUNS) or ""
+    )
     if len(remainder) >= _DIAGRAM_PROMPT_MIN_CHARS:
         prompt = remainder
     else:
@@ -4090,9 +5312,23 @@ def create_diagram(request: CapabilityRequest) -> TaskResult:
             request.task, request.own_name, f"I couldn't save that image as a real artifact: {outcome.error}",
         )
 
-    return TaskResult.success(
-        request.task, request.own_name, outcome.output,
-        payload={"handled_by": "create_diagram"},
+    return _visual_result(request, outcome.output, "create_diagram")
+
+
+def _visual_result(request: CapabilityRequest, output: str, handled_by: str) -> TaskResult:
+    """A visual artifact is delivered only when a real image was produced.
+    The description is always kept (a later revision renders it once an
+    engine is configured), but reporting the request *completed* without an
+    image would be a false completion (Phase 11 final gate) - so it is an
+    honest failure that says what was kept and why no image exists."""
+    from src.agents.tools.artifact_production import NO_RENDITION_MARKER
+
+    if NO_RENDITION_MARKER not in output:
+        return TaskResult.success(request.task, request.own_name, output, payload={"handled_by": handled_by})
+    return TaskResult.failure(
+        request.task, request.own_name,
+        "No image was produced, so the diagram is not done. I kept what it should show as a real artifact, "
+        "so it can be drawn as soon as an image engine is configured (revise it then). " + output,
     )
 
 
@@ -4111,7 +5347,10 @@ CREATE_DIAGRAM = ManagerCapability(
 
 
 def revise_diagram_intent(task: Task, participants: Sequence[str] = ()) -> bool:
-    return _marker_present(task.description, _REVISE_DIAGRAM_MARKERS)
+    return (
+        _marker_present(task.description, _REVISE_DIAGRAM_MARKERS)
+        or _named_revision(task.description, _DIAGRAM_NOUNS) is not None
+    )
 
 
 def revise_diagram(request: CapabilityRequest) -> TaskResult:
@@ -4131,8 +5370,14 @@ def revise_diagram(request: CapabilityRequest) -> TaskResult:
 
     text = request.task.description
     match = _ARTIFACT_ID_PATTERN.search(text)
+    named = _named_revision(text, _DIAGRAM_NOUNS)
     if match:
         artifact_id = match.group(1)
+    elif named is not None:
+        # Named by its title: that one, never merely the most recent.
+        artifact_id, why = _find_titled(request, "image", named[0])
+        if artifact_id is None:
+            return TaskResult.failure(request.task, request.own_name, f"I couldn't find that diagram to revise: {why}.")
     else:
         lookup = request.tools.invoke(
             "artifact_production", {"operation": "find_latest", "content": "image"}
@@ -4151,7 +5396,7 @@ def revise_diagram(request: CapabilityRequest) -> TaskResult:
             request.task, request.own_name, f"I couldn't find that diagram to revise: {current.error}",
         )
 
-    remainder = _after_marker(text, _REVISE_DIAGRAM_MARKERS)
+    remainder = named[1] if named is not None and match is None else _after_marker(text, _REVISE_DIAGRAM_MARKERS)
     # An explicit "artifact <id>" reference is evidence for *which*
     # artifact, never part of *what it should now show* - stripped out
     # here so a revision request naming an id does not leak that id
@@ -4202,10 +5447,7 @@ def revise_diagram(request: CapabilityRequest) -> TaskResult:
             request.task, request.own_name, f"I composed the revision but couldn't save it: {outcome.error}",
         )
 
-    return TaskResult.success(
-        request.task, request.own_name, outcome.output,
-        payload={"handled_by": "revise_diagram"},
-    )
+    return _visual_result(request, outcome.output, "revise_diagram")
 
 
 REVISE_DIAGRAM = ManagerCapability(
@@ -4352,6 +5594,14 @@ def media_production_intent(task: Task, participants: Sequence[str] = ()) -> boo
         or _MEDIA_GENERATE_VIDEO_PATTERN.match(working)
     ):
         return True
+    # A production verb plus this operation's own noun - the shared
+    # construction shape, for the asks the verb-anchored patterns above cannot
+    # reach because the verb is generic and the noun carries the meaning
+    # ("create a narration of X", "make an audio narration saying hello").
+    # Found by the Phase 11 closure sweep; the same generalization
+    # ``create_diagram_intent`` and ``document_generation_intent`` already use.
+    if _construction_subject(working, nouns=_MEDIA_NARRATE_NOUNS) is not None:
+        return True
     return _media_reordered_operation(working) is not None
 
 
@@ -4364,12 +5614,42 @@ _MEDIA_REORDERED_GENERATE_VERB = re.compile(r"\b(?:generate|create|produce|make)
 _MEDIA_VIDEO_ISH_NOUNS = tuple(dict.fromkeys(_MEDIA_COMPOSE_NOUNS + _MEDIA_GENERATE_VIDEO_NOUNS))
 
 
+# "make a narration that says <words>", "record a voiceover: <words>" - a
+# construction request that carries the exact words to be spoken (Phase 11
+# closure sweep: unclaimed, and answered as open conversation). A narration
+# "of"/"about" a topic is not this shape: its words still have to be written,
+# which is the Brain's work through the objective loop.
+_NARRATION_WITH_WORDS = re.compile(
+    rf"^(?:please\s+)?(?:can\s+you\s+|could\s+you\s+)?(?:{_CONSTRUCTION_VERBS})\s+(?:me\s+)?(?:an?\s+)?"
+    r"(?:short\s+|quick\s+|brief\s+)?(?:narration|voiceover|voice-over)"
+    r"(?:\s+(?:that\s+says|saying|which\s+says)\s+|\s*:\s*)(?P<words>.+)$",
+    re.IGNORECASE,
+)
+# "narrate this: <words>" / "narrate the following - <words>": the words
+# after the request itself.
+_NARRATE_LEAD_IN = re.compile(r"^\s*(?:this|that|the\s+following)?\s*[:\-]?\s*", re.IGNORECASE)
+
+
+def _narration_text(working: str) -> str:
+    """What a narration request asks to be *said* - never the request itself.
+    "narrate this: welcome" says "welcome", not "narrate this: welcome".
+    Anything this cannot separate is passed through unchanged, as before."""
+    with_words = _NARRATION_WITH_WORDS.match(working)
+    if with_words is not None:
+        said = with_words.group("words")
+    else:
+        forward = _MEDIA_NARRATE_PATTERN.match(working)
+        said = _NARRATE_LEAD_IN.sub("", working[forward.end():], count=1) if forward is not None else ""
+    said = said.strip().strip("\"'“”‘’").strip()
+    return said or working
+
+
 def _media_reordered_operation(working: str) -> "str | None":
     """Which of the four operations a reordered request names, or None -
     the shared lookup ``media_production_intent`` and ``media_production``
     both use, so intent detection and operation selection can never
     disagree about the same request."""
-    if _reordered_subject(working, nouns=_MEDIA_NARRATE_NOUNS) is not None:
+    if _reordered_subject(working, nouns=_MEDIA_NARRATE_NOUNS) is not None or _NARRATION_WITH_WORDS.match(working):
         return "narrate"
     if _reordered_subject(working, nouns=_MEDIA_ILLUSTRATE_NOUNS) is not None:
         return "illustrate"
@@ -4428,7 +5708,8 @@ def media_production(request: CapabilityRequest) -> TaskResult:
     # would have spoken the address aloud. One function, two readings of the
     # same text - now one.
     outcome = request.tools.invoke(
-        "media_production", {"operation": operation, "content": working}
+        "media_production",
+        {"operation": operation, "content": _narration_text(working) if operation == "narrate" else working},
     )
     if not outcome.ok:
         return TaskResult.failure(
@@ -4777,7 +6058,18 @@ def record_this(request: CapabilityRequest) -> TaskResult:
 
 
 RECORD_THIS = ManagerCapability(
+    # Phase 11 closure: every agent's own, like remembering and the recording
+    # session itself. It writes only to the recording agent's own memory, and
+    # the shipped email specialist already did it with no grant at all - so a
+    # "grant"/"revoke" of it in the Control Center was shown and changed
+    # nothing. Declared as what it is, the Control Center says so truthfully.
+    authority="every_agent",
     name="record_this",
+    self_contained=True,
+    self_contained_reason=(
+        "this Manager's own recording session"
+    ),
+    completes_request=True,
     # Word overlap alone would collide "record" with ordinary requests
     # ("keep a record of...", "that's a new personal record") the same
     # way invitation_intent's own docstring already explains for "join" -
@@ -4849,6 +6141,11 @@ START_RECORDING = ManagerCapability(
     authority='every_agent',
     own_path="CognitiveAgent.bind_recording - the agent's own recording session",
     name="start_recording",
+    self_contained=True,
+    self_contained_reason=(
+        "this Manager's own recording session"
+    ),
+    completes_request=True,
     capabilities=frozenset({"recording", "audio"}),
     handle=start_recording,
     description="Opens a real recording session for an explicit 'start recording [for X]' request.",
@@ -4898,6 +6195,11 @@ STOP_RECORDING = ManagerCapability(
     authority='every_agent',
     own_path="CognitiveAgent.bind_recording - the agent's own recording session",
     name="stop_recording",
+    self_contained=True,
+    self_contained_reason=(
+        "this Manager's own recording session"
+    ),
+    completes_request=True,
     capabilities=frozenset({"recording", "audio"}),
     handle=stop_recording,
     description="Signals the currently-active recording session to stop.",
@@ -4930,6 +6232,11 @@ CANCEL_RECORDING = ManagerCapability(
     authority='every_agent',
     own_path="CognitiveAgent.bind_recording - the agent's own recording session",
     name="cancel_recording",
+    self_contained=True,
+    self_contained_reason=(
+        "this Manager's own recording session"
+    ),
+    completes_request=True,
     capabilities=frozenset({"recording", "audio"}),
     handle=cancel_recording,
     description="Discards the in-progress recording session without saving it.",
@@ -4995,6 +6302,11 @@ LIST_RECORDINGS = ManagerCapability(
     authority='every_agent',
     own_path="CognitiveAgent.bind_recording - the agent's own recording session",
     name="list_recordings",
+    self_contained=True,
+    self_contained_reason=(
+        "the state of this Manager's own recording session"
+    ),
+    completes_request=True,
     capabilities=frozenset({"recording", "audio"}),
     handle=list_recordings,
     description="Lists saved recordings, or answers whether one matching a topic exists.",
@@ -5135,6 +6447,11 @@ CREATE_TASK = ManagerCapability(
     authority='every_agent',
     own_path="CognitiveAgent.workspace_task_reply - the agent's own task board",
     name="create_task",
+    self_contained=True,
+    self_contained_reason=(
+        "the person's own task board, which this Manager governs"
+    ),
+    completes_request=True,
     # claims decides this, not word overlap - "task" alone would collide
     # with ordinary speech ("that was quite a task") the same way
     # "record" already does for RECORD_THIS above.
@@ -5191,6 +6508,11 @@ LIST_TASKS = ManagerCapability(
     authority='every_agent',
     own_path="CognitiveAgent.workspace_task_reply - the agent's own task board",
     name="list_tasks",
+    self_contained=True,
+    self_contained_reason=(
+        "the person's own task board, which this Manager governs"
+    ),
+    completes_request=True,
     capabilities=frozenset({"task", "tasks"}),
     handle=list_tasks,
     description="Lists pending tasks, or answers whether a specific one exists.",
@@ -5281,6 +6603,11 @@ COMPLETE_TASK = ManagerCapability(
     authority='every_agent',
     own_path="CognitiveAgent.workspace_task_reply - the agent's own task board",
     name="complete_task",
+    self_contained=True,
+    self_contained_reason=(
+        "the person's own task board, which this Manager governs"
+    ),
+    completes_request=True,
     capabilities=frozenset({"task", "tasks", "done", "finished", "completed"}),
     handle=complete_task,
     description="Marks a pending task complete ('complete the task ...', 'I finished ...').",
@@ -5354,6 +6681,11 @@ REOPEN_TASK = ManagerCapability(
     authority='every_agent',
     own_path="CognitiveAgent.workspace_task_reply - the agent's own task board",
     name="reopen_task",
+    self_contained=True,
+    self_contained_reason=(
+        "the person's own task board, which this Manager governs"
+    ),
+    completes_request=True,
     capabilities=frozenset({"task", "tasks"}),
     handle=reopen_task,
     description="Reopens a completed task ('reopen the task ...', 'make the task ... incomplete').",
@@ -5421,6 +6753,11 @@ UPDATE_TASK = ManagerCapability(
     authority='every_agent',
     own_path="CognitiveAgent.workspace_task_reply - the agent's own task board",
     name="update_task",
+    self_contained=True,
+    self_contained_reason=(
+        "the person's own task board, which this Manager governs"
+    ),
+    completes_request=True,
     capabilities=frozenset({"task", "tasks"}),
     handle=update_task,
     description="Renames a pending task ('change the task X to Y').",
@@ -5564,6 +6901,11 @@ TEMPORAL_DERIVATION = ManagerCapability(
     authority='manager',
     authority_reason="works on the person's own calendar, commitments and records kept in the Manager's memory - run for a specialist it would start a second, disconnected copy in that specialist's memory",
     name="temporal_derivation",
+    self_contained=True,
+    self_contained_reason=(
+        "arithmetic over dated facts in this Manager's memory and the clock"
+    ),
+    completes_request=True,
     capabilities=frozenset({"age", "birthday", "graduate", "graduation", "countdown"}),
     handle=temporal_derivation,
     description="Answers age/birthday/completion questions by computing from a stored date, never a stored answer.",
@@ -5773,6 +7115,11 @@ def current_datetime(request: CapabilityRequest) -> TaskResult:
 CURRENT_DATETIME = ManagerCapability(
     authority='every_agent',
     name="current_datetime",
+    self_contained=True,
+    self_contained_reason=(
+        "the clock - deterministic, and nothing a domain expert answers better"
+    ),
+    completes_request=True,
     capabilities=frozenset({"date", "day", "month", "year", "time", "hour", "minute", "clock", "calendar", "today"}),
     handle=current_datetime,
     description="Answers what the current day/date/month/year/time is, from the real calendar - never the Brain.",
@@ -6018,6 +7365,11 @@ MILESTONE_RECOGNITION = ManagerCapability(
     authority='manager',
     authority_reason="works on the person's own calendar, commitments and records kept in the Manager's memory - run for a specialist it would start a second, disconnected copy in that specialist's memory",
     name="milestone_recognition",
+    self_contained=True,
+    self_contained_reason=(
+        "a preference and a record this Manager holds"
+    ),
+    completes_request=True,
     capabilities=frozenset({"milestone", "milestones"}),
     handle=milestone_recognition,
     description="Recognises a personal achievement and, per governed preference, confirms or stores it as a structured milestone.",
@@ -6354,6 +7706,10 @@ def communication(request: CapabilityRequest) -> TaskResult:
 
 COMMUNICATION = ManagerCapability(
     name="communication",
+    self_contained=True,
+    self_contained_reason=(
+        "the exact Stage 15 case: a request to read or send a message is this Manager's however incidentally a specialist's own domain word overlaps it"
+    ),
     # Word overlap cannot tell "call Mom" from "call this function" or
     # "message" from an ordinary noun - claims below is what actually
     # decides this, so these words only need to exist, the same "claims
@@ -6362,6 +7718,7 @@ COMMUNICATION = ManagerCapability(
         {"call", "calling", "text", "message", "messages", "reply", "phone", "dial"}
     ),
     handle=communication,
+    carries_material=True,
     description=(
         "Reads recent messages/calls, sends a message, or places a call "
         "through a governed communication connection - never a contact "
@@ -6558,6 +7915,11 @@ PERSONAL_RECURRING_EVENTS = ManagerCapability(
     authority='manager',
     authority_reason="works on the person's own calendar, commitments and records kept in the Manager's memory - run for a specialist it would start a second, disconnected copy in that specialist's memory",
     name="personal_recurring_events",
+    self_contained=True,
+    self_contained_reason=(
+        "dated personal facts in this Manager's own memory"
+    ),
+    completes_request=True,
     # Word overlap cannot tell "my mom's birthday is March 24" from an
     # ordinary sentence containing "birthday" - claims below is what
     # actually decides this, the same "claims decides, not overlap" rule
@@ -7145,9 +8507,22 @@ def connected_action(request: CapabilityRequest) -> TaskResult:
 
     operations = connection.supported_operations
     if not operations:
+        # Phase 11 closure: said as what it is. "The 'null' connection is
+        # configured" read as though something real had been set up. A
+        # connection with no actions is the honest absence of one; the ones
+        # that can act, if any, are named so the person can ask for them.
+        able = sorted(
+            name for name in resolver.names
+            if name != connection.name and getattr(resolver.get(name), "supported_operations", ())
+        )
         return TaskResult.failure(
             request.task, request.own_name,
-            f"The '{connection.name}' connection is configured but offers no supported actions yet.",
+            (
+                f"No connection that can act is set up for that - '{connection.name}' offers no actions. "
+                + (f"Connections that can: {', '.join(able)} - name the one you mean. " if able else "")
+                + "Add one in the Control Center ('services <name> discover <url>', or "
+                "'connections <service> connect <account-id> <credential>')."
+            ),
         )
 
     operation, ambiguous = _select_operation(request.task, operations, connection)
@@ -7206,7 +8581,11 @@ def connected_action(request: CapabilityRequest) -> TaskResult:
         if observed is not None:
             for name, value in (observed(operation, request.task.description) or {}).items():
                 available.setdefault(name, value)
-        missing = [p.name for p in parameters if p.required and p.name not in available]
+        # A declared parameter keeps its service's own spelling ("trackId");
+        # a value stated in conversation arrives lower-cased ("trackid=...").
+        # Matched without regard to case, sent under the declared name.
+        supplied = {str(name).lower(): value for name, value in available.items()}
+        missing = [p.name for p in parameters if p.required and p.name.lower() not in supplied]
         if missing:
             return TaskResult.failure(
                 request.task, request.own_name,
@@ -7214,7 +8593,7 @@ def connected_action(request: CapabilityRequest) -> TaskResult:
                 "I don't have yet - either tell me the value(s) directly, or complete "
                 "whatever earlier step would provide them.",
             )
-        params = {p.name: available[p.name] for p in parameters if p.name in available}
+        params = {p.name: supplied[p.name.lower()] for p in parameters if p.name.lower() in supplied}
 
     is_consequential = connection.requires_confirmation_for(operation)
 
@@ -7247,6 +8626,10 @@ def connected_action(request: CapabilityRequest) -> TaskResult:
 
 CONNECTED_ACTION = ManagerCapability(
     name="connected_action",
+    self_contained=True,
+    self_contained_reason=(
+        "reaches a connection this Manager itself is equipped with"
+    ),
     # Word overlap cannot tell "check my connected account" from an
     # ordinary sentence containing "connection" - claims below is what
     # actually decides this, the same "claims decides, not overlap"
@@ -7337,6 +8720,39 @@ KNOWLEDGE_QUESTION_MARKERS: tuple[str, ...] = (
     "why did", "why was", "why were",
     "how did", "when did", "when was", "when were",
 )
+# Deliberately NOT here, and checked by
+# tests/test_stage18_knowledge_and_learning.py: "teach"/"explain"/"discuss".
+# Those are OPEN_CONVERSATION's own declared words - being taught something is
+# a conversation with the agent's own Brain, not a settled-knowledge lookup -
+# and every marker above is an interrogative opener rather than a verb, which
+# that test also enforces. The Phase 11 closure sweep tried adding them and
+# was right to be reverted: "Teach me how a car engine works" belongs where it
+# already went.
+
+# "what is photosynthesis?", "who are the Medici?" - the plain definitional
+# question, which no phrase list can enumerate because the phrase IS the
+# subject. Shape-only, and narrowed by two things it must not be: a question
+# about the person or about Alfred ("what is my goal?", "what are your
+# capabilities?"), which belongs to whoever holds that, and a question whose
+# subject is only a pointing word ("what is this?"), which names nothing.
+_DEFINITIONAL_QUESTION = re.compile(
+    r"^(?:so\s+|and\s+|ok(?:ay)?,?\s+)?(?:what|who)\s+(?:is|are|was|were)\s+"
+    r"(?:a|an|the)?\s*(?P<subject>[^?]{2,80})\s*\??\s*$",
+    re.IGNORECASE,
+)
+_SELF_OR_AGENT_REFERENCE = re.compile(
+    r"\b(?:my|mine|me|i|our|ours|we|us|your|yours|you)\b", re.IGNORECASE,
+)
+
+
+def definitional_question_intent(text: str) -> bool:
+    match = _DEFINITIONAL_QUESTION.match(" ".join(str(text or "").split()))
+    if match is None:
+        return False
+    subject = match.group("subject").strip(" ,.;:")
+    if _SELF_OR_AGENT_REFERENCE.search(subject):
+        return False
+    return bool(tokenize(subject) - _QUERY_STOPWORDS)
 
 # Phase 3 fix, found live: a person who just handed Alfred a document and
 # says "read this document and explain it", "summarize this document",
@@ -7371,6 +8787,24 @@ DOCUMENT_REFERENCE_MARKERS: tuple[str, ...] = (
     "this pdf", "in this pdf", "the other document", "the other pdf", "the other file",
     "summarize this", "summarise this",
 )
+
+# The same reference, to the person's own body of material rather than to one
+# file they just handed over - "what do my documents say about the project
+# history?", "what does my documentation say about deployment?". A pattern
+# rather than more entries above, because the possessive and the format noun
+# are the whole signal and neither of them is a subject: enumerating
+# "my documents"/"my documentation"/"my files"/"my notes" would just be the
+# closed-list mistake again one level down.
+_OWN_CORPUS_REFERENCE = re.compile(
+    r"\b(?:my|our)\s+(?:own\s+)?"
+    r"(?:documents?|documentation|docs?|files?|notes?|papers?|records?|"
+    r"spreadsheets?|presentations?|slides?|pdfs?)\b",
+    re.IGNORECASE,
+)
+
+
+def own_corpus_reference_intent(text: str) -> bool:
+    return bool(_OWN_CORPUS_REFERENCE.search(str(text or "")))
 
 
 # Natural Conversation fix: "what were we talking about", not "what were
@@ -7430,6 +8864,10 @@ def knowledge_intent(task: Task, participants: Sequence[str] = ()) -> bool:
     if not (
         _marker_present(text, KNOWLEDGE_QUESTION_MARKERS)
         or _marker_present(text, DOCUMENT_REFERENCE_MARKERS)
+        # The person's own material, and the plain definitional question - see
+        # each predicate's own note for why neither can be a phrase list.
+        or own_corpus_reference_intent(text)
+        or definitional_question_intent(text)
         # A question about a recording is a question about its words - its
         # transcript, answered like a document (2026-09-21). Only a question:
         # "give me captions for this recording" asks for something to be done
@@ -7453,6 +8891,13 @@ def knowledge_intent(task: Task, participants: Sequence[str] = ()) -> bool:
     if capture_intent(text):
         return False
     if _marker_present(text, CONVERSATION_CONTINUITY_MARKERS):
+        return False
+    # "read my notes to me" names the person's own material, which
+    # ``own_corpus_reference_intent`` above recognises - but reading back what
+    # Alfred was asked to keep is READ_BACK's own work, and it sorts later than
+    # "knowledge". A seventh deferral of the same kind as the six above, added
+    # when the own-corpus reading was generalized (Phase 11 closure).
+    if read_back_intent(task, participants):
         return False
     # Agent-autonomous voice selection checkpoint, the identical
     # reasoning general_assistance_intent's own yield-checks already
@@ -7543,10 +8988,25 @@ def quoted_from_own_material(
     """
     if evidence.is_empty or not _asks_to_look_something_up(request.task.description):
         return None
-    shown = "\n".join(f"  - {note}" for note in evidence.notes[:_QUOTED_PASSAGE_LIMIT])
+    # Phase 11 closure: this answer says the passages were matched on the
+    # question's words, so only passages that really share one are quoted.
+    # Evidence gathering keeps a "most recent" fallback when nothing overlaps
+    # (right for a Brain, which reasons over background), and without this
+    # "what is the kitchen speaker doing?" was answered with an unrelated
+    # stored fact presented as a match. A passage's own label ("Personal
+    # context:", "From your own documents:") is not its content, so it never
+    # counts as a match.
+    asked = tokenize(request.task.description) - _QUERY_STOPWORDS
+    matched = tuple(
+        note for note in evidence.notes
+        if tokenize(note.split(": ", 1)[1] if ": " in note else note) & asked
+    )
+    if not matched:
+        return None
+    shown = "\n".join(f"  - {note}" for note in matched[:_QUOTED_PASSAGE_LIMIT])
     more = (
-        f"\n  ...and {len(evidence.notes) - _QUOTED_PASSAGE_LIMIT} more passage(s)."
-        if len(evidence.notes) > _QUOTED_PASSAGE_LIMIT else ""
+        f"\n  ...and {len(matched) - _QUOTED_PASSAGE_LIMIT} more passage(s)."
+        if len(matched) > _QUOTED_PASSAGE_LIMIT else ""
     )
     return TaskResult.success(
         request.task,
@@ -8510,11 +9970,14 @@ def coach(request: CapabilityRequest) -> TaskResult:
 # ---------------------------------------------------------------------------
 
 _LANGUAGE_WORD = r"(?P<language>[A-Za-z][A-Za-z\- ]{1,30}?)"
+# The phrase runs to the *last* "to"/"in" (Phase 11 closure: a lazy phrase
+# stopped at the first, so "translate add a task to buy milk into Spanish" was
+# asked for a language called "buy milk into Spanish").
 _TRANSLATE_PATTERNS = (
-    re.compile(rf"^\s*(?:please\s+)?translate\s+(?P<phrase>.+?)\s+(?:in)?to\s+{_LANGUAGE_WORD}\s*[?.!]*\s*$", re.IGNORECASE),
-    re.compile(rf"^\s*how\s+(?:do|would)\s+(?:you|i)\s+say\s+(?P<phrase>.+?)\s+in\s+{_LANGUAGE_WORD}\s*[?.!]*\s*$", re.IGNORECASE),
-    re.compile(rf"^\s*what(?:'s|\s+is)\s+(?P<phrase>.+?)\s+in\s+{_LANGUAGE_WORD}\s*[?.!]*\s*$", re.IGNORECASE),
-    re.compile(rf"^\s*say\s+(?P<phrase>.+?)\s+in\s+{_LANGUAGE_WORD}\s*[?.!]*\s*$", re.IGNORECASE),
+    re.compile(rf"^\s*(?:please\s+)?translate\s+(?P<phrase>.+)\s+(?:in)?to\s+{_LANGUAGE_WORD}\s*[?.!]*\s*$", re.IGNORECASE),
+    re.compile(rf"^\s*how\s+(?:do|would)\s+(?:you|i)\s+say\s+(?P<phrase>.+)\s+in\s+{_LANGUAGE_WORD}\s*[?.!]*\s*$", re.IGNORECASE),
+    re.compile(rf"^\s*what(?:'s|\s+is)\s+(?P<phrase>.+)\s+in\s+{_LANGUAGE_WORD}\s*[?.!]*\s*$", re.IGNORECASE),
+    re.compile(rf"^\s*say\s+(?P<phrase>.+)\s+in\s+{_LANGUAGE_WORD}\s*[?.!]*\s*$", re.IGNORECASE),
 )
 # "What's the weather in Paris" names a place, not a language; a translation
 # request's target is a language word, never a subject list - so the phrase
@@ -8545,19 +10008,38 @@ def translation_request(text: str) -> "tuple[str, str] | None":
     (no leading "<name>," to remove), and nothing about the anchoring that
     keeps them negative changes.
     """
-    working = _strip_vocative(text).strip()
-    for index, pattern in enumerate(_TRANSLATE_PATTERNS):
-        match = pattern.match(working)
-        if match is None:
-            continue
-        phrase = match.group("phrase").strip()
-        language = " ".join(match.group("language").split()).strip()
-        if index == 2 and not _QUOTED.match(phrase):
-            continue
-        phrase = phrase.strip("'\"\u2018\u2019\u201c\u201d ")
-        if phrase and language:
-            return phrase, language
+    # Read as said first, and only then without a leading "Name, " address -
+    # the stripper is shape-based and, on its own, also swallowed an opening
+    # "translate good morning, " as if it were a name (Phase 11 closure; the
+    # same order extract_correction already reads in).
+    said = " ".join(str(text or "").split()).strip()
+    for working in dict.fromkeys((said, _strip_vocative(text).strip())):
+        for index, pattern in enumerate(_TRANSLATE_PATTERNS):
+            match = pattern.match(working)
+            if match is None:
+                continue
+            phrase = match.group("phrase").strip()
+            language = " ".join(match.group("language").split()).strip()
+            if index == 2 and not _QUOTED.match(phrase):
+                continue
+            phrase = phrase.strip("'\"\u2018\u2019\u201c\u201d ")
+            if phrase and language:
+                return phrase, language
     return None
+
+
+# A thing, never a language: a language's name does not open with a
+# determiner or a possessive ("in the footage", "into my notes"). Grammar only.
+_NOT_A_LANGUAGE = re.compile(r"^(?:the|this|that|these|those|a|an|my|your|our|his|her|their|its)\b", re.IGNORECASE)
+
+
+def names_a_language_target(text: str) -> bool:
+    """Whether a translation-shaped request's target could be a language -
+    what lets translation outrank the other claims on its own phrase
+    (``select_capability``). "Say what the dog is doing in the footage" has
+    the "say ... in ..." shape, and its target is footage, not a language."""
+    request = translation_request(text)
+    return request is not None and not _NOT_A_LANGUAGE.match(request[1])
 
 
 def translate_intent(task: Task, participants: Sequence[str] = ()) -> bool:
@@ -8671,6 +10153,7 @@ TRANSLATE = ManagerCapability(
         "honest when no language model is available."
     ),
     claims=translate_intent,
+    carries_material=True,
     scoreable=False,
 )
 
@@ -8867,6 +10350,7 @@ IMAGE_TRANSFORM = ManagerCapability(
 
 IMAGE_COMPARISON = ManagerCapability(
     name="image_comparison",
+    completes_request=True,
     capabilities=frozenset({"image_comparison"}),
     handle=image_comparison,
     description=(
@@ -9136,6 +10620,11 @@ PERSONAL_GUIDANCE = ManagerCapability(
     authority='manager',
     authority_reason="works on the person's own calendar, commitments and records kept in the Manager's memory - run for a specialist it would start a second, disconnected copy in that specialist's memory",
     name="personal_guidance",
+    self_contained=True,
+    self_contained_reason=(
+        "carries the crisis path select_capability already routes ahead of everything else; it must never leave the Manager"
+    ),
+    completes_request=True,
     capabilities=frozenset({"guidance", "plan_week"}),
     handle=personal_guidance,
     description=(
@@ -9253,15 +10742,19 @@ _MODEL3D_NOUNS = (
     r"(?:model|object|scene|version|render(?:ing)?|mesh|sculpture|figure|shape|print|asset"
     r"|view|map|visuali[sz]ation|representation|replica|reconstruction)"
 )
+# Phase 11 final gate: up to four descriptors may stand before "3D" ("design
+# an interactive, animated 3D diagram of ...") - the request is still 3D. The
+# verb is what makes it a request: "3D diagram" alone is also the name of a
+# workspace ("go to the 3D diagram workspace"), so it is not a noun above.
 _MODEL3D_REQUEST = re.compile(
     rf"\b(?:3d|3-d|three[\s-]dimensional)\s+{_MODEL3D_NOUNS}\b"
     r"|\b(?:model|build|make|create|sculpt|render)\b[^.?!]{0,60}?\bin\s+3d\b"
-    r"|\b(?:make|build|create|design|give\s+me|generate|sculpt)\s+(?:me\s+)?(?:an?\s+|the\s+)?3d\s+\w+",
+    r"|\b(?:make|build|create|design|give\s+me|generate|sculpt)\s+(?:me\s+)?(?:an?\s+|the\s+)?(?:[\w,'-]+\s+){0,4}?3d\s+\w+",
     re.IGNORECASE,
 )
 _MODEL3D_SUBJECT = re.compile(
     rf"\b(?:3d|3-d|three[\s-]dimensional)\s+{_MODEL3D_NOUNS}\s+of\s+(?P<a>[^:;.?!]{{2,80}})"
-    r"|\b(?:make|build|create|design|give\s+me|generate|sculpt)\s+(?:me\s+)?(?:an?\s+|the\s+)?3d\s+(?P<b>[^:;.?!]{2,80})"
+    r"|\b(?:make|build|create|design|give\s+me|generate|sculpt)\s+(?:me\s+)?(?:an?\s+|the\s+)?(?:[\w,'-]+\s+){0,4}?3d\s+(?P<b>[^:;.?!]{2,80})"
     r"|\b(?:model|build|make|create|sculpt|render)\s+(?P<c>[^:;.?!]{2,60}?)\s+in\s+3d\b",
     re.IGNORECASE,
 )
@@ -9359,7 +10852,14 @@ def _build_3d_model(request: CapabilityRequest) -> TaskResult:
                 "Describe its parts and I'll build it: " + grammar["grammar"],
             )
         description, planner = restated, decision.source or "brain"
-    outcome = request.tools.invoke("model3d", {"operation": "build", "content": json.dumps({"subject": subject, "description": description})})
+    # How the whole subject moves ("a balloon drifting ...") - read from the
+    # subject phrase with the same open motion vocabulary each part's own
+    # clause is read with; never a subject-specific branch.
+    from src.providers.media.model3d import motion_in
+
+    whole_motion = motion_in(subject)
+    outcome = request.tools.invoke("model3d", {"operation": "build", "content": json.dumps(
+        {"subject": subject, "description": description, "motion": whole_motion})})
     if not outcome.ok:
         return TaskResult.failure(request.task, request.own_name, f"I couldn't build that in 3D: {outcome.error}")
     made = json.loads(outcome.output)
@@ -9369,16 +10869,22 @@ def _build_3d_model(request: CapabilityRequest) -> TaskResult:
     # never left looking like the placement that was asked for.
     guessed = [f"{p['name']} ({p['note']})" for p in made["parts"] if str(p.get("note") or "").startswith("no position given")]
     placed = (" I couldn't read where these go, so I placed them by default: " + "; ".join(guessed) + ".") if guessed else ""
+    # Movement is reported only as the inspector read it back from the file.
+    moving = [f"{p['name']} {p['motion']}s" for p in made["parts"] if p.get("motion")]
+    if made.get("motion"):
+        moving.insert(0, f"the whole {subject} {made['motion']}s")
+    channels = int(report.get("animated_channels") or 0)
+    motion_note = (f" Moving ({channels} animated channel(s) in the file): " + "; ".join(moving) + ".") if moving and channels else ""
     return TaskResult.success(
         request.task, request.own_name,
         (
             f"Artifact created: id={made['artifact_id']} type=model3d title={made['title']!r} glb=artifact/{made['artifact_id']}.glb - "
             f"a real glTF 2.0 mesh: {report['meshes']} part(s), {report['triangles']} triangles, "
-            f"{report['extent'][0]:g} x {report['extent'][1]:g} x {report['extent'][2]:g} units. Parts: {parts}.{placed} "
+            f"{report['extent'][0]:g} x {report['extent'][1]:g} x {report['extent'][2]:g} units. Parts: {parts}.{placed}{motion_note} "
             "Open the 3D diagram workspace to turn it around."
         ),
         payload={"handled_by": "create_3d_model", "artifact_id": made["artifact_id"], "planner": planner,
-                 "genuinely_3d": report["genuinely_3d"], "triangles": report["triangles"]},
+                 "genuinely_3d": report["genuinely_3d"], "triangles": report["triangles"], "animated_channels": channels},
     )
 
 
@@ -9524,6 +11030,11 @@ WORKSPACE_NAVIGATION = ManagerCapability(
     authority='every_agent',
     own_path="ManagerAgent.take_action - the agent's own workspaces",
     name="workspace_navigation",
+    self_contained=True,
+    self_contained_reason=(
+        "moves an agent between workspaces - the orchestrator's own act"
+    ),
+    completes_request=True,
     anywhere=True,
     capabilities=frozenset({"workspace", "workspaces"}),
     handle=workspace_navigation,
@@ -9545,6 +11056,7 @@ TRANSLATE_MEDIA = ManagerCapability(
         "it to outputs: subtitle files, a video with a subtitle track, translated speech, the live display."
     ),
     claims=translate_media_intent,
+    carries_material=True,
     scoreable=False,
 )
 
@@ -9553,6 +11065,11 @@ COACH = ManagerCapability(
     authority='manager',
     authority_reason="works on the person's own calendar, commitments and records kept in the Manager's memory - run for a specialist it would start a second, disconnected copy in that specialist's memory",
     name="coach",
+    self_contained=True,
+    self_contained_reason=(
+        "the coach is a capability of the Manager, never a separate agent (ledger SCOPE-02)"
+    ),
+    completes_request=True,
     capabilities=frozenset({"coach", "accountability"}),
     handle=coach,
     description=(
@@ -9568,6 +11085,11 @@ READ_BACK = ManagerCapability(
     authority='manager',
     authority_reason="works on the person's own calendar, commitments and records kept in the Manager's memory - run for a specialist it would start a second, disconnected copy in that specialist's memory",
     name="read_back",
+    self_contained=True,
+    self_contained_reason=(
+        "reads back notes this Manager itself kept"
+    ),
+    completes_request=True,
     capabilities=frozenset({"read", "aloud"}),
     handle=read_back,
     description=(
@@ -10001,6 +11523,11 @@ SELECT_VOICE = ManagerCapability(
     authority='every_agent',
     own_path="CognitiveAgent.bind_voice - the agent's own voice",
     name="select_voice",
+    self_contained=True,
+    self_contained_reason=(
+        "changes an agent's own voice configuration - an orchestration act"
+    ),
+    completes_request=True,
     capabilities=frozenset({"voice", "accent"}),
     handle=select_voice,
     description=(
@@ -10344,6 +11871,11 @@ PERSONAL_CONTEXT = ManagerCapability(
     authority='manager',
     authority_reason='writes the one canonical record of the person, which only the Manager writes - every specialist reads it (personal_context_reply) and keeps its own memory',
     name="personal_context",
+    self_contained=True,
+    self_contained_reason=(
+        "the person's own context, as this Manager holds it"
+    ),
+    completes_request=True,
     capabilities=frozenset({
         "learned", "skill", "skills", "schedule", "timetable", "syllabus",
         # What the user is studying is personal context too (Pre-Stage-9
@@ -10387,8 +11919,10 @@ PERSONAL_CONTEXT = ManagerCapability(
 _CALENDAR_TIER2_PATTERN = re.compile(
     r"^(?:please\s+)?(?:can\s+you\s+|could\s+you\s+|would\s+you\s+)?"
     r"(?:add|put|schedule|book|update|change|move)\b.*\b"
-    r"(?:calendar|schedule|appointment|appointments|event|events|"
-    r"meeting|meetings|deadline|deadlines)\b",
+    # This domain's own object nouns, declared once beside the generalized
+    # construction shape that has to defer to them - one list, two readers,
+    # so the boundary cannot drift apart from either side of itself.
+    rf"(?:{'|'.join(_SCHEDULING_OBJECT_NOUNS)})\b",
     re.IGNORECASE,
 )
 
@@ -10445,6 +11979,22 @@ def calendar_intent(task: Task, participants: Sequence[str] = ()) -> bool:
     if (
         start_recording_intent(text) or stop_recording_intent(text)
         or cancel_recording_intent(text) or list_recordings_intent(text)
+    ):
+        return False
+    # A fifth deferral, found by the Phase 11 closure sweep: a request to
+    # *make* something - a handout, a document, a diagram, a 3D model, a
+    # media asset - whose content happens to list weekdays ("create a
+    # handout titled Study Plan with: Monday - the first item; Tuesday - the second")
+    # was claimed here first (alphabetical order) and written to the
+    # calendar as an event named after its last entry, reported as done. The
+    # thing being made is the request; the days are its content. Deferring to
+    # each construction capability's own claim keeps this rule free of any
+    # noun list of its own.
+    if (
+        create_artifact_intent(task) or document_generation_intent(task)
+        or create_diagram_intent(task) or create_3d_model_intent(task)
+        or media_production_intent(task)
+        or revise_artifact_intent(task) or revise_diagram_intent(task)
     ):
         return False
     if (
@@ -10785,6 +12335,11 @@ CALENDAR = ManagerCapability(
     authority='manager',
     authority_reason="works on the person's own calendar, commitments and records kept in the Manager's memory - run for a specialist it would start a second, disconnected copy in that specialist's memory",
     name="calendar",
+    self_contained=True,
+    self_contained_reason=(
+        "the person's own calendar, which this Manager governs"
+    ),
+    completes_request=True,
     capabilities=frozenset({
         "calendar", "schedule", "appointment", "appointments", "event", "events",
         "meeting", "meetings", "deadline", "deadlines",
@@ -10946,6 +12501,9 @@ MANAGER_CAPABILITIES: dict[str, ManagerCapability] = {
     GENERATE_DOCUMENT.name: GENERATE_DOCUMENT,
     CREATE_ARTIFACT.name: CREATE_ARTIFACT,
     REVISE_ARTIFACT.name: REVISE_ARTIFACT,
+    # Phase 11 closure: creation ended at a saved file; this is the half that
+    # runs it and says what actually happened.
+    RUN_ARTIFACT.name: RUN_ARTIFACT,
     CREATE_DIAGRAM.name: CREATE_DIAGRAM,
     REVISE_DIAGRAM.name: REVISE_DIAGRAM,
     MEDIA_PRODUCTION.name: MEDIA_PRODUCTION,
@@ -11082,6 +12640,22 @@ def select_capability(
     discussion = registry.get(DISCUSSION.name)
     if discussion is not None and discussion.claims is not None and discussion.claims(task, participants):
         return discussion
+
+    # Phase 11 closure, the same rule for words: a request to translate a
+    # phrase is about the phrase, never a request to do what it says.
+    # "Translate 'add a task to buy milk' into Spanish" also has the shape
+    # create_task claims, and the claim pass below goes by name - so it added
+    # the task; "... I am learning to cook ..." was remembered as a fact about
+    # the person, "... I have a meeting tomorrow at 3 ..." was booked. The
+    # translation shapes are anchored on the whole remark, and the target must
+    # be able to name a language, so this only ever answers a remark that is a
+    # translation request.
+    translate = registry.get(TRANSLATE.name)
+    if (
+        translate is not None and translate.claims is not None and translate.claims(task, participants)
+        and names_a_language_target(task.description)
+    ):
+        return translate
 
     # A handler that recognises its own request is asked first. Sorted by name
     # so the answer is total and repeatable, exactly as the scoring below is,

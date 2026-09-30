@@ -27,6 +27,7 @@ from src.agents.memory_policy import SpecialistMemoryCategory
 from src.agents.tools.toolset import ToolSet
 from src.agents.email.analyzers import Analyzer, JobOpportunityAnalyzer
 from src.core.contracts import FINDINGS_KEY, AgentSpec, Task, TaskResult, tokenize
+from src.services.conversation_floor import asks_for_explanation
 from src.services.email.mailbox import Mailbox, MailboxError, Outbox
 from src.providers.celebration import CelebrationProvider
 from src.providers.default_celebration_provider import DefaultCelebrationProvider
@@ -371,7 +372,18 @@ class EmailAgent(CognitiveAgent):
         # vocabulary is (self.spec.capabilities, computed from its own
         # registered analyzers) - see CognitiveAgent.general_conversation
         # for the one, reusable place the answer itself comes from.
-        if tokens and not (tokens & self.spec.capabilities):
+        #
+        # Phase 11 closure: one token of overlap was the whole test, so a
+        # question *about* the domain was domain work too - "why do phishing
+        # emails so often use urgent language?" fetched and listed six real
+        # inbox messages. Asking about a subject is not asking for work with
+        # the person's own material, and the rule for telling those apart is
+        # grammatical and shared (``asks_for_explanation``), so a domain
+        # specialist nobody has written yet inherits it.
+        if tokens and (
+            not (tokens & self.spec.capabilities)
+            or asks_for_explanation(task.description, (self._name,))
+        ):
             return self.general_conversation(task)
 
         # A mission may narrow the work: skip messages already processed on an

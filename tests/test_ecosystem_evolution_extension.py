@@ -134,14 +134,25 @@ class TestHandlerRegistryIsOpenEnded:
         from src.services.evolution.ledger_store import EvolutionState
 
         class _FutureWidgetHandler(EvolutionHandler):
+            # Phase 11: a handler must really change something, and say where
+            # it keeps it (observe) - before this, one that only *reported*
+            # success was activated, which the engine now refuses.
+            def __init__(self):
+                self.value = None
+
             def applies_to(self, component_id):
                 return component_id == "widget.future_thing"
 
             def apply(self, proposal, *, context):
+                self.value = proposal.proposed_version
                 return HandlerResult(True, f"future widget set to {proposal.proposed_version}")
 
             def rollback(self, proposal, *, context):
+                self.value = proposal.current_version
                 return HandlerResult(True, f"future widget restored to {proposal.current_version}")
+
+            def observe(self, component_id, *, context):
+                return self.value
 
         register_handler(_FutureWidgetHandler())
 
@@ -295,7 +306,11 @@ class TestConnectionAdapterEvolution:
         run_ecosystem_command(centre, "connection.gmail propose 99 low r|b")
         result = run_ecosystem_command(centre, "connection.gmail run connection.gmail-1 yes")
         assert "FAILED" in result
-        assert "not a known Gmail adapter version" in result
+        # Phase 11: the handler no longer names the connection itself - the
+        # connection declares its versions - so the wording carries its name.
+        assert "not a known gmail adapter version" in result.lower()
+        # A refused apply changes nothing, so nothing is "compensated" either.
+        assert "Nothing was changed" in result
 
     def test_whatsapp_and_telegram_are_unaffected_by_a_gmail_adapter_evolution(self):
         runtime, manager, channel, conversation = real_system(connection_provider="gmail")

@@ -291,14 +291,18 @@ class TestFullBrainSingleStepIsByteIdenticalToBefore:
 
 class TestGenuineMultiStepProgression:
     def test_continue_then_complete_runs_two_real_steps(self):
+        # Phase 11 closure: the composed final answer is used when it carries
+        # what the steps found (here, their "genuine ordinary answer"). A mere
+        # remark about the work ("both parts are now handled") is not an
+        # answer and is covered in tests/test_phase_11_closure.py.
         _, manager, channel, conversation, provider = _wired(
             objective_script=[
                 '{"status":"continue","next_step":"work out the second, unresolved part"}',
-                '{"status":"complete","final_answer":"both parts of the objective are now handled"}',
+                '{"status":"complete","final_answer":"both parts, each with a genuine ordinary answer"}',
             ],
         )
         turn = exchange(channel, conversation, "xyzzyplugh a genuinely multi-part objective")
-        assert turn.outcome == "both parts of the objective are now handled"
+        assert turn.outcome == "both parts, each with a genuine ordinary answer"
 
     def test_each_step_is_recorded_with_its_own_real_task_and_result(self):
         _, manager, _, _, provider = _wired(

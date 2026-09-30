@@ -1,6 +1,6 @@
 """Durable, first-person facts a person states about themselves,
 recognised without requiring an explicit "remember that" - "My name is
-Kelly. I was born September 27, 2006 and I attend Wellspring University"
+Sam. I was born March 3, 1998 and I attend a nearby university"
 is three candidate facts, none of them preceded by a retention marker.
 
 **Still deterministic, still a request for something specific - never a
@@ -163,7 +163,7 @@ def structure_date_fact(content: str) -> tuple[str, object] | None:
     """When ``content`` (already destined to be retained - e.g. from an
     explicit "remember that I was born ...") itself states a birth or
     completion date, the ``(fact_type, date)`` pair to enrich that record
-    with - so "remember that I was born September 27, 2006" becomes just
+    with - so "remember that I was born March 3, 1998" becomes just
     as computable as the bare declarative form. Returns None when the
     content names no such date, which is the ordinary case.
     """
@@ -205,9 +205,25 @@ def structure_date_fact(content: str) -> tuple[str, object] | None:
 # section), because only that capability can recall what is already
 # known before deciding how to write.
 
-_RELATION_GROUP = r"([a-z][\w'\- ]*?)"
+_RELATION_GROUP = r"(?P<relation>[a-z][\w'\- ]*?)"
+# Whose birthday it is: a relation the person owns ("my sister", "my sister
+# Ada"), or simply a name ("Ada"). What makes this shape this capability's own
+# request is the possessive plus "birthday is" plus a real date - "my" is one
+# way of saying who, never the requirement. Found by the Phase 11 closure
+# sweep: "Ada's birthday is on 3 March" reached no capability at all, while the
+# same sentence with a relation word in front of it worked.
+#
+# The pronouns are excluded because "his birthday is ..." names nobody this
+# module could record; the user's own birthday ("my birthday is ...") has no
+# possessive after "my" and so has never matched here - it is user_facts' own
+# first-person territory, and still is.
+_BIRTHDAY_OWNER = (
+    rf"(?:my\s+{_RELATION_GROUP}"
+    r"|(?P<named>(?!my\b|his\b|her\b|hers\b|their\b|theirs\b|your\b|yours\b|our\b|ours\b|its\b|the\b)"
+    r"[\w'’\-]+(?:\s+[\w'’\-]+)?))"
+)
 RELATIONAL_BIRTHDAY_PATTERN = re.compile(
-    rf"\bmy {_RELATION_GROUP}'s birthday is\s+([^.!?]+)", re.IGNORECASE,
+    rf"\b{_BIRTHDAY_OWNER}'s birthday is\s+(?P<date>[^.!?]+)", re.IGNORECASE,
 )
 # "either March 24 or May 24" - the shape genuine, unresolved uncertainty
 # takes. Matched against the captured date clause only, never the whole
@@ -270,10 +286,10 @@ def extract_relational_birthdays(text: str) -> tuple[RelationalBirthdayCandidate
     candidates: list[RelationalBirthdayCandidate] = []
 
     for match in RELATIONAL_BIRTHDAY_PATTERN.finditer(stripped):
-        person = _clean(match.group(1))
+        person = _clean(match.group("relation") or match.group("named") or "")
         if not person:
             continue
-        rest = match.group(2).strip()
+        rest = match.group("date").strip()
 
         either = _EITHER_OR.match(rest)
         if either is not None:

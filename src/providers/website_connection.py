@@ -351,7 +351,7 @@ class WebsiteConnection(Connection):
     def _remember_elements(self, read_page_result: str) -> None:
         """Keep the fields, controls and links the last page read actually
         found, so a later "click Book appointment" or "fill Full name with
-        Kelly" can name them by their visible label."""
+        Sam" can name them by their visible label."""
         try:
             elements = json.loads(read_page_result).get("elements") or []
         except (ValueError, AttributeError):

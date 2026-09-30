@@ -46,19 +46,19 @@ _MONTHS.update(
 
 _MONTH_NAME_PATTERN = "|".join(sorted(_MONTHS, key=len, reverse=True))
 
-# "September 27, 2006" / "Sep 27 2006"
+# "March 3, 1998" / "Mar 3 1998"
 _MONTH_DAY_YEAR = re.compile(
     rf"\b(?P<month>{_MONTH_NAME_PATTERN})\.?\s+(?P<day>\d{{1,2}})(?:st|nd|rd|th)?,?\s+(?P<year>\d{{4}})\b",
     re.IGNORECASE,
 )
-# "27 September 2006" / "27th of September 2006"
+# "3 March 1998" / "3rd of March 1998"
 _DAY_MONTH_YEAR = re.compile(
     rf"\b(?P<day>\d{{1,2}})(?:st|nd|rd|th)?\s+(?:of\s+)?(?P<month>{_MONTH_NAME_PATTERN})\.?,?\s+(?P<year>\d{{4}})\b",
     re.IGNORECASE,
 )
-# "2006-09-27"
+# "1998-03-03"
 _ISO_DATE = re.compile(r"\b(?P<year>\d{4})-(?P<month>\d{1,2})-(?P<day>\d{1,2})\b")
-# "27/09/2006" or "09/27/2006" - day-first assumed (the project's own
+# "13/03/1998" or "03/13/1998" - day-first assumed (the project's own
 # established convention is UTC/ISO-first elsewhere; this is read as
 # day/month/year, the more common convention outside the US, and is a
 # clearly secondary fallback to the two named-month forms above, which are
@@ -77,6 +77,15 @@ _MONTH_YEAR = re.compile(
 # "March 24, 2008" is read as a full date, never mistaken for a bare one.
 _MONTH_DAY = re.compile(
     rf"\b(?P<month>{_MONTH_NAME_PATTERN})\.?\s+(?P<day>\d{{1,2}})(?:st|nd|rd|th)?\b",
+    re.IGNORECASE,
+)
+# "3 March" / "the 3rd of March" - the same recurring date said day-first,
+# the ordinary order across most of the world. A full date already accepted
+# both orders (_DAY_MONTH_YEAR above); a year-less one only month-first, so
+# "my sister's birthday is on the 3rd of March" was refused (Phase 11
+# closure sweep). Tried after _MONTH_DAY, so an existing reading never moves.
+_DAY_MONTH = re.compile(
+    rf"\b(?P<day>\d{{1,2}})(?:st|nd|rd|th)?\s+(?:of\s+)?(?P<month>{_MONTH_NAME_PATTERN})\b\.?",
     re.IGNORECASE,
 )
 
@@ -131,7 +140,7 @@ def parse_month_day(text: str) -> tuple[int, int] | None:
     year-less answer merely because this pattern also happens to match
     its first two tokens.
     """
-    match = _MONTH_DAY.search(str(text or ""))
+    match = _MONTH_DAY.search(str(text or "")) or _DAY_MONTH.search(str(text or ""))
     if match is None:
         return None
     groups = match.groupdict()

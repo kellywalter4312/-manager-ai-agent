@@ -114,6 +114,7 @@ class TestNarrationProvider:
             NullNarrationProvider().synthesize("hello", "am_eric")
 
     def test_kokoro_produces_real_audio_of_the_right_shape(self):
+        pytest.importorskip("kokoro_onnx", reason="kokoro_onnx not installed")
         asset = KokoroNarrationProvider(KOKORO_MODEL, KOKORO_VOICES).synthesize(
             "This is a genuine narration test.", "am_eric"
         )
@@ -132,6 +133,7 @@ class TestNarrationProvider:
             KokoroNarrationProvider(KOKORO_MODEL, KOKORO_VOICES).synthesize("", "am_eric")
 
     def test_different_text_produces_genuinely_different_audio(self):
+        pytest.importorskip("kokoro_onnx", reason="kokoro_onnx not installed")
         provider = KokoroNarrationProvider(KOKORO_MODEL, KOKORO_VOICES)
         a = provider.synthesize("A short sentence.", "am_eric")
         b = provider.synthesize("A completely different, much longer sentence about something else entirely.", "am_eric")
@@ -181,6 +183,7 @@ class TestVideoComposer:
             FFmpegVideoComposer().compose([])
 
     def test_a_real_video_is_produced_and_independently_verified_playable(self):
+        pytest.importorskip("kokoro_onnx", reason="kokoro_onnx not installed")
         """The core practical-verification claim of this whole
         checkpoint: not 'the architecture supports video', but a real
         file, genuinely re-decoded by a real ffmpeg binary afterward,
@@ -207,6 +210,7 @@ class TestVideoComposer:
         assert "Invalid data" not in streams
 
     def test_multi_scene_composition_produces_the_correct_total_duration(self):
+        pytest.importorskip("kokoro_onnx", reason="kokoro_onnx not installed")
         narrator, illustrator, composer = real_media_stack()
         scenes = []
         for line in ("The first scene begins.", "Something happens in the second scene."):
@@ -237,6 +241,7 @@ class TestMediaProductionTool:
         return ToolSet([tool])
 
     def test_narrate_produces_a_real_file_on_disk(self, tmp_path):
+        pytest.importorskip("kokoro_onnx", reason="kokoro_onnx not installed")
         toolset = self._toolset(tmp_path)
         result = toolset.invoke("media_production", {"operation": "narrate", "content": "A real narration test."})
         assert result.ok
@@ -256,6 +261,7 @@ class TestMediaProductionTool:
         assert Path(path_str).exists()
 
     def test_compose_reads_real_paths_from_prior_output_and_produces_a_real_video(self, tmp_path):
+        pytest.importorskip("kokoro_onnx", reason="kokoro_onnx not installed")
         toolset = self._toolset(tmp_path)
         narration = toolset.invoke("media_production", {"operation": "narrate", "content": "Scene one narration."})
         image = toolset.invoke("media_production", {"operation": "illustrate", "content": "Scene one image."})
@@ -470,6 +476,7 @@ class TestProductionWiring:
         assert "no narration engine is configured" in turn.outcome.lower()
 
     def test_the_local_backend_is_genuinely_wired_and_works_through_exchange(self, tmp_path):
+        pytest.importorskip("kokoro_onnx", reason="kokoro_onnx not installed")
         runtime, manager, channel, conversation = real_system(
             media="local", media_asset_dir=str(tmp_path), artifacts_dir=str(tmp_path / "artifacts")
         )
@@ -521,6 +528,7 @@ class _FakeConverseProvider(LLMProvider):
 
 class TestDynamicCreativeMediaObjective:
     def test_the_objective_loop_discovers_narrate_illustrate_compose_itself(self, tmp_path):
+        pytest.importorskip("kokoro_onnx", reason="kokoro_onnx not installed")
         """The central proof this checkpoint exists for: nothing in
         production code decides that a creative objective needs
         writing, then narration, then an image, then composition, in
@@ -601,6 +609,7 @@ class TestDynamicCreativeMediaObjective:
         assert "Audio: aac" in streams
 
     def test_a_second_unrelated_creative_objective_proves_generality(self, tmp_path):
+        pytest.importorskip("kokoro_onnx", reason="kokoro_onnx not installed")
         """Section 14's own requirement, reproduced with a second,
         genuinely unrelated topic through the identical mechanism -
         never a second, topic-specific code path."""

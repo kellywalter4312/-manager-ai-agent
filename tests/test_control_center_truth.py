@@ -48,6 +48,10 @@ class TestTheAuditTrailRecordsWhatHappened:
     administrative writes; both were recorded as failures whatever they did."""
 
     def test_a_real_backend_switch_is_recorded_as_a_success(self, isolated_stores):
+        pytest.importorskip(
+            "argostranslate",
+            reason="argostranslate is not installed; translation_provider switch to argos cannot be verified",
+        )
         from src.services.audit.action_log import load_action_log
 
         log = isolated_stores / "actions.json"

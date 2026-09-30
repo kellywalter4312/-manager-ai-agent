@@ -131,6 +131,7 @@ class TestElevenLabsProvider:
             build_speech(Settings(speech="elevenlabs"), env={"ELEVENLABS_API_KEY": "   "})
 
     def test_building_it_with_a_key_works(self):
+        pytest.importorskip("elevenlabs", reason="elevenlabs SDK not installed")
         from src.providers.elevenlabs_speech_provider import ElevenLabsSpeechAdapter
 
         speech = build_speech(Settings(speech="elevenlabs"), env={"ELEVENLABS_API_KEY": "fake"})
@@ -168,6 +169,7 @@ class TestElevenLabsAccountSeam:
         environment, construction would otherwise fail closed
         (test_selecting_it_without_a_key_fails_closed above) - it
         succeeds here only because the account supplied one."""
+        pytest.importorskip("elevenlabs", reason="elevenlabs SDK not installed")
         from src.providers.elevenlabs_speech_provider import ElevenLabsSpeechAdapter
         from src.services.credentials.account import ProviderAccount
 
@@ -183,6 +185,7 @@ class TestElevenLabsAccountSeam:
             build_speech(Settings(speech="elevenlabs"), env={}, account=wrong_account)
 
     def test_omitting_the_account_reproduces_prior_behaviour_exactly(self):
+        pytest.importorskip("elevenlabs", reason="elevenlabs SDK not installed")
         from src.providers.elevenlabs_speech_provider import ElevenLabsSpeechAdapter
 
         speech = build_speech(Settings(speech="elevenlabs"), env={"ELEVENLABS_API_KEY": "env-key"})

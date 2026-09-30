@@ -46,6 +46,8 @@ from pathlib import Path
 
 import pytest
 
+pytest.importorskip("cryptography", reason="cryptography package not installed")
+
 from scripts.dev_tls import (
     CAInfo,
     CertificateInfo,

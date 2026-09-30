@@ -67,8 +67,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 
-from src.core.contracts import Task, TaskResult
+from src.core.contracts import STOPWORDS, Task, TaskResult, tokenize
 from src.manager.capabilities import hands_act_to_room
+from src.providers.base import repeats_request
 from src.manager.collaboration_entry import answer_with_collaboration
 from src.manager.manager import ManagerAgent
 from src.utils.logging import get_logger, task_logger
@@ -267,6 +268,17 @@ def pursue_objective(
             objective=task.description, status=status, result=first_result, steps=tuple(steps)
         )
 
+    # Phase 11 closure, the same rule for a single governed act: a request the
+    # capability that answered it declares complete on success (a task added,
+    # a fact remembered, the date given) is done. Asking a model whether to
+    # "continue" it only invites work nobody asked for - found with the real
+    # local model, which turned one added task into five.
+    skills = getattr(manager, "own_skills", None)
+    if first_result.succeeded and skills is not None and skills.completed_request(task.id):
+        return ObjectiveOutcome(
+            objective=task.description, status=ObjectiveStatus.COMPLETED, result=first_result, steps=tuple(steps)
+        )
+
     if not manager.can_reason:
         # Half Brain: no genuine way to judge whether more is needed
         # without guessing, so this stops exactly where an ordinary
@@ -283,6 +295,22 @@ def pursue_objective(
     step_number = 1
 
     while True:
+        # Phase 11 closure: a step that asked the person something - which did
+        # you mean, may I send this, which fact did you mean, the next quiz
+        # question - ends the pursuit there. Whatever reaches the Manager next
+        # is taken as the answer, so a step this loop composed itself would be
+        # answering on the person's behalf. Found with the real local model:
+        # a clarification raised on a plain question was "answered" by the
+        # loop's next step ("I'll go with a millstone from now on", remembered
+        # as a fact), and the same gap confirmed a pending send nobody approved.
+        if skills is not None and skills.awaiting_reply():
+            outcome = ObjectiveOutcome(
+                objective=task.description, status=ObjectiveStatus.NEEDS_INPUT,
+                result=steps[-1].result, steps=tuple(steps),
+            )
+            log.info("objective pursuit: %s", outcome.describe())
+            return outcome
+
         verdict = manager.brain.assess_objective(task, tuple(evidence))
 
         if not verdict.decided:
@@ -307,6 +335,15 @@ def pursue_objective(
                 # risks paraphrasing (or worse, embellishing) a response
                 # that was already correct and complete.
                 outcome = _fallback_to_latest(task, steps)
+            elif not _grounded_in_steps(verdict.final_answer, task, steps):
+                # Phase 11 closure: a composed answer that is only the
+                # request said back, or a remark about the work ("the
+                # objective has been fully answered with the gathered
+                # evidence") that shares nothing with what the steps actually
+                # produced, is not an answer - found with the real local
+                # model, which returned exactly that and dropped the real one.
+                # The steps' own real result stands instead.
+                outcome = _fallback_to_latest_success(task, steps)
             else:
                 outcome = ObjectiveOutcome(
                     objective=task.description,
@@ -383,6 +420,34 @@ def _fallback_to_latest(task: Task, steps: list[ObjectiveStep]) -> ObjectiveOutc
     return ObjectiveOutcome(
         objective=task.description, status=status, result=latest, steps=tuple(steps)
     )
+
+
+def _grounded_in_steps(answer: str, task: Task, steps: "list[ObjectiveStep]") -> bool:
+    """Whether a composed final answer carries something the steps actually
+    produced: not empty, not the request said back (``repeats_request``, the
+    same test the Brain's own conversation path applies), and sharing at least
+    one meaningful word with the steps' real results that the request itself
+    did not already contain. A synthesis reuses what was found; a remark about
+    the work, or an echo, does not."""
+    text = str(answer or "").strip()
+    if not text or repeats_request(text, task.description):
+        return False
+    produced: set[str] = set()
+    for step in steps:
+        produced |= tokenize(step.result.output or "")
+    content = tokenize(text) - STOPWORDS - tokenize(task.description)
+    return bool(content & (produced - STOPWORDS))
+
+
+def _fallback_to_latest_success(task: Task, steps: "list[ObjectiveStep]") -> ObjectiveOutcome:
+    """The most recent step that genuinely succeeded, unchanged - or, when
+    none did, the latest step's own honest result (``_fallback_to_latest``)."""
+    for step in reversed(steps):
+        if step.result.succeeded:
+            return ObjectiveOutcome(
+                objective=task.description, status=ObjectiveStatus.COMPLETED, result=step.result, steps=tuple(steps)
+            )
+    return _fallback_to_latest(task, steps)
 
 
 def _stop(task: Task, steps: list[ObjectiveStep], reason: str) -> ObjectiveOutcome:

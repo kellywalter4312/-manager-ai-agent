@@ -66,6 +66,7 @@ from src.agents.tools.live_information import LiveInformationTool  # noqa: E402
 from src.agents.tools.web_search import WebSearchTool  # noqa: E402
 from src.agents.tools.document_generation import DocumentGenerationTool  # noqa: E402
 from src.agents.tools.artifact_production import ArtifactProductionTool  # noqa: E402
+from src.agents.tools.artifact_runtime import ArtifactRuntimeTool
 from src.agents.tools.code_assistant import CodeAssistantTool  # noqa: E402
 from src.agents.tools.image_intelligence import ImageIntelligenceTool  # noqa: E402
 from src.agents.tools.translation_output import TranslationOutputTool  # noqa: E402
@@ -166,12 +167,11 @@ from src.manager.memory_policy import MemoryCategory  # noqa: E402
 from src.services.memory.tasks import describe_task  # noqa: E402
 from src.services.evolution.inventory import (  # noqa: E402
     CAPABILITY_GENERAL_CONVERSATION,
-    CONNECTION_GMAIL_ADAPTER,
     DEFAULT_CONVERSATION_HISTORY_LIMIT,
-    DEFAULT_GMAIL_ADAPTER_VERSION,
     TOOL_DOCUMENT_GENERATION,
     brain_development_snapshot,
     discover_components,
+    governed_adapter_versions,
     is_manager_component,
     memory_development_snapshot,
 )
@@ -353,12 +353,11 @@ HELP = """
                            credential nobody has provided yet.
   services <name> forget   remove a declared service permanently
 
-  A declared service becomes a real, usable connection (reachable
-  through 'talk', the same 'connected account' capability Gmail already
-  uses) once it also has a credential ('connections <name> connect ...'
-  above) and is selected with MANAGER_CONNECTION_PROVIDER=<name> on the
-  next start - the same "declared, credentialed, then selected" shape
-  gmail already follows, generalised to any name.
+  A declared service is a real, usable connection at once - reachable
+  by name through 'talk' (the same 'connected account' capability Gmail
+  uses), beside every other connection, and live in this running
+  session without a restart. An operation that needs a credential needs
+  'connections <name> connect ...' first; open operations need none.
 
   sites                     every declared website - name, origin,
                              whether it needs a session credential
@@ -386,21 +385,19 @@ HELP = """
                              consequential write here already requires.
   sites <name> forget        remove a declared site permanently
 
-  A declared site becomes a real, usable connection (reachable through
-  'talk', the identical 'connected account' capability every other
-  connection already uses) the identical "declared, credentialed where
-  needed, then selected" way a declared service does -
-  MANAGER_CONNECTION_PROVIDER=<name> on the next start.
+  A declared site is a real, usable connection the same way a declared
+  service is: reachable by name through 'talk' at once, live in this
+  running session.
 
-  RELOAD / RESTART REQUIRED: 'provider ... add/select/revoke' and
-  'connections ... connect/disconnect' persist to disk immediately, but
-  the already-running Manager was already built from whatever was
-  active at startup - runtime.provider/media/communication/speech are
-  each constructed once and do not hot-swap. Two ways to make a change
-  live: type 'reload' right here to rebuild this session in place
-  (ephemeral memory, if configured, is discarded by this - persisted
-  memory is not), or restart scripts/control_center.py/export_ui.py/
-  heartbeat.py, all of which read the same persisted state.
+  LIVE IN THIS SESSION: 'provider ... add/select/use/revoke',
+  'connections ... connect/disconnect', 'services/sites ... declare/
+  forget' and 'capabilities enable/disable/grant/revoke' persist to disk
+  and are applied to this running session in place - the same
+  conversation, memory and identity continue. A change that cannot be
+  built is reported and leaves the running session as it was. 'reload'
+  (below) still rebuilds everything from disk, and every other entry
+  point (export_ui.py, heartbeat.py, serve_ui.py) reads the same
+  persisted state on its next start.
 
   reload                   rebuild this session now from current
                            settings and persisted accounts/connections
@@ -419,9 +416,15 @@ HELP = """
                            Upgrade Manifest
   ecosystem <component>    one component's detail, version, and every
                            proposal on record for it
-  ecosystem <component> propose <new-version> <risk> <reason>|<benefit>
+  ecosystem <component> propose <new-version> <risk> <reason>|<benefit>[|requires <component>=<version>,...][|after <proposal-id>,...]
                            propose a governed component upgrade (risk:
-                           low/medium/high/critical)
+                           low/medium/high/critical); optionally the exact
+                           versions other components must be at, and the
+                           proposals that must be active first
+  ecosystem <component> plan <proposal-id>
+                           can it safely run now? blockers, run order,
+                           compatibility, stale or affected changes, real
+                           state vs. record, rollback - changes nothing
   ecosystem <component> propose-content <path.md> <risk> <reason>|<benefit>
                            specialist/Manager identity evolution only -
                            the real new document content, staged and
@@ -429,18 +432,23 @@ HELP = """
   ecosystem <component> run <proposal-id> yes|no
                            evaluate -> approve -> apply -> verify ->
                            activate a proposal in one governed step -
-                           the real side effect exists today for:
-                           provider.<category> (an account's model),
-                           alfred / specialist.<key> (the real identity
-                           document, backed up first), tool.document_generation
-                           (its real output directory),
-                           capability.general_conversation (real
-                           context-turn count), connection.gmail (its
-                           real adapter version - never the account).
-                           Anything else is refused honestly, never
-                           fabricated.
+                           whichever registered handler owns the
+                           component performs it, and it is activated
+                           only when the component's real state is
+                           re-read at the new version (a half-done change
+                           is undone). Components with no handler are
+                           refused honestly, never fabricated.
   ecosystem <component> rollback <proposal-id> yes|no
-                           reverse an ACTIVE proposal's real effect
+                           reverse an ACTIVE proposal's real effect -
+                           refused while a later change or a dependent
+                           holds it; recorded only once the prior state
+                           is re-read
+  ecosystem <component> reconcile yes|no
+                           correct a stale ledger record to what is
+                           actually installed (listed under RECORD vs
+                           REALITY in the inventory) - the record only,
+                           never the component; refused while a change
+                           is still active on it
   ecosystem history [component]
                            every governed transition on record
   ecosystem memory <agent> a real, developmental memory snapshot
@@ -579,6 +587,11 @@ GOVERNED_BACKEND_FIELDS = {
     "celebration_provider": "celebration_provider",
     "calendar_event_provider": "calendar_event_provider",
     "document_rendering_provider": "document_rendering",
+    # Phase 11 closure: which engine runs a created artifact. An owner choice
+    # for the same reason document_rendering is one - changing it alters how an
+    # artifact is examined, never the memory, conversation or identity the
+    # "deployment setting" exclusion below exists to protect.
+    "artifact_runtime": "artifact_runtime",
 }
 
 
@@ -673,7 +686,7 @@ def _apply_backends_live(centre: "ControlCenter") -> str:
         runtime = rebind_backends(
             centre.runtime, centre.manager, settings,
             accounts=load_credential_store(DEFAULT_ACCOUNTS_PATH),
-            connection_adapter_version=config.get(CONNECTION_GMAIL_ADAPTER, DEFAULT_GMAIL_ADAPTER_VERSION),
+            connection_adapter_version=governed_adapter_versions(config),
             tools=lambda live: manager_tools(
                 live, settings, load_governed_config(DEFAULT_CONFIG_PATH), agent_names=lambda: _agent_names(centre.manager),
             ),
@@ -697,16 +710,27 @@ def _apply_evolution_live(centre: "ControlCenter", component_id: str) -> str:
     document is re-read by every new session (said plainly, never claimed
     live); every other governed value - a tool's configuration, a connection's
     adapter, a backend account's model, a newly registered category - is
-    rebound through the same live backend path a fresh start would use."""
-    if component_id == f"provider.{LLM_CATEGORY}":
+    rebound through the same live backend path a fresh start would use.
+
+    Phase 11: *how* a change goes live is declared by the handler that owns
+    the component (``EvolutionHandler.activation``) - this names no
+    category, so a category registered tomorrow is applied the way its own
+    handler says. The one rule kept here is this surface's own: whatever
+    feeds the session's reasoning (``GOVERNED_REASONING_FIELDS``) is rebound
+    as reasoning."""
+    from src.services.evolution.handlers import (
+        ACTIVATION_NEXT_SESSION, ACTIVATION_ON_READ, ACTIVATION_PER_TURN, ACTIVATION_REASONING, handler_for,
+    )
+
+    handler = handler_for(component_id)
+    activation = handler.activation(component_id) if handler is not None else None
+    if component_id in GOVERNED_REASONING_FIELDS or activation == ACTIVATION_REASONING:
         return _apply_reasoning_live(centre, load_credential_store(DEFAULT_ACCOUNTS_PATH))
-    if component_id.startswith("capability.") or component_id.startswith("image_technique."):
+    if activation == ACTIVATION_PER_TURN:
         return " Live now: the running session reads this governed value on every turn."
-    # By role, never by a name: the caller has already resolved a legacy id to
-    # the canonical "manager", so a literal legacy name here never matched and
-    # the orchestrator's evolved identity was reported "applied live" when it
-    # is only re-read by a new session (found by the Phase 10 hardcoding gate).
-    if is_manager_component(component_id) or component_id.startswith("specialist."):
+    if activation == ACTIVATION_ON_READ:
+        return " Live now: this is described from the governed config on every read, so no reload is needed."
+    if activation == ACTIVATION_NEXT_SESSION:
         return (
             " The identity document is re-read by every new session - restart (or 'reload') to hear "
             "the evolved identity; this conversation keeps the one it started with."
@@ -1255,6 +1279,12 @@ def manager_tools(runtime, settings: Settings, config, agent_names=None, owner: 
             # written code saved as a versioned artifact in the coding
             # workspace. Never writes or runs code itself.
             CodeAssistantTool(runtime.artifacts, owner_agent=owner),
+            # Phase 11 closure: the half that was missing. Creation ended at a
+            # saved artifact; this runs one and reports what actually happened,
+            # through runtime.artifact_runtime - a provider axis, so the engine
+            # (a browser today) is replaceable and no artifact kind gets a
+            # runner of its own. Never modifies the artifact it runs.
+            ArtifactRuntimeTool(runtime.artifacts, runtime.artifact_runtime, owner_agent=owner),
             # Whole-ecosystem campaign: image transformation, enhancement,
             # reconstruction and comparison - an open technique registry read
             # from the governed config on every call, so a technique evolved in
@@ -1744,12 +1774,12 @@ def build(settings: Settings):
         video_understanding_account=accounts.active(settings.video_understanding),
         speech_account=accounts.active(settings.speech),
         communication_account=accounts.active(settings.communication_provider),
-        # Full Alfred OS Ecosystem Evolution: the one real, governed
-        # connection-*adapter* axis this checkpoint added - genuinely
-        # distinct from the account/credential `accounts` above already
-        # governs. Defaults to "1" (this project's own prior, unchanged
-        # behaviour) unless a real evolution selected "2".
-        connection_adapter_version=config.get(CONNECTION_GMAIL_ADAPTER, DEFAULT_GMAIL_ADAPTER_VERSION),
+        # Full Alfred OS Ecosystem Evolution: the governed
+        # connection-*adapter* axis - genuinely distinct from the
+        # account/credential `accounts` above already governs. Each
+        # connection that declares more than one implementation gets its
+        # governed one, else its own default (Phase 11: none is named here).
+        connection_adapter_version=governed_adapter_versions(config),
     )
 
     try:
@@ -1941,14 +1971,29 @@ def render_capabilities(centre: "ControlCenter") -> str:
         ),
     ))
     vision_capable = hasattr(runtime.provider, "analyze_image")
+    # Phase 11 closure re-verification: what this row is about is "what can be
+    # seen in this", and since that pass a moving medium is read by the same
+    # path a still one is (sampled into real frames, one look per moment) - so
+    # the row says so rather than leaving a person to assume stills only.
+    #
+    # `ready` still reflects the *Brain's* own vision, unchanged, because that
+    # is what "visual reasoning" means here. An installed local vision model is
+    # a real second path the handler genuinely falls back to, and its answers
+    # are attributed rather than presented as verified reasoning - so it is
+    # named in the detail, where it is honest, instead of flipping a row that
+    # would then claim more than the Brain can do.
+    skills = manager.own_skills if manager is not None else None
+    local_vision = getattr(getattr(skills, "_assist", None), "describe_image", None) is not None
     lines.append(_capability_row(
-        "Image Analysis (visual reasoning)",
+        "Image Analysis (visual reasoning - stills and moving media)",
         ready=vision_capable,
         detail=(
-            f"provider={runtime.provider.name} supports vision"
-            if vision_capable else
-            f"current provider ('{runtime.provider.name}') cannot perform visual "
-            "reasoning - select a vision-capable provider via 'provider llm_provider'"
+            (f"provider={runtime.provider.name} supports vision"
+             if vision_capable else
+             f"current provider ('{runtime.provider.name}') cannot perform visual "
+             "reasoning - select a vision-capable provider via 'provider llm_provider'")
+            + (" ; an installed local vision model can still look, attributed as such"
+               if local_vision else "")
         ),
     ))
     lines.append(_capability_row(
@@ -2004,7 +2049,8 @@ def render_capabilities(centre: "ControlCenter") -> str:
             if media.transcriber.name != "null" else
             "no transcription provider configured - clip_video can only reason over "
             "explicit timestamps or a supplied transcript; see 'provider "
-            "video_understanding_provider'"
+            "video_understanding_provider'. This row is the speech half only - "
+            "what can be *seen* in a recording is reported by Image Analysis above"
         ),
     ))
     lines.append(_capability_row(
@@ -2015,6 +2061,19 @@ def render_capabilities(centre: "ControlCenter") -> str:
             "no rendering engine configured - artifacts still persist their real "
             "structured content, with no PDF rendition; see 'provider "
             "document_rendering_provider'"
+        ),
+    ))
+    lines.append(_capability_row(
+        # Phase 11 closure: whether a created artifact can actually be run and
+        # observed, which is a separate question from whether it can be made.
+        "Artifact Runtime (run what was made, and report what it did)",
+        ready=runtime.artifact_runtime.name != "null",
+        detail=(
+            f"engine={runtime.artifact_runtime.name} ({runtime.artifact_runtime.describes})"
+            if runtime.artifact_runtime.name != "null" else
+            "no runtime configured - an artifact can be created and persisted but not "
+            "run, so it can only ever be reported as unverified; see 'provider "
+            "artifact_runtime'"
         ),
     ))
     lines.append(_capability_row(
@@ -2468,8 +2527,9 @@ def run_provider_command(centre: "ControlCenter", rest: str) -> str:
 
     if not rest_args:
         lines = [adapter.describe()]
-        active = adapter.active()
-        lines.append(f"active: {active.key if active is not None else '(none)'}")
+        if adapter.single_selection:
+            active = adapter.active()
+            lines.append(f"active: {active.key if active is not None else '(none)'}")
         dependents = adapter.dependents()
         if dependents:
             lines.append("depends on this category being configured:")
@@ -2736,60 +2796,43 @@ def _provider_axis_backend_names(settings: "Settings | None" = None) -> frozense
     return provider_axis_backend_names(build_ecosystem_registry(settings or Settings()))
 
 
-def _gmail_connection_status(settings: Settings) -> list[str]:
-    """Gmail's real status, independent of whichever backend the
-    single-active 'connection' ecosystem category currently has selected -
-    ``replace(..., connection_provider="gmail")`` builds Gmail specifically,
-    the identical seam that category's own ``validate("gmail")`` already
-    uses internally, so this reports the truth about Gmail even when
-    ``settings.connection_provider`` is presently "null".
+def _self_authenticating_connections(settings: Settings) -> "dict[str, object]":
+    """Every built-in connection that authenticates through its own flow
+    rather than a typed credential, built to be described - asked of each
+    connection (``Connection.self_authentication``), never known by name here
+    (Phase 11). Built with ``replace(..., connection_provider=name)`` so each
+    reports the truth about itself whichever backend the single-active
+    'connection' category currently has selected. One that fails to build is
+    skipped, never allowed to take the listing down."""
+    from src.providers.connection_factory import available_connection_providers
 
-    Gmail authenticates via a real, already-working OAuth flow
-    (``scripts/authorize_gmail.py``, a token file, never a typed secret) -
-    never routed through CredentialStore, and never faked here as though
-    it were one.
-    """
-    connection = build_connection(replace(settings, connection_provider="gmail"))
+    found = {}
+    for name in available_connection_providers():
+        try:
+            connection = build_connection(replace(settings, connection_provider=name))
+        except Exception:  # noqa: BLE001 - one connection's failure never hides the others
+            continue
+        if connection.self_authentication() is not None:
+            found[name] = connection
+    return found
+
+
+def _self_authenticating_status(name: str, connection) -> list[str]:
+    """One self-authenticating connection's real status, in its own words -
+    never routed through CredentialStore, and never faked as though it were
+    a typed credential."""
+    auth = connection.self_authentication()
     lines = [
-        "gmail (OAuth - connected via a token file, not a typed credential):",
+        f"{name} ({auth.method}):",
         f"  availability : {connection.availability.state.value}",
         f"  authorization: {connection.authorization.value}",
         f"  operations   : {', '.join(connection.supported_operations) or '(none)'}",
     ]
     if connection.authorization != AuthorizationState.AUTHORIZED:
-        lines.append("  connect with : python scripts/authorize_gmail.py")
-    else:
-        # "Authorized" only means a token file exists. What the file itself
-        # says about its access token is read here, locally - whether Google
-        # still accepts its refresh can only be learned by using it, and that
-        # is said plainly rather than implied.
-        expiry = _gmail_token_expiry(settings.gmail_token_path)
-        if expiry is not None:
-            from datetime import datetime, timezone
-
-            state = "expired" if expiry < datetime.now(timezone.utc) else "valid until"
-            lines.append(
-                f"  access token : {state} {expiry:%Y-%m-%d %H:%M} UTC - refreshed on first use; if Google refuses "
-                "the refresh, re-authorize with: python scripts/authorize_gmail.py"
-            )
-    lines.append(f"  disconnect by: deleting '{settings.gmail_token_path}'")
+        lines.append(f"  connect with : {auth.connect}")
+    lines.extend(f"  {detail}" for detail in auth.details)
+    lines.append(f"  disconnect by: {auth.disconnect}")
     return lines
-
-
-def _gmail_token_expiry(token_path) -> "object | None":
-    """The access-token expiry recorded in the token file, or None - a local
-    read only, never a network call and never a credential shown."""
-    import json as _json
-    from datetime import datetime, timezone
-
-    try:
-        raw = _json.loads(Path(token_path).read_text(encoding="utf-8")).get("expiry")
-        if not raw:
-            return None
-        moment = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-        return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
-    except (OSError, ValueError, AttributeError):
-        return None
 
 
 def run_connections_command(centre: "ControlCenter", rest: str) -> str:
@@ -2805,24 +2848,29 @@ def run_connections_command(centre: "ControlCenter", rest: str) -> str:
     "examples are not boundaries" principle): a future service needs no
     change here to become connectable, only a name.
 
-    Gmail is the one connection with a genuinely different authentication
-    shape today (OAuth via a token file, not a single secret string) and is
-    reported through its own real mechanism (see ``_gmail_connection_status``)
-    rather than forced into the string-credential shape that fits
-    WhatsApp/Telegram-style access tokens correctly but would misrepresent
-    Gmail's own.
+    A connection with a genuinely different authentication shape (Gmail's
+    OAuth token file today) describes itself through
+    ``Connection.self_authentication`` and is reported through its own real
+    mechanism (``_self_authenticating_status``) rather than forced into the
+    string-credential shape that fits access tokens correctly but would
+    misrepresent its own - and no connection is known by name here, so the
+    next such connection needs no change to this command (Phase 11).
     """
     settings = centre.runtime.settings
     args = rest.split()
     store = load_credential_store(DEFAULT_ACCOUNTS_PATH)
     provider_backends = _provider_axis_backend_names(settings)
     excluded = provider_backends | {"null"}
-    connected_services = sorted(p for p in store.providers() if p not in excluded and p != "gmail")
+    self_authenticating = _self_authenticating_connections(settings)
+    connected_services = sorted(
+        p for p in store.providers() if p not in excluded and p not in self_authenticating
+    )
 
     if not args:
         lines = ["CONNECTIONS (persistent, additive - connecting one never disconnects another)", ""]
-        lines.extend(_gmail_connection_status(settings))
-        lines.append("")
+        for name, connection in self_authenticating.items():
+            lines.extend(_self_authenticating_status(name, connection))
+            lines.append("")
         if connected_services:
             for service in connected_services:
                 lines.append(f"{service}: connected ({len(store.accounts_for(service))} account(s))")
@@ -2834,24 +2882,25 @@ def run_connections_command(centre: "ControlCenter", rest: str) -> str:
 
     service, *rest_args = args
 
-    if service == "gmail":
+    if service in self_authenticating:
+        connection = self_authenticating[service]
         if not rest_args or rest_args[0] == "status":
-            return "\n".join(_gmail_connection_status(settings))
+            return "\n".join(_self_authenticating_status(service, connection))
         action = rest_args[0]
         if action in ("connect", "disconnect"):
+            auth = connection.self_authentication()
             return (
-                "gmail authenticates via OAuth, not a typed credential - "
-                "connect with 'python scripts/authorize_gmail.py'; "
-                f"disconnect by deleting '{settings.gmail_token_path}'."
+                f"{service} authenticates via {auth.method.split(' - ')[0]}, not a typed credential - "
+                f"connect with '{auth.connect}'; disconnect by {auth.disconnect}."
             )
         if action == "validate":
             registry = build_ecosystem_registry(settings)
-            outcome = registry.adapter_for("connection").validate("gmail")
+            outcome = registry.adapter_for("connection").validate(service)
             return (
                 f"{'OK' if outcome.ok else 'FAILED'}: {outcome.detail}\n"
                 "(Real construction only - no live external call was made.)"
             )
-        return f"unknown connections action '{action}' for gmail. Try: status, validate"
+        return f"unknown connections action '{action}' for {service}. Try: status, validate"
 
     if service in provider_backends:
         return (
@@ -2886,11 +2935,14 @@ def run_connections_command(centre: "ControlCenter", rest: str) -> str:
         )
         store.add(account)
         save_credential_store(store, DEFAULT_ACCOUNTS_PATH)
+        # Phase 11 closure: live at once, through the same all-or-nothing
+        # backend rebind a provider switch uses. 'reload' exists only in the
+        # terminal loop, so from the served Control Center a new account
+        # otherwise waited for a server restart.
         return (
             f"connected {account.describe()} - no secret is ever echoed back. "
-            f"'{service}' stays connected independently of every other service. "
-            "Persisted only - not yet active on this running process. "
-            "Type 'reload' now to make it live in this session, or restart."
+            f"'{service}' stays connected independently of every other service."
+            + _apply_backends_live(centre)
         )
 
     if action == "disconnect":
@@ -2898,7 +2950,10 @@ def run_connections_command(centre: "ControlCenter", rest: str) -> str:
             return "usage: connections <service> disconnect <account-id>"
         store.revoke(service, action_args[0])
         save_credential_store(store, DEFAULT_ACCOUNTS_PATH)
-        return f"disconnected {service}/{action_args[0]} - every other connection is unaffected."
+        return (
+            f"disconnected {service}/{action_args[0]} - every other connection is unaffected."
+            + _apply_backends_live(centre)
+        )
 
     if action == "status":
         accounts = store.accounts_for(service)
@@ -3193,11 +3248,19 @@ def run_services_command(centre: "ControlCenter", rest: str) -> str:
         except ValueError as exc:
             return f"could not declare '{name}': {exc}"
         declare_service(descriptor, DEFAULT_SERVICES_PATH)
+        # Phase 11 closure: every declared service is reachable by name in
+        # conversation, beside every other connection - there is nothing to
+        # "select" - and it is live in this session at once, through the same
+        # backend rebind a provider switch uses. The old text sent the owner
+        # to an environment variable and a restart for what the served
+        # Control Center can now do in place.
         return (
             f"declared '{descriptor.name}' with {len(descriptor.operations)} operation(s) "
-            f"at {descriptor.base_url}. Add a credential with 'connections {descriptor.name} "
-            f"connect <account-id> <credential>' if any operation needs one, then select it "
-            f"with MANAGER_CONNECTION_PROVIDER={descriptor.name} on the next start."
+            f"at {descriptor.base_url}. Ask for it by name in conversation (e.g. "
+            f"'{descriptor.name}: {descriptor.operations[0].name}'), or run one here with "
+            f"'services {descriptor.name} execute <operation>'. An operation that needs a credential "
+            f"needs 'connections {descriptor.name} connect <account-id> <credential>' first."
+            + _apply_backends_live(centre)
         )
 
     if action == "execute":
@@ -3256,7 +3319,7 @@ def run_services_command(centre: "ControlCenter", rest: str) -> str:
 
     if action == "forget":
         removed = forget_service(normalised, DEFAULT_SERVICES_PATH)
-        return f"forgot '{normalised}'" if removed else f"'{name}' was not declared"
+        return (f"forgot '{normalised}'" + _apply_backends_live(centre)) if removed else f"'{name}' was not declared"
 
     return f"unknown services action '{action}' for '{name}'. Try: discover, declare, execute, forget"
 
@@ -3335,7 +3398,9 @@ def run_sites_command(centre: "ControlCenter", rest: str) -> str:
         )
         return (
             f"declared '{descriptor.name}' at {descriptor.base_url}.{credential_note} "
-            f"Select it with MANAGER_CONNECTION_PROVIDER={descriptor.name} on the next start."
+            f"Ask for it by name in conversation, or run one of its operations here with "
+            f"'sites {descriptor.name} execute <operation>'."
+            + _apply_backends_live(centre)
         )
 
     if action == "execute":
@@ -3392,7 +3457,7 @@ def run_sites_command(centre: "ControlCenter", rest: str) -> str:
 
     if action == "forget":
         removed = forget_site(normalised, DEFAULT_SITES_PATH)
-        return f"forgot '{normalised}'" if removed else f"'{name}' was not declared"
+        return (f"forgot '{normalised}'" + _apply_backends_live(centre)) if removed else f"'{name}' was not declared"
 
     return f"unknown sites action '{action}' for '{name}'. Try: declare, execute, forget"
 
@@ -3419,15 +3484,28 @@ def run_ecosystem_command(centre: "ControlCenter", rest: str) -> str:
     settings = centre.runtime.settings
     args = rest.split()
 
-    state = load_evolution_state(DEFAULT_LEDGER_PATH)
+    from src.core.versioning import MigrationUnavailable
+
+    try:
+        state = load_evolution_state(DEFAULT_LEDGER_PATH)
+    except MigrationUnavailable as exc:
+        # Phase 11: a ledger this installation cannot read is reported and
+        # left exactly as it is - never guessed at, never overwritten.
+        return f"FAILED: the evolution ledger cannot be read, so nothing can be proposed, run or rolled back: {exc}"
     components = discover_components(
         centre.runtime, centre.manager, accounts_path=DEFAULT_ACCOUNTS_PATH, config_path=DEFAULT_CONFIG_PATH,
     )
     state = ecosystem_evolution.seed_component_versions(state, components)
     ecosystem_evolution.save_evolution_state(state, DEFAULT_LEDGER_PATH)
+    config_problem = load_governed_config(DEFAULT_CONFIG_PATH).problem
 
     if not args:
         lines = ["ECOSYSTEM INVENTORY (real, currently-installed components)"]
+        if config_problem:
+            lines.append(
+                f"WARNING: {config_problem}. Every governed value is at its default and no governed "
+                "change can be saved until the file is repaired or restored."
+            )
         by_category: dict[str, list] = {}
         for component in components:
             by_category.setdefault(component.category, []).append(component)
@@ -3435,6 +3513,17 @@ def run_ecosystem_command(centre: "ControlCenter", rest: str) -> str:
             lines.append(f"\n{category}:")
             for component in by_category[category]:
                 lines.append(f"  {component.describe()}")
+        # Phase 11 closure: every place the ledger's record disagrees with
+        # what is installed, found on every read - not only when a proposal
+        # on that component happens to be planned.
+        drift = ecosystem_evolution.record_drift(state, components)
+        if drift:
+            lines.append("\nRECORD vs REALITY (the ledger disagrees with what is installed - nothing was changed):")
+            lines.extend(f"  {item.describe()}" for item in drift)
+            lines.append(
+                "  Correct a stale record with 'ecosystem <component> reconcile yes' (the record only, "
+                "never the component); a change still active on it is undone with its own rollback."
+            )
         lines.append(
             "\nUse 'ecosystem <component-id>' for detail, 'ecosystem memory <agent>' for a "
             "development snapshot, 'ecosystem brain <agent>' for Brain development, "
@@ -3493,6 +3582,9 @@ def run_ecosystem_command(centre: "ControlCenter", rest: str) -> str:
         lines = [component.describe()]
         if component.detail:
             lines.append(f"  detail: {component.detail}")
+        own_drift = [d for d in ecosystem_evolution.record_drift(state, components) if d.component_id == component_id]
+        if own_drift:
+            lines.append(f"  RECORD vs REALITY: {own_drift[0].describe()}")
         proposals = state.proposals_for(component_id)
         if proposals:
             lines.append("  proposals:")
@@ -3501,28 +3593,70 @@ def run_ecosystem_command(centre: "ControlCenter", rest: str) -> str:
                     f"    {proposal.proposal_id}: {proposal.status.value} "
                     f"({proposal.current_version} -> {proposal.proposed_version}) - {proposal.reason}"
                 )
+                if proposal.dependencies:
+                    lines.append(f"      after   : {', '.join(proposal.dependencies)}")
+                if proposal.requires:
+                    lines.append("      requires: " + ", ".join(f"{c}={v}" for c, v in proposal.requires))
+                if proposal.provenance:
+                    lines.append(f"      from    : {proposal.provenance}")
         else:
             lines.append("  no proposals yet")
         return "\n".join(lines)
 
     action, *action_args = rest_args
 
+    if action == "reconcile":
+        if not action_args:
+            return "usage: ecosystem <component> reconcile yes|no"
+        result = ecosystem_evolution.reconcile(
+            state, component_id=component_id, real_version=component.version,
+            approved=action_args[0].lower() in ("yes", "y", "true"), ledger_path=DEFAULT_LEDGER_PATH,
+        )
+        return f"{'OK' if result.success else 'FAILED'}: {result.reason}"
+
+    if action == "plan":
+        if not action_args:
+            return "usage: ecosystem <component> plan <proposal-id>"
+        planned = ecosystem_evolution.plan(
+            state, proposal_id=action_args[0], settings=settings, accounts_path=DEFAULT_ACCOUNTS_PATH,
+            config_path=DEFAULT_CONFIG_PATH, staging_dir=DEFAULT_STAGING_DIR, backups_dir=DEFAULT_BACKUPS_DIR,
+        )
+        if planned is None:
+            return f"FAILED: no such proposal '{action_args[0]}'"
+        return planned.describe()
+
     if action == "propose":
+        usage = (
+            "usage: ecosystem <component> propose <new-version> <risk> <reason>|<expected-benefit>"
+            "[|requires <component>=<version>,...][|after <proposal-id>,...]"
+        )
         if len(action_args) < 3:
-            return "usage: ecosystem <component> propose <new-version> <risk> <reason>|<expected-benefit>"
+            return usage
         proposed_version, risk_name, *remainder = action_args
         try:
             risk = RiskLevel(risk_name.lower())
         except ValueError:
             return f"'{risk_name}' is not a real risk level. Try: low, medium, high, critical"
-        text = " ".join(remainder)
-        reason, sep, benefit = text.partition("|")
-        if not sep:
-            return "usage: ecosystem <component> propose <new-version> <risk> <reason>|<expected-benefit>"
+        segments = " ".join(remainder).split("|")
+        if len(segments) < 2:
+            return usage
+        reason, benefit = segments[0], segments[1]
+        requires: dict[str, str] = {}
+        dependencies: list[str] = []
+        for segment in segments[2:]:
+            keyword, _, value = segment.strip().partition(" ")
+            items = [item.strip() for item in value.split(",") if item.strip()]
+            if keyword == "requires" and items and all("=" in item for item in items):
+                requires.update(item.split("=", 1) for item in items)
+            elif keyword == "after" and items:
+                dependencies.extend(items)
+            else:
+                return f"'{segment.strip()}' is not understood. {usage}"
         result = ecosystem_evolution.propose(
             state, component_id=component_id, proposed_version=proposed_version,
             proposed_change=f"{component_id}: {component.version} -> {proposed_version}",
             reason=reason.strip(), expected_benefit=benefit.strip(), risk_level=risk,
+            dependencies=tuple(dependencies), requires=requires, provenance="control-center",
             ledger_path=DEFAULT_LEDGER_PATH,
         )
         if not result.success:
@@ -3564,18 +3698,9 @@ def run_ecosystem_command(centre: "ControlCenter", rest: str) -> str:
         detail = (
             f"{'OK' if result.success else 'FAILED'}: {result.reason} (status: {status})"
         )
-        if result.success and component_id.startswith("brain."):
-            # Pre-Stage-9 Campaign 4: a reasoning mode applies to the running
-            # session in place, the same way a provider switch does.
-            detail += "\nPersisted and independently re-verified." + _apply_reasoning_live(
-                centre, load_credential_store(DEFAULT_ACCOUNTS_PATH)
-            )
-        elif result.success and component_id.startswith("surface."):
-            detail += (
-                "\nPersisted and independently re-verified. Live now: surfaces are described "
-                "from the governed config on every read, so no reload is needed."
-            )
-        elif result.success:
+        if result.success:
+            # How it goes live is the owning handler's declaration, never a
+            # branch on the component's category here (Phase 11).
             detail += "\nPersisted and independently re-verified." + _apply_evolution_live(centre, component_id)
         return detail
 
@@ -3591,14 +3716,11 @@ def run_ecosystem_command(centre: "ControlCenter", rest: str) -> str:
         )
         status = result.proposal.status.value if result.proposal else "(unknown)"
         detail = f"{'OK' if result.success else 'FAILED'}: {result.reason} (status: {status})"
-        if result.success and component_id.startswith("brain."):
-            # A rolled-back reasoning mode is live in this session too.
-            detail += "\n" + _apply_reasoning_live(centre, load_credential_store(DEFAULT_ACCOUNTS_PATH)).lstrip()
-        elif result.success and not component_id.startswith("surface."):
+        if result.success:
             detail += "\n" + _apply_evolution_live(centre, component_id).lstrip()
         return detail
 
-    return f"unknown ecosystem action '{action}'. Try: propose, propose-content, run, rollback"
+    return f"unknown ecosystem action '{action}'. Try: plan, propose, propose-content, run, rollback"
 
 
 def _run_system_upgrade_command(centre: "ControlCenter", args: list[str]) -> str:
@@ -3640,7 +3762,19 @@ def _run_system_upgrade_command(centre: "ControlCenter", args: list[str]) -> str
     request = UpgradeRequest(target_system_version=target_version)
     result = run_upgrade(request, approved=approved, current_manifest=manifest)
 
+    # One truthful leading line: a store migration that ran and was
+    # independently re-read is OK; a plan with nothing to execute changed
+    # nothing (SYSTEM_VERSION is the installed code's own constant - it
+    # changes by installing new code, never by this command); anything else
+    # failed.
+    if result.executed and result.verified:
+        outcome = "OK: the approved migration ran and the stores were independently re-read at the target"
+    elif result.success and not result.executed:
+        outcome = "NOTHING CHANGED: no store migration was required, so nothing was executed or written"
+    else:
+        outcome = f"FAILED: {result.reason}"
     lines = [
+        outcome,
         f"plan status : {result.plan.status.value}",
         f"reason      : {result.reason}",
         f"executed    : {result.executed}",
@@ -3789,6 +3923,26 @@ def classify_administrative_write(command: str) -> "tuple[bool, str]":
         component_id, sub_action, proposal_id = parts[1], parts[2].lower(), parts[3]
         verb_word = "apply" if sub_action == "run" else "roll back"
         return True, f"{verb_word} proposal '{proposal_id}' for component '{component_id}'"
+
+    if (
+        verb == "ecosystem" and len(parts) >= 4 and parts[2].lower() == "reconcile"
+        and parts[3].lower() in ("yes", "y", "true")
+    ):
+        # Phase 11 closure: correcting a stale ledger record is a governed
+        # write like any other - confirmed and audited, never a side effect.
+        return True, f"correct the ledger's record of '{parts[1]}' to what is actually installed"
+
+    if (
+        verb == "ecosystem" and len(parts) >= 5 and parts[1].lower() == "system"
+        and parts[2].lower() == "upgrade" and parts[4].lower() in ("yes", "y", "true")
+    ):
+        # An approved system upgrade may run a real store migration over the
+        # owner's memory and state - confirmed and audited like every other
+        # governed write, never run as a side effect of one typed line.
+        return True, (
+            f"run the governed system upgrade to '{parts[3]}' - any store migration it "
+            "requires runs now, over real memory and state"
+        )
 
     return False, ""
 

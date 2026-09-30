@@ -127,9 +127,16 @@ class TestServiceParameterValidation:
         assert p.location == "query"
         assert p.required is True
 
-    def test_name_is_normalised_like_an_operation_name(self):
+    def test_name_keeps_the_services_own_spelling_and_matches_any_case(self):
+        # Phase 11 closure: a parameter's name is its wire name (the JSON
+        # field or query key the service reads), so its spelling is kept -
+        # lower-casing sent "resourcekey" to an API reading "resourceKey".
+        # Whitespace still becomes underscores, and lookup ignores case.
         p = ServiceParameter(name="Resource Key")
-        assert p.name == "resource_key"
+        assert p.name == "Resource_Key"
+        op = ServiceOperation(name="fetch", method="GET", path="/r", parameters=(ServiceParameter(name="resourceKey"),))
+        assert op.parameter("RESOURCEKEY") is op.parameters[0]
+        assert op.parameter("resourcekey").name == "resourceKey"
 
     def test_an_unrecognised_location_is_refused(self):
         with pytest.raises(ValueError):

@@ -47,6 +47,16 @@ if TYPE_CHECKING:
     from src.manager.brain import ManagerBrain
 
 
+# The words people answer a "which did you mean?" question with - grammar,
+# never a topic - and how many other words an answer may carry.
+_ANSWER_FILLER = frozenset(
+    "i i'm im i'd id meant mean it's its it is was that this one the a an go with let's lets use pick choose "
+    "option yes yeah yep ok okay sure please thanks thank you first second third fourth last former latter "
+    "number no not definitely obviously just".split()
+)
+_ANSWER_MAX_EXTRA_WORDS = 3
+
+
 @dataclass(frozen=True)
 class PendingClarification:
     """A clarifying question already asked, awaiting the person's choice.
@@ -86,7 +96,17 @@ class PendingClarification:
             if candidate.lower() in words:
                 if matched is None or len(candidate) > len(matched):
                     matched = candidate
-        return matched
+        if matched is None:
+            return None
+        # Phase 11 final gate: naming a candidate is not the same as choosing
+        # it. "Summarise the X project history from my documents" names
+        # "the X project" but is a new request - taken as the answer, it
+        # was acted on as a choice and even remembered as one. An answer is the
+        # candidate plus a few words of answering ("I meant ...", "let's go with
+        # the second one, ...", "... please"), never a sentence of its own.
+        rest = re.findall(r"[a-z0-9']+", words.replace(matched.lower(), " "))
+        content = [w for w in rest if w not in _ANSWER_FILLER]
+        return matched if len(content) <= _ANSWER_MAX_EXTRA_WORDS else None
 
 
 @dataclass(frozen=True)
@@ -103,6 +123,11 @@ class CorrectionOption:
 # Replies that decline to choose - grammar, never a topic.
 _CORRECTION_CANCEL = ("never mind", "nevermind", "neither", "cancel", "forget it", "leave it", "none of them")
 _ORDINALS = {"first": 0, "1st": 0, "second": 1, "2nd": 1, "third": 2, "3rd": 2, "fourth": 3, "4th": 3}
+# What an answer to "which should I change?" may say besides the option it
+# names - grammar, never a topic.
+_REFERENCE_WORDS = _ANSWER_FILLER | frozenset(
+    "about regarding one ones thing fact note my your oh well actually um uh".split()
+)
 
 
 @dataclass(frozen=True)
@@ -125,9 +150,29 @@ class PendingCorrection:
             raise ValueError("a PendingCorrection needs at least two options")
 
     def select_option(self, reply: str) -> "CorrectionOption | None":
+        """The option this reply chooses, or None.
+
+        Phase 11 closure: naming an option is not choosing it - the rule
+        ``PendingClarification.select_candidate`` already follows, held
+        tighter here because what is chosen gets rewritten. "What do you
+        remember about my favourite colour?" chose the colour and stored the
+        stale replacement over it; "actually the pump seal was replaced in
+        April" chose the March note and stored "green" over that. A choice
+        only names: the option's own words, the replacement already asked
+        about, and answer grammar. Anything else is a remark of its own."""
         words = " ".join(str(reply or "").lower().split())
         if not words:
             return None
+        chosen = self._named_option(words)
+        if chosen is None:
+            return None
+        own = set(re.findall(r"[a-z0-9']+", f"{chosen.topic} {chosen.value} {self.replacement}".lower()))
+        said = re.findall(r"[a-z0-9']+", words)
+        if any(w not in own and w not in _REFERENCE_WORDS and w not in _ORDINALS for w in said):
+            return None
+        return chosen
+
+    def _named_option(self, words: str) -> "CorrectionOption | None":
         for word, index in _ORDINALS.items():
             if re.search(rf"\b{word}\b", words) and index < len(self.options):
                 return self.options[index]
@@ -328,6 +373,21 @@ class ActivitySessions:
             return True
         self.clear_correction(agent_key)
         return False
+
+    # -- anything the person alone may answer ------------------------------
+
+    def awaits_reply(self, agent_key: str) -> bool:
+        """Whether this agent has put a question to the person that only the
+        person's own next remark may answer: a clarification, a consequential
+        action's yes/no, an open correction question, or a guided activity's
+        current question. Every one of those resolves against whatever remark
+        arrives next, so nothing but the person may be allowed to send one."""
+        key = str(agent_key)
+        with self._lock:
+            return any(
+                key in store
+                for store in (self._clarifications, self._confirmations, self._corrections, self._activities)
+            )
 
 
 @dataclass(frozen=True)

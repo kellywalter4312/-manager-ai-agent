@@ -114,6 +114,10 @@ def _with_brain(system, provider):
 
 class TestControlCenterChangesAreLive:
     def test_a_backend_switched_in_the_control_center_is_used_by_the_very_next_turn(self, isolated):
+        pytest.importorskip(
+            "argostranslate",
+            reason="argostranslate is not installed; translation_provider live switch cannot be verified",
+        )
         system = _system(isolated)
         before = _say(system, "Translate 'good night' into Spanish.")
         assert "not enabled" in before.outcome
@@ -126,6 +130,10 @@ class TestControlCenterChangesAreLive:
         assert system.runtime.settings.translation == "argos"
 
     def test_a_failed_backend_switch_changes_nothing_and_says_so(self, isolated, monkeypatch):
+        pytest.importorskip(
+            "argostranslate",
+            reason="argostranslate is not installed; translation_provider switch refusal cannot be verified",
+        )
         system = _system(isolated)
         import src.composition as composition
 

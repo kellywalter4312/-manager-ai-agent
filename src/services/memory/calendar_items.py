@@ -396,6 +396,17 @@ def parse_calendar_date(phrase: str, *, today: "date | None" = None) -> "date | 
     if weekday_match is not None:
         return next_weekday_occurrence(WEEKDAY_NAMES[weekday_match.group(1).lower()], today=as_of)
 
+    # "this Friday", "next Monday", "coming Tuesday" - the same weekday
+    # resolution, qualified. "next" means the following week when the coming
+    # occurrence is still inside this one, which is what a person means by it;
+    # "this"/"coming" always mean the next occurrence.
+    qualified = re.fullmatch(rf"(this|next|coming)\s+({_WEEKDAY_PATTERN})s?", cleaned, re.IGNORECASE)
+    if qualified is not None:
+        occurrence = next_weekday_occurrence(WEEKDAY_NAMES[qualified.group(2).lower()], today=as_of)
+        if qualified.group(1).lower() == "next" and occurrence.isocalendar()[:2] == as_of.isocalendar()[:2]:
+            occurrence += timedelta(days=7)
+        return occurrence
+
     month_day = parse_month_day(phrase)
     if month_day is not None:
         month, day = month_day
@@ -422,10 +433,20 @@ _LEADING_CONNECTOR = re.compile(
 _LEADING_LABEL = re.compile(r"^[a-z][a-z '\-]*:\s*", re.IGNORECASE)
 
 
+# "put lunch with Sam in my calendar for Tuesday" - where it goes is not part
+# of what it is called. The same trailing phrase _NAMED_FIRST_RECURRING already
+# drops from its own match, applied wherever a title is cleaned.
+_TRAILING_DESTINATION = re.compile(
+    r"\s+(?:in|on|to|into)\s+(?:my|the|our)\s+(?:calendar|schedule|diary|planner)\s*$",
+    re.IGNORECASE,
+)
+
+
 def _clean_title(text: str) -> str:
     cleaned = " ".join(str(text or "").split()).strip(" ,.:;!?")
     cleaned = _LEADING_CONNECTOR.sub("", cleaned).strip(" ,.:;!?")
     cleaned = _LEADING_LABEL.sub("", cleaned).strip(" ,.:;!?")
+    cleaned = _TRAILING_DESTINATION.sub("", cleaned).strip(" ,.:;!?")
     return cleaned
 
 
@@ -438,15 +459,39 @@ def _bounded(text: str) -> str:
 
 # --- ADD: a single, dated (or bare-weekday-dated) item ---------------------
 
+# The ways a person says something belongs at a named time - this domain's own
+# verb vocabulary, exactly as ``_CONSTRUCTION_VERBS`` is the construction
+# layer's. No subject, weekday or title is named here, and a request to *make*
+# something is deferred to its own capability long before this is reached (see
+# ``capabilities.calendar_intent``'s construction deferral).
+#
+# Phase 11 closure sweep: the set held "i have"/"there's"/"add"/"schedule"
+# alone, so "create a meeting on Friday at 3pm" and "book a call with the bank
+# next Monday at 9am" extracted nothing at all - the request was recognised as
+# calendar-shaped upstream and then had no item to add.
+_SCHEDULING_LEAD = (
+    r"i have|i've got|i have got|there'?s|there is|add(?:ing)?|schedule[d]?"
+    r"|book(?:ing)?|create|make|set\s+up|arrange|organise|organize|plan"
+    r"|put|pencil\s+in|block\s+out"
+)
+# A date phrase that needs no preposition, because the phrase itself says it is
+# one ("next Monday at 9am", "tomorrow at 2", "Friday at 3pm").
+_BARE_DATE_LEAD = rf"(?:this|next|coming|tomorrow|today|{_WEEKDAY_PATTERN})"
+
 _ON_MARKER = re.compile(
-    r"\b(?:i have|i've got|i have got|there'?s|there is|add(?:ing)?|schedule[d]?)\s+"
-    r"(?:an?\s+|my\s+)?(?P<title>[^.!?]+?)\s+on\s+(?P<rest>[^.!?]+)",
+    rf"\b(?:{_SCHEDULING_LEAD})\s+"
+    r"(?:an?\s+|my\s+)?(?P<title>[^.!?]+?)\s+(?:on|for)\s+(?P<rest>[^.!?]+)",
+    re.IGNORECASE,
+)
+_BARE_DATE_MARKER = re.compile(
+    rf"\b(?:{_SCHEDULING_LEAD})\s+"
+    rf"(?:an?\s+|my\s+)?(?P<title>[^.!?]+?)\s+(?P<rest>{_BARE_DATE_LEAD}\b[^.!?]*)",
     re.IGNORECASE,
 )
 
 
 def _extract_dated_add(text: str, *, today: "date | None" = None) -> "CalendarItemCandidate | None":
-    match = _ON_MARKER.search(text)
+    match = _ON_MARKER.search(text) or _BARE_DATE_MARKER.search(text)
     if match is None:
         return None
     title = _clean_title(match.group("title"))

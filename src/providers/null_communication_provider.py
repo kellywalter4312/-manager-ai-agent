@@ -30,6 +30,9 @@ class NullCommunicationProvider(CommunicationProvider):
     def read_messages(self, *, limit: int = 10) -> tuple[CommunicationEvent, ...]:
         return ()
 
+    def unavailable_reason(self) -> "str | None":
+        return _UNAVAILABLE_REASON
+
     def send_message(self, *, to: str, content: str) -> CommunicationResult:
         return CommunicationResult(
             operation="send",

@@ -33,6 +33,7 @@ guessed at.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -153,8 +154,11 @@ def load_evolution_state(path: "Path | str" = DEFAULT_LEDGER_PATH) -> EvolutionS
     if not path.exists():
         return EvolutionState()
 
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    on_disk_version = int(payload.get("schema_version", SCHEMA_VERSION))
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        on_disk_version = int(payload.get("schema_version", SCHEMA_VERSION))
+    except (OSError, UnicodeDecodeError, ValueError, TypeError, AttributeError) as exc:
+        raise MigrationUnavailable(f"evolution state at '{path}' is not readable ({exc}); it is left untouched") from exc
     raw = payload.get("data", payload)
     if on_disk_version != SCHEMA_VERSION:
         try:
@@ -165,26 +169,40 @@ def load_evolution_state(path: "Path | str" = DEFAULT_LEDGER_PATH) -> EvolutionS
                 f"this code expects {SCHEMA_VERSION}, and no migration path exists: {exc}"
             ) from exc
 
-    ledger = EvolutionLedger(
-        current_versions=raw.get("current_versions", {}),
-        active_proposals=tuple(raw.get("active_proposals", ())),
-    )
-    proposals = {
-        proposal_id: EvolutionProposal(
-            proposal_id=entry["proposal_id"],
-            target=entry["target"],
-            current_version=entry["current_version"],
-            proposed_version=entry["proposed_version"],
-            proposed_change=entry["proposed_change"],
-            reason=entry["reason"],
-            expected_benefit=entry["expected_benefit"],
-            risk_level=RiskLevel(entry["risk_level"]),
-            dependencies=tuple(entry.get("dependencies", ())),
-            status=EvolutionStatus(entry["status"]),
+    # A status, risk level or field this code does not know - written by a
+    # newer installation, or damaged - is refused with the same one
+    # exception type as an unknown schema, never guessed at or crashed on:
+    # the Control Center reports it and leaves the file exactly as it is.
+    try:
+        ledger = EvolutionLedger(
+            current_versions=raw.get("current_versions", {}),
+            active_proposals=tuple(raw.get("active_proposals", ())),
         )
-        for proposal_id, entry in raw.get("proposals", {}).items()
-    }
-    history = tuple(HistoryEntry.from_dict(entry) for entry in raw.get("history", ()))
+        proposals = {
+            proposal_id: EvolutionProposal(
+                proposal_id=entry["proposal_id"],
+                target=entry["target"],
+                current_version=entry["current_version"],
+                proposed_version=entry["proposed_version"],
+                proposed_change=entry["proposed_change"],
+                reason=entry["reason"],
+                expected_benefit=entry["expected_benefit"],
+                risk_level=RiskLevel(entry["risk_level"]),
+                dependencies=tuple(entry.get("dependencies", ())),
+                status=EvolutionStatus(entry["status"]),
+                # Absent in a ledger written before Phase 11: no requirements,
+                # no recorded provenance - exactly what those proposals had.
+                requires=entry.get("requires", {}),
+                provenance=entry.get("provenance", ""),
+            )
+            for proposal_id, entry in raw.get("proposals", {}).items()
+        }
+        history = tuple(HistoryEntry.from_dict(entry) for entry in raw.get("history", ()))
+    except (KeyError, ValueError, TypeError, AttributeError) as exc:
+        raise MigrationUnavailable(
+            f"evolution state at '{path}' holds something this installation does not understand "
+            f"({type(exc).__name__}: {exc}); it is left untouched"
+        ) from exc
     return EvolutionState(ledger=ledger, proposals=proposals, history=history)
 
 
@@ -208,4 +226,8 @@ def save_evolution_state(state: EvolutionState, path: "Path | str" = DEFAULT_LED
             "history": [entry.to_dict() for entry in state.history],
         },
     }
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    # Atomic: a temporary file, then os.replace - so a failure part-way
+    # through leaves the previous complete ledger, never half of a new one.
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    os.replace(temporary, path)

@@ -550,20 +550,48 @@ class TestFutureTargetCategoriesNeedNoCoreChange:
         assert result.after_ledger.version_of(target) == "1.1"
 
     def test_no_core_lifecycle_function_branches_on_target(self):
+        """No core function decides anything from *which* target a proposal
+        names: ``.target`` is never compared with a literal (or a collection
+        of literals) and never prefix/suffix-dispatched.
+
+        Phase 11 made this precise and wider rather than weaker: it now
+        covers the planner and the compatibility-requirement functions too,
+        and it no longer flags comparing one proposal's target with another's
+        (or with a requirement's component) - an identity check that is the
+        same for every target, which the planner needs to find stale and
+        affected changes. Mutation-checked: a literal category branch added
+        to ``plan_proposal`` fails this test."""
         source = (REPO_ROOT / "src" / "evolution.py").read_text(encoding="utf-8")
         tree = ast.parse(source)
         core_functions = {
             "validate_proposal", "evaluate_proposal", "approve_proposal", "apply_proposal",
             "verify_proposal", "activate_proposal", "rollback_proposal", "run_evolution_lifecycle",
+            "requirement_problem", "unmet_requirements", "plan_proposal", "_dependency_order",
         }
+        defined = {node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+        assert core_functions <= defined, core_functions - defined
+
+        def literal(node) -> bool:
+            if isinstance(node, ast.Constant):
+                return True
+            return isinstance(node, (ast.Tuple, ast.List, ast.Set)) and all(isinstance(e, ast.Constant) for e in node.elts)
+
+        def is_target(node) -> bool:
+            return isinstance(node, ast.Attribute) and node.attr == "target"
+
         for node in ast.walk(tree):
             if isinstance(node, ast.FunctionDef) and node.name in core_functions:
                 for inner in ast.walk(node):
                     if isinstance(inner, ast.Compare):
                         candidates = [inner.left, *inner.comparators]
-                        for candidate in candidates:
-                            if isinstance(candidate, ast.Attribute) and candidate.attr == "target":
-                                pytest.fail(f"{node.name} branches on .target")
+                        if any(is_target(c) for c in candidates) and any(literal(c) for c in candidates):
+                            pytest.fail(f"{node.name} branches on .target")
+                    if (
+                        isinstance(inner, ast.Call) and isinstance(inner.func, ast.Attribute)
+                        and inner.func.attr in ("startswith", "endswith", "split", "partition", "rpartition")
+                        and is_target(inner.func.value)
+                    ):
+                        pytest.fail(f"{node.name} dispatches on .target")
 
     def test_no_core_lifecycle_function_branches_on_risk_level(self):
         """The stage's own principle, checked structurally: risk_level is

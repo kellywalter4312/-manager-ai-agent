@@ -44,8 +44,6 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from elevenlabs.client import ElevenLabs
-
 from src.channels.speech import SpeechAdapter, SpeechUnavailable
 from src.providers.availability import Availability, AvailabilityState
 from src.services.identity.voice import VoiceProfile
@@ -53,6 +51,13 @@ from src.services.identity.voice_options import VoiceOption
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+# Optional vendor SDK - imported at module level so tests can monkeypatch
+# `elevenlabs_speech_provider.ElevenLabs`; None when the package is absent.
+try:
+    from elevenlabs.client import ElevenLabs
+except ImportError:
+    ElevenLabs = None  # type: ignore[assignment,misc]
 
 # A real, complete WAV container (RIFF header included) rather than raw PCM -
 # so nothing here has to build a header by hand, and so a played file is
@@ -116,6 +121,11 @@ class ElevenLabsSpeechAdapter(SpeechAdapter):
     """
 
     def __init__(self, api_key: str) -> None:
+        if ElevenLabs is None:
+            raise ImportError(
+                "the elevenlabs package is required for MANAGER_SPEECH=elevenlabs; "
+                "run: pip install elevenlabs"
+            )
         self._client = ElevenLabs(api_key=api_key)
         self._availability = Availability()
 

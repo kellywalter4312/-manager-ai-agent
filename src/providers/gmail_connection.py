@@ -53,11 +53,13 @@ from src.providers.connection import (
     Connection,
     ConnectionResult,
     ConnectionStatus,
+    SelfAuthentication,
     utc_now,
 )
 from src.services.email.mailbox import Mailbox, MailboxError
 
 READ_EMAIL = "read_email"
+AUTHORIZE_COMMAND = "python scripts/authorize_gmail.py"
 
 
 class GmailConnection(Connection):
@@ -96,6 +98,47 @@ class GmailConnection(Connection):
     @property
     def supported_operations(self) -> tuple[str, ...]:
         return (READ_EMAIL,)
+
+    def self_authentication(self) -> SelfAuthentication:
+        """Gmail authenticates through its own OAuth flow and a token file -
+        never a typed credential - said here, by Gmail's own code, so the
+        Control Center describes it without knowing it by name."""
+        details: tuple[str, ...] = ()
+        if self.authorization == AuthorizationState.AUTHORIZED:
+            # "Authorized" only means a token file exists. What the file itself
+            # says about its access token is read here, locally - whether Google
+            # still accepts its refresh can only be learned by using it, and that
+            # is said plainly rather than implied.
+            expiry = self._token_expiry()
+            if expiry is not None:
+                from datetime import datetime, timezone
+
+                state = "expired" if expiry < datetime.now(timezone.utc) else "valid until"
+                details = (
+                    f"access token : {state} {expiry:%Y-%m-%d %H:%M} UTC - refreshed on first use; if Google refuses "
+                    f"the refresh, re-authorize with: {AUTHORIZE_COMMAND}",
+                )
+        return SelfAuthentication(
+            method="OAuth - connected via a token file, not a typed credential",
+            connect=AUTHORIZE_COMMAND,
+            disconnect=f"deleting '{self._token_path}'",
+            details=details,
+        )
+
+    def _token_expiry(self):
+        """The access-token expiry recorded in the token file, or None - a
+        local read only, never a network call and never a credential shown."""
+        import json
+        from datetime import datetime, timezone
+
+        try:
+            raw = json.loads(self._token_path.read_text(encoding="utf-8")).get("expiry")
+            if not raw:
+                return None
+            moment = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+        except (OSError, ValueError, AttributeError):
+            return None
 
     def execute(self, operation: str, **params: Any) -> ConnectionResult:
         if operation not in self.supported_operations:

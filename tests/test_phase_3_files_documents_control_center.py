@@ -468,10 +468,17 @@ class TestControlCenterCapabilityMatrix:
         # and so is Document Rendering (PDF) - "simple_pdf" is real,
         # local, zero-credential, and the default, the same reasoning
         # Avatar/Environment's own "default" providers already establish.
-        for row in ("Avatar", "Environment", "Memory", "Artifact Workspace (documents, images/diagrams, audio, video)", "Document Rendering (PDF)"):
+        # Phase 11 closure adds a sixth of exactly the same kind: the Artifact
+        # Runtime. "browser" is real, local, zero-credential and the default -
+        # the real installed Chromium, started only when someone actually asks
+        # for an artifact to be run - so it is honestly READY here for the same
+        # reason Document Rendering's "simple_pdf" is. An installation with no
+        # browser is told so at the moment of asking, not by a row that lies.
+        for row in ("Avatar", "Environment", "Memory", "Artifact Workspace (documents, images/diagrams, audio, video)",
+                    "Document Rendering (PDF)", "Artifact Runtime (run what was made, and report what it did)"):
             line = next(l for l in report.splitlines() if row in l)
             assert "READY" in line, line
-        assert report.count("READY") == 5
+        assert report.count("READY") == 6
 
     def test_image_analysis_becomes_ready_only_with_a_real_vision_capable_provider(self):
         runtime, manager, channel, conversation = real_system(

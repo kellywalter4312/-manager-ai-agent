@@ -608,6 +608,14 @@ class TestCommunicationReachesAnAuthorizedSpecialistAndRevocationStopsAPendingCo
 ON_WINDOWS = sys.platform.startswith("win")
 ARGOS_INSTALLED = build_translator(type("_TranslationChoice", (), {"translation": "argos"})()) is not None
 LOCAL_MODEL = REPO_ROOT / "data" / "models" / "llm" / "qwen2.5-1.5b-instruct-q4_k_m.gguf"
+# The local model tests also require llama-cpp-python to be installed.
+def _llama_available() -> bool:
+    try:
+        import llama_cpp  # noqa: F401
+        return True
+    except ImportError:
+        return False
+LOCAL_MODEL_USABLE = LOCAL_MODEL.is_file() and _llama_available()
 
 
 def _wav(tmp_path, sentence: str) -> bytes:
@@ -941,7 +949,7 @@ class TestGeneralAssistanceReachesTheSpecialistsOwnReasoningNotAlfreds:
         assert "I won't guess at code" in turn.outcome
         assert "local_assist_provider" in turn.outcome
 
-    @pytest.mark.skipif(not LOCAL_MODEL.is_file(), reason="the real local model this machine has installed")
+    @pytest.mark.skipif(not LOCAL_MODEL_USABLE, reason="local model file or llama-cpp-python not available")
     def test_half_brain_really_writes_code_through_the_local_assistant(self, tmp_path, monkeypatch):
         _sandbox(tmp_path, monkeypatch)
         system = su.build_live_system(_settings(tmp_path, media="local", local_assist="local"))
@@ -1067,7 +1075,7 @@ class TestWhatWasAskedIsNotWhoWasAsked:
     nothing was stripped at all.
     """
 
-    @pytest.mark.skipif(not LOCAL_MODEL.is_file(), reason="the real local model this machine has installed")
+    @pytest.mark.skipif(not LOCAL_MODEL_USABLE, reason="local model file or llama-cpp-python not available")
     def test_a_saved_code_artifact_is_titled_by_the_ask_not_the_address(self, tmp_path, monkeypatch):
         _sandbox(tmp_path, monkeypatch)
         system = su.build_live_system(_settings(tmp_path, media="local", local_assist="local"))

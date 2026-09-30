@@ -387,6 +387,7 @@ class TestFallbackIsSafeAndIsolatedPerCall:
         assert fallback in INSTALLED
 
     def test_elevenlabs_fails_honestly_when_id_is_missing_never_crashes(self, monkeypatch):
+        pytest.importorskip("elevenlabs", reason="elevenlabs SDK not installed")
         adapter = ElevenLabsSpeechAdapter(api_key="fake")
         monkeypatch.setattr(elevenlabs_speech_provider, "_play_wav_bytes", lambda audio: True)
         assert adapter.speak("hello", VoiceProfile(key="broken-agent")) is False
@@ -396,6 +397,7 @@ class TestFallbackIsSafeAndIsolatedPerCall:
         """Same shared adapter instance, two calls in sequence: the first
         agent has no id (fails honestly), the second has a real one and
         still succeeds - proving state from one call cannot poison another."""
+        pytest.importorskip("elevenlabs", reason="elevenlabs SDK not installed")
         adapter = ElevenLabsSpeechAdapter(api_key="fake")
         monkeypatch.setattr(elevenlabs_speech_provider, "_play_wav_bytes", lambda audio: True)
 

@@ -72,10 +72,13 @@ class Model3DProductionTool(Tool):
         subject = " ".join(str(request.get("subject") or "a model").split())[:100]
         description = parse_part_description(str(request.get("description") or ""))
         generator = "part_assembly"
+        # How the whole subject moves, when the request says so - a registered
+        # motion's name, validated by assemble_glb like every part's own.
+        motion = str(request.get("motion") or "").strip().lower() or None
         if description.parts:
             if description.not_understood:
                 raise Model3DError("parts not understood: " + "; ".join(description.not_understood))
-            data = assemble_glb(description.parts, title=subject)
+            data = assemble_glb(description.parts, title=subject, motion=motion)
         else:
             wanted = str(request.get("generator") or "").strip().lower()
             chosen = wanted if wanted in _GENERATORS else next(iter(_GENERATORS), None)
@@ -87,7 +90,7 @@ class Model3DProductionTool(Tool):
             reason = "; ".join(report.problems) or f"its extent {report.extent} is not three-dimensional"
             raise Model3DError(f"the result is not genuine 3D content ({reason}) - nothing was saved")
         plan = {"subject": subject, "generator": generator, "parts": [p.to_dict() for p in description.parts],
-                "report": report.to_dict()}
+                "motion": motion if description.parts else None, "report": report.to_dict()}
         artifact = register_new_artifact(
             self._store, type=MODEL3D_TYPE, owner_agent=self._owner_agent, title=f"3D model - {subject}"[:120],
             content_bytes=json.dumps(plan, indent=2).encode("utf-8"), rendition_format="glb", rendition_bytes=data,

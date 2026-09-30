@@ -216,7 +216,27 @@ class CategoryAdapter(ABC):
         replacing it. Empty by default: most categories have none."""
         return ()
 
+    @property
+    def single_selection(self) -> bool:
+        """Whether this category is "one backend at a time" - True for every
+        provider axis. A category whose entries are all live at once (every
+        registered capability) says False, so it is never drawn as a set of
+        radio choices with nothing chosen (Phase 11 closure: the capability
+        category showed all 52 as unselected, "active: (none)")."""
+        return True
+
+    def selection_note(self) -> str:
+        """For a category that is not a single selection, how its entries are
+        actually managed - empty by default."""
+        return ""
+
     def describe(self) -> str:
+        if not self.single_selection:
+            lines = [f"{self.category}:"]
+            lines.extend(f"  - {descriptor.key}" for descriptor in self.available())
+            note = self.selection_note()
+            lines.append(f"  (every entry is available at once - not a single choice{'; ' + note if note else ''})")
+            return "\n".join(lines)
         active = self.active()
         lines = [f"{self.category}:"]
         for descriptor in self.available():
@@ -257,6 +277,8 @@ class GenericCategoryAdapter(CategoryAdapter):
         requires_credential: "Callable[[str], bool]" = lambda key: False,
         dependents: Iterable[str] = (),
         operations: "frozenset[LifecycleOperation] | None" = None,
+        single_selection: bool = True,
+        selection_note: str = "",
     ) -> None:
         self._category = " ".join(str(category).split()).lower()
         if not self._category:
@@ -267,10 +289,19 @@ class GenericCategoryAdapter(CategoryAdapter):
         self._requires_credential = requires_credential
         self._dependents = tuple(dependents)
         self._operations = operations
+        self._single_selection = bool(single_selection)
+        self._selection_note = str(selection_note or "")
 
     @property
     def category(self) -> str:
         return self._category
+
+    @property
+    def single_selection(self) -> bool:
+        return self._single_selection
+
+    def selection_note(self) -> str:
+        return self._selection_note
 
     def available(self) -> tuple[ComponentDescriptor, ...]:
         active = self._active_key()

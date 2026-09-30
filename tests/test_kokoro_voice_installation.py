@@ -25,6 +25,8 @@ from __future__ import annotations
 import io
 import wave
 from pathlib import Path
+
+import pytest
 from types import SimpleNamespace
 
 from src.channels.channel import VoiceChannel
@@ -106,6 +108,7 @@ class TestGenuineEndToEndSynthesis:
     exchange(speak=True), real ONNX inference, real two-voice archive."""
 
     def test_alfred_speaks_with_am_eric_through_the_real_production_path(self, monkeypatch):
+        pytest.importorskip("kokoro_onnx", reason="kokoro_onnx not installed")
         captured = {}
         monkeypatch.setattr(
             kokoro_speech_provider,

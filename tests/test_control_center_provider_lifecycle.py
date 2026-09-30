@@ -54,6 +54,7 @@ def _cmd(system, command):
 
 class TestAStoredAccountIsWhatABackendIsBuiltWith:
     def test_use_builds_the_credentialed_backend_with_the_stored_account(self, system):
+        pytest.importorskip("elevenlabs", reason="elevenlabs SDK not installed")
         assert "FAILED" in _cmd(system, "provider speech_provider use elevenlabs")
         assert "add one here first" in _cmd(system, "provider speech_provider use elevenlabs")
         _cmd(system, f"provider speech_provider add elevenlabs studio {SECRET}")
@@ -62,12 +63,14 @@ class TestAStoredAccountIsWhatABackendIsBuiltWith:
         assert SECRET not in out
 
     def test_validate_without_a_typed_credential_checks_the_stored_account(self, system):
+        pytest.importorskip("elevenlabs", reason="elevenlabs SDK not installed")
         _cmd(system, f"provider speech_provider add elevenlabs studio {SECRET}")
         assert _cmd(system, "provider speech_provider validate elevenlabs").startswith("OK")
 
 
 class TestRevokingTheActiveAccountRetiresItsBackend:
     def test_a_voice_backend_left_with_no_account_is_no_longer_used(self, system):
+        pytest.importorskip("elevenlabs", reason="elevenlabs SDK not installed")
         _cmd(system, f"provider speech_provider add elevenlabs studio {SECRET}")
         _cmd(system, "provider speech_provider use elevenlabs")
         out = _cmd(system, "provider speech_provider revoke elevenlabs studio")

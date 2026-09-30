@@ -381,15 +381,21 @@ class ManagerAgent:
                         it is used - and it is used *as a decision*, feeding
                         the same assemble/act/assess loop as any other.
 
-            claimed     one of the Manager's own capabilities recognised this
-                        task's *shape* (own_skills.claims(task) - see that
-                        method's own docstring). A specialist's declared
+            owned       one of the Manager's own *self-contained* capabilities
+                        recognised this task's shape, or a session is already
+                        in progress (own_skills.owns(task) - see that method's
+                        own docstring). For that work a specialist's declared
                         capability words are a coarse, incidental signal
-                        compared to Alfred's own capability explicitly
-                        recognising its own request, so this is checked
-                        before the router's word-overlap score - the same
-                        priority ``addressed`` already has, for the same
-                        reason.
+                        compared to Alfred's own capability recognising its own
+                        request, so it is checked before the router's
+                        word-overlap score - the same priority ``addressed``
+                        already has, for the same reason.
+
+                        Recognising a request is deliberately not enough (P11Z-09).
+                        A capability that recognises a request but does not
+                        declare itself the Manager's own work falls through to
+                        the router, so an authorised specialist can receive the
+                        kind of work it was created for.
 
             scored      the router scores declared capabilities, exactly as
                         before.
@@ -427,6 +433,12 @@ class ManagerAgent:
                 # and unclaimed work below - which still returns the Manager for
                 # anything no specialist should take.
                 logger.debug("the Manager was addressed; deciding who handles it as usual")
+            elif agent is not None and self._room_act_for_orchestrator(task):
+                # Phase 11 closure: "Arthur, you can go" is said to Arthur but
+                # asks the room's owner to act - a participant cannot excuse
+                # itself or change who else is present. The Manager's own
+                # claim below takes it.
+                logger.debug("'%s' was addressed with a room act; the orchestrator takes it", agent.name)
             elif agent is not None:
                 return RoutingDecision(
                     agent_name=agent.name,
@@ -446,17 +458,72 @@ class ManagerAgent:
                 reason="handed over at the person's request",
             )
         if self.own_skills is not None:
-            claims = getattr(self.own_skills, "claims", None)
-            if claims is not None and claims(task):
+            # P11Z-09: *owns*, not *claims*. Recognising a request's shape is
+            # not the same as the work being the Manager's - see
+            # ManagerSkills.owns. A capability that only recognises falls
+            # through to the router below, exactly as an unrecognised request
+            # already did, so an authorised specialist can receive it.
+            owns = getattr(self.own_skills, "owns", None) or getattr(self.own_skills, "claims", None)
+            if owns is not None and owns(task):
                 return RoutingDecision(
                     agent_name=self.own_skills.name,
                     score=1,
-                    reason="claimed by one of the Manager's own capabilities",
+                    reason="the Manager's own self-contained work",
                 )
         decision = self.diagnose(task)
-        if decision is not None:
+        if decision is not None and self._authorised_for(decision.agent_name, task):
             return decision
         return self._unclaimed_work_decision()
+
+    def _authorised_for(self, agent_name: str, task: Task) -> bool:
+        """Whether the agent the router picked may actually do this work.
+
+        The other half of P11Z-09. Once recognising a request stopped pre-empting
+        delegation, the router could hand a specialist work whose capability
+        the owner never granted it - in-domain by declared words, outside its
+        grants - and the only thing left to say was an honest refusal naming
+        who could have done it. A request that used to be completed became a
+        request the person had to make twice.
+
+        So delegation asks the question governance already answers. No new
+        rule and no second notion of authorisation: this is the identical
+        ``unauthorised_reason`` the specialist itself would have replied with
+        (see ``CognitiveAgent.general_conversation``), asked *before* the work
+        is handed over instead of after. It names no capability, no agent and
+        no domain - it reads the grants the owner made.
+
+        True whenever there is nothing to consult (a bare registry, an agent
+        with no capability handler, the Manager's own skills), so every
+        construction that predates this behaves exactly as it did.
+        """
+        if self.own_skills is not None and agent_name == self.own_skills.name:
+            return True
+        agent = self.registry.get(agent_name)
+        if agent is None:
+            return True
+        handler = getattr(agent, "_capability_handler", None)
+        unauthorised = getattr(handler, "unauthorised_reason", None)
+        if not callable(unauthorised):
+            return True
+        try:
+            reason = unauthorised(agent, task)
+        except Exception:  # noqa: BLE001 - a governance read that fails must never
+            # decide who works; it degrades to "no objection", the same
+            # direction every other optional hook here degrades in.
+            return True
+        if reason:
+            logger.debug(
+                "'%s' scored for this task but is not authorised for it; the Manager takes it",
+                agent_name,
+            )
+            return False
+        return True
+
+    def _room_act_for_orchestrator(self, task: Task) -> bool:
+        """Whether the Manager's own skills recognise ``task`` as a room act
+        (see ``ManagerSkills.claims_room_act``) - False with no own skills."""
+        check = getattr(self.own_skills, "claims_room_act", None) if self.own_skills is not None else None
+        return bool(check is not None and check(task))
 
     def _unclaimed_work_decision(self) -> RoutingDecision | None:
         """Who takes work no specialist's declared capabilities matched.

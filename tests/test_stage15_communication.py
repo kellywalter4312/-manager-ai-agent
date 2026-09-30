@@ -422,8 +422,21 @@ class TestCapabilityPermissionIsEnforced:
 
 
 class TestUnavailableProviderFailsHonestly:
-    def test_null_provider_read_is_honestly_empty(self):
+    def test_null_provider_read_says_nothing_is_connected(self):
+        # Phase 11 closure: this used to succeed with "No recent messages or
+        # calls." - an unconfigured connection reading as a checked, empty
+        # inbox. Nothing connected is said as exactly that, the same way the
+        # send and call below already fail.
         manager = manager_with_communication(NullCommunicationProvider())
+        result = manager.handle_task(READ_TASK)
+        assert not result.succeeded
+        assert "no authorized communication connection is configured" in result.error
+        assert "No recent messages" not in (result.output or "") + (result.error or "")
+
+    def test_a_connected_provider_with_nothing_new_is_still_honestly_empty(self):
+        # The empty answer stays true where it is true: a real connection
+        # that has nothing recent.
+        manager = manager_with_communication(ScriptedCommunicationProvider())
         result = manager.handle_task(READ_TASK)
         assert result.succeeded
         assert "No recent messages or calls." in result.output

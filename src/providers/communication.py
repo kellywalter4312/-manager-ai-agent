@@ -175,5 +175,14 @@ class CommunicationProvider(ABC):
         """Attempt to place a call to ``to``. Consequential - see this
         module's own docstring on governance."""
 
+    def unavailable_reason(self) -> "str | None":
+        """Why nothing real stands behind this provider, or None when a real
+        connection does. A provider with no connection answers ``read_messages``
+        with an empty tuple, which a reader cannot tell apart from a real,
+        empty inbox - so the reading boundary asks this first and says the
+        truth instead of "no recent messages" (Phase 11 closure: an
+        unconfigured connection must never read as a checked, empty one)."""
+        return None
+
     def __repr__(self) -> str:
         return f"<{type(self).__name__} name={self.name!r}>"

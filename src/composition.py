@@ -79,6 +79,8 @@ from src.providers.avatar import AvatarProvider
 from src.providers.avatar_factory import build_avatar_provider
 from src.providers.environment import EnvironmentProvider
 from src.providers.environment_factory import build_environment_provider
+from src.providers.artifact_runtime import ArtifactRuntimeProvider
+from src.providers.artifact_runtime_factory import build_artifact_runtime
 from src.providers.base import LLMProvider
 from src.providers.calendar_events import CalendarEventProvider
 from src.providers.calendar_events_factory import build_calendar_event_provider
@@ -268,6 +270,12 @@ class Runtime:
     # installation gets, the same choice avatar_provider already makes.
     environment_provider: EnvironmentProvider
 
+    # Phase 11 closure: which engine runs a created artifact so that what it
+    # actually did can be observed - see src/providers/artifact_runtime.py's own
+    # docstring. A provider axis like every other, so the engine is replaceable
+    # and no artifact kind ever gets a runner of its own.
+    artifact_runtime: ArtifactRuntimeProvider
+
     # Stage 17.2: the one live, in-process record of what a real caller
     # currently has genuine evidence of an agent doing (today: SPEAKING,
     # written only by VoiceChannel.deliver() around a real, blocking
@@ -347,6 +355,7 @@ class Runtime:
             f"connections={self.connections.default.name}({len(self.connections.names)}) "
             f"avatar_provider={self.avatar_provider.name} "
             f"environment_provider={self.environment_provider.name} "
+            f"artifact_runtime={self.artifact_runtime.name} "
             f"router={type(self.router).__name__} "
             f"brain={type(self.manager_brain).__name__} "
             f"specialists={','.join(s.name for s in self.specialists.values())} "
@@ -376,7 +385,7 @@ def build_runtime(
     video_understanding_account: ProviderAccount | None = None,
     speech_account: ProviderAccount | None = None,
     communication_account: ProviderAccount | None = None,
-    connection_adapter_version: str = "1",
+    connection_adapter_version: "str | Mapping[str, str]" = "1",
 ) -> Runtime:
     """Build everything that outlives a single run.
 
@@ -550,6 +559,7 @@ def build_runtime(
         # avatar_provider above already uses - a genuinely independent
         # axis, never derived from it.
         environment_provider=build_environment_provider(settings),
+        artifact_runtime=build_artifact_runtime(settings),
         # Stage 17.2: one fresh, empty registry per runtime - never
         # configured by settings, because there is nothing to choose
         # between (this is not a provider seam; it is in-process,
@@ -811,7 +821,7 @@ def rebind_backends(
     settings: Settings,
     *,
     accounts: "CredentialStore | None" = None,
-    connection_adapter_version: str = "1",
+    connection_adapter_version: "str | Mapping[str, str]" = "1",
     tools: "Callable[[Runtime], ToolSet] | None" = None,
     channel: "Channel | None" = None,
 ) -> Runtime:
@@ -856,6 +866,7 @@ def rebind_backends(
         connections=build_all_connections(settings, adapter_version=connection_adapter_version),
         avatar_provider=build_avatar_provider(settings),
         environment_provider=build_environment_provider(settings),
+        artifact_runtime=build_artifact_runtime(settings),
         document_renderer=build_document_rendering(settings),
     )
     replacement = _replace(replacement, translation=build_interpreter(settings, transcriber=media.transcriber))

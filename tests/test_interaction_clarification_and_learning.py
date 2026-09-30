@@ -38,6 +38,9 @@ from __future__ import annotations
 
 import re
 
+import pytest
+
+import scripts.control_center as control_center_module
 from src.config.settings import Settings
 from src.manager.activity_session import ActivityBrainOps, ActivitySessions, GuidedActivityState, PendingClarification
 from src.manager.brain import ActivityAnswerVerdict, BrainDecision
@@ -45,6 +48,37 @@ from src.manager.llm_brain import LLMManagerBrain
 from src.providers.base import Completion, LLMProvider
 from scripts.control_center import build
 from scripts.exchange import exchange
+
+
+@pytest.fixture(autouse=True)
+def _no_owner_created_specialists(tmp_path, monkeypatch):
+    """The ecosystem these tests build must be the shipped one, not whoever
+    the owner has since created.
+
+    ``memory="ephemeral"`` isolates memory, which is what this file needed
+    when it was written. It does *not* isolate the governed config, and that
+    file is where ``agent create`` persists a specialist - so ``build()``
+    reads the owner's real roster. On 2026-09-29 the owner's installation
+    gained ``agent_definition.marine_expert`` ("marine biology and
+    oceanographic research"), and this file's own deliberately obscure quiz
+    topic - "the biology of deep-sea anglerfish" - stopped being obscure:
+    the router correctly delegated it to that specialist instead of Alfred
+    starting a guided activity, and the test failed.
+
+    That routing is the architecture working, not a defect: a marine-biology
+    question belongs to the marine-biology specialist, and the fact that no
+    source file anywhere names "Coral" is exactly the genericity this project
+    holds itself to. What was wrong was this file's hidden assumption that
+    nothing in the owner's installation would ever claim its topic. Isolated
+    here rather than by choosing a more obscure topic, because any topic can
+    become someone's specialism - the assumption is what had to go.
+    """
+    monkeypatch.setattr(control_center_module, "DEFAULT_CONFIG_PATH", tmp_path / "config.json")
+    monkeypatch.setattr(control_center_module, "DEFAULT_LEDGER_PATH", tmp_path / "ledger.json")
+    monkeypatch.setattr(control_center_module, "DEFAULT_ACCOUNTS_PATH", tmp_path / "accounts.json")
+    monkeypatch.setattr(control_center_module, "DEFAULT_SERVICES_PATH", tmp_path / "services.json")
+    monkeypatch.setattr(control_center_module, "DEFAULT_SITES_PATH", tmp_path / "sites.json")
+    return tmp_path
 
 
 def real_system(**overrides):
@@ -161,10 +195,13 @@ def _wired(provider: ScriptedActivityProvider):
 
 class TestClarificationAndConflictResolution:
     def test_a_genuine_clarification_question_is_asked(self):
-        provider = ScriptedActivityProvider(ambiguity_trigger="either")
+        # The candidates are the ones the remark states. This used to script
+        # "Tuesday"/"Wednesday" for a remark about the 5th and the 12th - an
+        # invented candidate, which Phase 11 closure now refuses to ask about.
+        provider = ScriptedActivityProvider(ambiguity_trigger="either", ambiguity_candidates=("the 5th", "the 12th"))
         _, manager, channel, conversation = _wired(provider)
         turn = exchange(channel, conversation, "The deadline is either the 5th or the 12th, I'm honestly not sure.")
-        assert turn.outcome == "Which one is correct - Tuesday or Wednesday?" or "Which one is correct" in turn.outcome
+        assert turn.outcome == "Which one is correct - the 5th or the 12th?"
 
     def test_selecting_an_option_resolves_it_and_confirms(self):
         provider = ScriptedActivityProvider(ambiguity_trigger="either")

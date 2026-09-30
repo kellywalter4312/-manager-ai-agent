@@ -33,14 +33,22 @@ own current ecosystem can genuinely support today:**
                                   hardcoded value, made governable)
     tool.document_generation     the real output directory
                                   DocumentGenerationTool writes to
-    connection.gmail             GmailConnection's own real adapter
-                                  version (v1: limit-only; v2: also
-                                  honours a label filter the underlying
-                                  Mailbox contract already supports) -
-                                  never the account/credential, which
-                                  stays exactly as 52.27 already governs
-                                  it, structurally untouched by this
-                                  handler.
+    connection.<backend>         a built-in connection's own real adapter
+                                  version, for any connection that declares
+                                  more than one (``connection_factory.
+                                  connection_adapter_versions``) - never the
+                                  account/credential, which stays exactly as
+                                  52.27 already governs it, structurally
+                                  untouched by this handler.
+
+**What every handler answers for the engine (Phase 11).** Besides
+``apply``/``rollback``: ``observe`` - the component's real current version,
+read from where the handler actually keeps it, so the engine verifies the
+real state instead of its own ledger (a handler that reports success without
+changing anything is caught, not activated); ``default_version`` - what the
+component is when that store holds nothing for it; ``can_roll_back``; and
+``activation`` - how an applied change reaches a running session, so no
+surface has to branch on a category's name to know.
 
 Every other category (Brain reasoning code, a capability's own
 implementation, a tool's own class, a connection's own credential) has
@@ -90,6 +98,20 @@ class HandlerResult:
     detail: str
 
 
+# How an applied (or rolled-back) change reaches a running session - declared
+# by the handler that owns the component, read by whichever surface applies
+# it live. Mechanisms, not component names.
+ACTIVATION_REASONING = "reasoning"            # rebind the session's reasoning
+ACTIVATION_PER_TURN = "per_turn"              # read fresh on every turn already
+ACTIVATION_ON_READ = "described_on_read"      # described fresh on every read
+ACTIVATION_NEXT_SESSION = "next_session"      # read when a session starts
+ACTIVATION_BACKENDS = "rebind_backends"       # rebuild the session's backends
+ACTIVATIONS = (
+    ACTIVATION_REASONING, ACTIVATION_PER_TURN, ACTIVATION_ON_READ,
+    ACTIVATION_NEXT_SESSION, ACTIVATION_BACKENDS,
+)
+
+
 class EvolutionHandler(ABC):
     """What one real, governed component category must supply. The
     engine holds a list of these and asks each, in turn, "do you own
@@ -120,6 +142,45 @@ class EvolutionHandler(ABC):
         no engine change (Pre-Stage-9 Campaign 12)."""
         return ()
 
+    def observe(self, component_id: str, *, context: HandlerContext) -> "str | None":
+        """The component's real current version, read from where this handler
+        actually keeps it - or None when that store holds nothing for it.
+
+        The default reads the governed configuration, which is where every
+        configuration-backed handler writes; a handler that keeps its state
+        anywhere else must say so here. The engine never activates a change
+        this cannot confirm, so a handler that does not override it and
+        writes elsewhere is refused honestly rather than trusted."""
+        value = load_governed_config(context.config_path).get(component_id)
+        return None if value is None else str(value)
+
+    def default_version(self, component_id: str) -> "str | None":
+        """What the component truly is when this handler's store holds
+        nothing for it - None (the default) when that cannot be known from
+        the store alone. Used to find drift between the record and reality,
+        so it must be the real effective value, never a guess."""
+        return None
+
+    def absence_restores(self, component_id: str, version: str) -> bool:
+        """Whether removing the stored value is how this handler restores
+        ``version`` on rollback (so "nothing stored" confirms it). False by
+        default: a rollback is confirmed by reading the version back."""
+        return False
+
+    def can_roll_back(self, component_id: str) -> bool:
+        """Whether a governed rollback of this component is possible."""
+        return True
+
+    def activation(self, component_id: str) -> str:
+        """How an applied change to this component reaches a running session
+        (one of ``ACTIVATIONS``)."""
+        return ACTIVATION_BACKENDS
+
+
+# What the inventory shows for an account that pins no model of its own - a
+# label, never a model name, so it must never be written back as one.
+DEFAULT_MODEL_LABEL = "(default model)"
+
 
 def _model_segment(version: str) -> "str | None":
     """A ``provider.*`` component's version is always the full
@@ -127,6 +188,12 @@ def _model_segment(version: str) -> "str | None":
     ``ComponentSnapshot.version`` format) - this extracts just the
     model segment, the only part ever actually written."""
     return version.rsplit(":", 1)[-1] if ":" in version else None
+
+
+def _stored_model(segment: "str | None") -> "str | None":
+    """The model to store for a version's model segment: the default-model
+    label means "no model pinned", never a model literally called that."""
+    return None if segment in (None, DEFAULT_MODEL_LABEL) else segment
 
 
 class ProviderModelHandler(EvolutionHandler):
@@ -141,9 +208,12 @@ class ProviderModelHandler(EvolutionHandler):
         return component_id.startswith("provider.")
 
     def _resolve(self, proposal: EvolutionProposal, context: HandlerContext):
+        return self._resolve_category(proposal.target, context)
+
+    def _resolve_category(self, component_id: str, context: HandlerContext):
         from src.services.ecosystem.registry_factory import build_ecosystem_registry
 
-        category = proposal.target.removeprefix("provider.")
+        category = component_id.removeprefix("provider.")
         registry = build_ecosystem_registry(context.settings)
         adapter = registry.adapter_for(category)
         if adapter is None:
@@ -158,13 +228,14 @@ class ProviderModelHandler(EvolutionHandler):
         if error:
             return HandlerResult(False, error)
 
-        new_model = _model_segment(proposal.proposed_version)
-        if new_model is None:
+        segment = _model_segment(proposal.proposed_version)
+        if segment is None:
             return HandlerResult(
                 False,
                 f"'{proposal.proposed_version}' does not name a model - a provider "
                 "proposal's version must be the full 'backend:account_id:model' form",
             )
+        new_model = _stored_model(segment)
 
         store = load_credential_store(context.accounts_path)
         account = store.active(backend)
@@ -202,14 +273,25 @@ class ProviderModelHandler(EvolutionHandler):
         if account is None:
             return HandlerResult(False, f"'{backend}' has no account on record to roll back")
 
-        restored_model = _model_segment(proposal.current_version)
+        restored_model = _stored_model(_model_segment(proposal.current_version))
         restored = ProviderAccount(
             provider=account.provider, account_id=account.account_id,
             credential=account.credential, model=restored_model,
         )
         store.add(restored, activate=True)
         save_credential_store(store, context.accounts_path)
-        return HandlerResult(True, f"restored {backend}/{account.account_id}'s model to {restored_model!r}")
+        return HandlerResult(True, f"restored {backend}/{account.account_id}'s model to {restored_model or DEFAULT_MODEL_LABEL!r}")
+
+    def observe(self, component_id: str, *, context: HandlerContext) -> "str | None":
+        """The active account's real ``backend:account_id:model``, read back
+        from the credential store - the same composite the inventory reports."""
+        category, backend, error = self._resolve_category(component_id, context)
+        if error:
+            return None
+        account = load_credential_store(context.accounts_path).active(backend)
+        if account is None:
+            return None
+        return f"{backend}:{account.account_id}:{account.model or DEFAULT_MODEL_LABEL}"
 
 
 class SpecialistIdentityHandler(EvolutionHandler):
@@ -324,6 +406,17 @@ class SpecialistIdentityHandler(EvolutionHandler):
             )
         return HandlerResult(True, f"restored '{real_path}' from backup '{backup_path}'")
 
+    def observe(self, component_id: str, *, context: HandlerContext) -> "str | None":
+        """The identity document's real content hash - the inventory's own
+        version format for it - or None when there is no document."""
+        real_path = self._resolve_path(component_id, context.settings)
+        if not real_path.exists():
+            return None
+        return hashlib.sha256(real_path.read_bytes()).hexdigest()[:12]
+
+    def activation(self, component_id: str) -> str:
+        return ACTIVATION_NEXT_SESSION
+
 
 class CapabilityConfigHandler(EvolutionHandler):
     """How many recent conversation turns a reasoning-dependent
@@ -368,6 +461,14 @@ class CapabilityConfigHandler(EvolutionHandler):
         save_governed_config(config, context.config_path)
         return HandlerResult(True, f"conversation history context restored to {proposal.current_version} turn(s)")
 
+    def activation(self, component_id: str) -> str:
+        return ACTIVATION_PER_TURN
+
+    def default_version(self, component_id: str) -> "str | None":
+        from src.services.evolution.inventory import DEFAULT_CONVERSATION_HISTORY_LIMIT
+
+        return DEFAULT_CONVERSATION_HISTORY_LIMIT
+
 
 class ToolConfigHandler(EvolutionHandler):
     """The real output directory ``DocumentGenerationTool`` writes
@@ -407,40 +508,51 @@ class ToolConfigHandler(EvolutionHandler):
 
 
 class ConnectionAdapterHandler(EvolutionHandler):
-    """Gmail's own real adapter *implementation* version - distinct
-    from, and never touching, the account/credential 52.27's own
-    ``connections`` command already governs. v1 (today's default)
-    forwards only ``limit`` to ``Mailbox.fetch``; v2 also forwards an
-    optional ``label`` filter the underlying ``Mailbox`` contract
-    (``src/services/email/mailbox.py``) already declares and
-    ``GmailMailbox`` already implements - a real, additive capability,
-    never fabricated.
+    """A built-in connection's own real adapter *implementation* version,
+    for every connection that declares more than one
+    (``connection_factory.connection_adapter_versions``, Phase 11 - this
+    handler names none of them) - distinct from, and never touching, the
+    account/credential 52.27's own ``connections`` command already governs.
+    Gmail's is the one today: v1 forwards only ``limit`` to
+    ``Mailbox.fetch``; v2 also forwards an optional ``label`` filter the
+    ``Mailbox`` contract already declares.
 
-    Compatibility is verified for real: a fresh ``GmailConnection`` is
-    actually constructed at the proposed version, and its
-    ``authorization`` must remain unchanged - proving the account's own
-    credential state is genuinely unaffected by the adapter change.
+    Compatibility is verified for real: a fresh connection is actually
+    constructed at the proposed version, and its ``authorization`` must
+    remain unchanged - proving the account's own credential state is
+    genuinely unaffected by the adapter change.
     """
 
-    COMPONENT_ID = "connection.gmail"
-    KNOWN_VERSIONS = ("1", "2")
+    PREFIX = "connection."
+
+    def _versions(self, component_id: str) -> "tuple[str, ...]":
+        from src.providers.connection_factory import connection_adapter_versions
+
+        if not component_id.startswith(self.PREFIX):
+            return ()
+        return connection_adapter_versions().get(component_id[len(self.PREFIX):], ())
 
     def applies_to(self, component_id: str) -> bool:
-        return component_id == self.COMPONENT_ID
+        return bool(self._versions(component_id))
 
-    def _build(self, adapter_version: str, context: HandlerContext):
+    def _build(self, component_id: str, adapter_version: str, context: HandlerContext):
         from dataclasses import replace as dc_replace
 
         from src.providers.connection_factory import build_connection
 
-        return build_connection(dc_replace(context.settings, connection_provider="gmail"), adapter_version=adapter_version)
+        return build_connection(
+            dc_replace(context.settings, connection_provider=component_id[len(self.PREFIX):]),
+            adapter_version=adapter_version,
+        )
 
     def apply(self, proposal: EvolutionProposal, *, context: HandlerContext) -> HandlerResult:
-        if proposal.proposed_version not in self.KNOWN_VERSIONS:
-            return HandlerResult(False, f"'{proposal.proposed_version}' is not a known Gmail adapter version. Known: {', '.join(self.KNOWN_VERSIONS)}")
+        known = self._versions(proposal.target)
+        name = proposal.target[len(self.PREFIX):]
+        if proposal.proposed_version not in known:
+            return HandlerResult(False, f"'{proposal.proposed_version}' is not a known {name} adapter version. Known: {', '.join(known)}")
 
-        before = self._build(proposal.current_version, context)
-        after = self._build(proposal.proposed_version, context)
+        before = self._build(proposal.target, proposal.current_version, context)
+        after = self._build(proposal.target, proposal.proposed_version, context)
         if after.authorization != before.authorization:
             return HandlerResult(
                 False,
@@ -450,23 +562,28 @@ class ConnectionAdapterHandler(EvolutionHandler):
             )
 
         config = load_governed_config(context.config_path)
-        config = config.with_value(self.COMPONENT_ID, proposal.proposed_version)
+        config = config.with_value(proposal.target, proposal.proposed_version)
         save_governed_config(config, context.config_path)
 
         reloaded = load_governed_config(context.config_path)
-        if reloaded.get(self.COMPONENT_ID) != proposal.proposed_version:
+        if reloaded.get(proposal.target) != proposal.proposed_version:
             return HandlerResult(False, "wrote the new adapter version, but the independent re-read did not confirm it landed")
         return HandlerResult(
             True,
-            f"Gmail adapter is now v{proposal.proposed_version} (independently re-read from disk; "
+            f"{name} adapter is now v{proposal.proposed_version} (independently re-read from disk; "
             f"authorization unchanged: {after.authorization.value})",
         )
 
     def rollback(self, proposal: EvolutionProposal, *, context: HandlerContext) -> HandlerResult:
         config = load_governed_config(context.config_path)
-        config = config.with_value(self.COMPONENT_ID, proposal.current_version)
+        config = config.with_value(proposal.target, proposal.current_version)
         save_governed_config(config, context.config_path)
-        return HandlerResult(True, f"Gmail adapter restored to v{proposal.current_version}")
+        return HandlerResult(True, f"{proposal.target[len(self.PREFIX):]} adapter restored to v{proposal.current_version}")
+
+    def default_version(self, component_id: str) -> "str | None":
+        """No governed value means the connection's own default adapter."""
+        versions = self._versions(component_id)
+        return versions[0] if versions else None
 
 
 class BrainModeHandler(EvolutionHandler):
@@ -506,6 +623,9 @@ class BrainModeHandler(EvolutionHandler):
         config = load_governed_config(context.config_path).with_value(proposal.target, proposal.current_version)
         save_governed_config(config, context.config_path)
         return HandlerResult(True, f"'{proposal.target}' restored to '{proposal.current_version}'")
+
+    def activation(self, component_id: str) -> str:
+        return ACTIVATION_REASONING
 
 
 class SurfaceHandler(EvolutionHandler):
@@ -551,6 +671,17 @@ class SurfaceHandler(EvolutionHandler):
             config = config.without_value(proposal.target)
         save_governed_config(config, context.config_path)
         return HandlerResult(True, f"'{proposal.target}' restored to {proposal.current_version}")
+
+    def absence_restores(self, component_id: str, version: str) -> bool:
+        """Rolling back to "undeclared" removes the governed value, returning
+        the surface to the agent's own declaration - which, for a kind it
+        never declared, is exactly "undeclared". (What absence means for a
+        kind it *does* declare depends on the agent, so no default_version is
+        claimed.)"""
+        return version == "undeclared"
+
+    def activation(self, component_id: str) -> str:
+        return ACTIVATION_ON_READ
 
 
 class ImageTechniqueHandler(EvolutionHandler):
@@ -599,6 +730,14 @@ class ImageTechniqueHandler(EvolutionHandler):
             config = config.without_value(proposal.target)
         save_governed_config(config, context.config_path)
         return HandlerResult(True, f"'{proposal.target}' restored to {proposal.current_version}")
+
+    def default_version(self, component_id: str) -> "str | None":
+        """No governed value leaves a built-in technique enabled and an
+        unknown one undeclared - exactly what ``initial_version`` says."""
+        return self.initial_version(component_id)
+
+    def activation(self, component_id: str) -> str:
+        return ACTIVATION_PER_TURN
 
 
 # The open-ended registration point (Section 11's own requirement): a

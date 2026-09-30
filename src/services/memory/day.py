@@ -34,6 +34,7 @@ interpret a question - all of which are reasoning, and belong upstairs.
 
 from __future__ import annotations
 
+import time as _time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone, tzinfo
 from typing import Callable, Iterable
@@ -43,7 +44,41 @@ from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-DEFAULT_TIMEZONE = "Africa/Lagos"
+# Phase 11 final gate: the default is the machine's own local time, never one
+# person's city. "Africa/Lagos" used to be written here (and in Settings), so
+# every installation reckoned days in Lagos unless told otherwise - and without
+# the tzdata package no other named zone could be configured at all.
+LOCAL_TIMEZONE = "local"
+DEFAULT_TIMEZONE = LOCAL_TIMEZONE
+
+
+class SystemLocalTime(tzinfo):
+    """The operating system's own local time, asked per instant - so it is
+    exact wherever the machine is, daylight saving included, with no time zone
+    database. The name a person configures is still preferred when given."""
+
+    def fromutc(self, dt: datetime) -> datetime:
+        seconds = (dt.replace(tzinfo=timezone.utc) - datetime(1970, 1, 1, tzinfo=timezone.utc)).total_seconds()
+        offset = timedelta(seconds=_time.localtime(seconds).tm_gmtoff)
+        return (dt + offset).replace(tzinfo=self)
+
+    def utcoffset(self, dt: "datetime | None") -> timedelta:
+        if dt is None:
+            return timedelta(seconds=_time.localtime().tm_gmtoff)
+        try:
+            seconds = _time.mktime(dt.replace(tzinfo=None).timetuple())
+        except (OverflowError, ValueError):
+            return timedelta(seconds=_time.localtime().tm_gmtoff)
+        return timedelta(seconds=_time.localtime(seconds).tm_gmtoff)
+
+    def dst(self, dt: "datetime | None") -> timedelta:
+        return timedelta(0)
+
+    def tzname(self, dt: "datetime | None") -> str:
+        return LOCAL_TIMEZONE
+
+    def __repr__(self) -> str:
+        return "SystemLocalTime()"
 
 # Zones this project can still reckon correctly when no IANA database is
 # installed. Every entry must be a zone with a **fixed** offset and no daylight
@@ -93,6 +128,8 @@ def resolve_timezone(name: str) -> tzinfo:
     cleaned = " ".join(str(name).split())
     if not cleaned:
         raise TimezoneError("timezone must not be empty")
+    if cleaned.lower() == LOCAL_TIMEZONE:
+        return SystemLocalTime()
 
     try:
         from zoneinfo import ZoneInfo, ZoneInfoNotFoundError

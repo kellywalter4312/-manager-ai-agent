@@ -252,7 +252,12 @@ class DeclaredConnection(Connection):
         # value supplied is an honest failure, not a literal "{name}"
         # sent to the real service.
         path = op.path
-        remaining_params = dict(params)
+        # A value supplied under any spelling of a declared parameter's name
+        # ("deviceid" from conversation, "deviceId" typed in the Control
+        # Center) is sent under the service's own spelling of it - the one
+        # its API actually reads (Phase 11 closure).
+        declared = {parameter.name.lower(): parameter.name for parameter in op.parameters}
+        remaining_params = {declared.get(str(key).lower(), key): value for key, value in params.items()}
         for parameter in op.parameters:
             if parameter.location != "path":
                 continue

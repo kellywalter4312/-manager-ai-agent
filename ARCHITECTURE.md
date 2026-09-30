@@ -12770,4 +12770,724 @@ temporary specialist created through the governed `agent create`.
   reaches only that participant; and nothing in the multi-agent code names a
   provider, so another voice or provider needs no multi-agent change.
 
-**Not started:** Phase 11.
+**Not started:** Phase 11 at the time of this section; see 54.
+
+## 54. Phase 11 - Open-Ended Evolution & Extensibility (2026-09-25)
+
+Future technology has to be addable without rebuilding the system. The audit
+that opened this phase found that most of Phase 11 already existed under other
+names - built across 38-44 and 52.20-52.40 - so the phase is an audit, a set
+of concrete repairs, and a proof, not a new framework. Nothing here names a
+current agent, provider, connection, model or voice; every proof used a
+technology that exists nowhere in the shipped tree.
+
+### What already existed, and is the Phase 11 mechanism
+
+| Phase 11 term | Existing mechanism (unchanged in shape) |
+|---|---|
+| Extension architecture | `register_handler` (evolution categories), `MANAGER_CAPABILITIES` + capability authority/grants (capabilities), `register_provider` + `GenericCategoryAdapter`/`EcosystemRegistry` (providers), declared services/sites + built-in connections (connections), `environment_provider` + governed workspace types (environments), `agent create` / `agent_definition.<key>` / surfaces / voice / personality in governed config (agent features) |
+| Upgrade Manifest (what is installed) | `src/control_center/manifest.py` `UpgradeManifest` + the evolution inventory (`inventory.discover_components`) |
+| Upgrade Manifest (a described change) | `EvolutionProposal` - identity, target, current and desired version, dependencies, migration description, risk; its own `current_version` is the rollback target |
+| Upgrade Planner | `evaluate_proposal` (per change) and `upgrade_planner.plan_upgrade` (store schemas) |
+| Governed Upgrade Executor | `ecosystem_evolution.run`/`rollback` over `src/evolution.py`'s gates, performed by the owning handler; `upgrade_executor`/`upgrade_lifecycle` for store migrations |
+| Versioning | per component, owned by its handler (content hash, `backend:account:model`, a count, a state), independent of `SYSTEM_VERSION`, each store's `SCHEMA_VERSION`, and visual-environment versions - never forced into one semver |
+| Persistence | `data/evolution/state.json` (ledger, proposals, history) and `data/evolution/config.json` (governed values), schema-versioned |
+| Control Center | the `ecosystem` command (inventory, detail, propose, run, rollback, history, system) and the served "Ecosystem & evolution" panel, behind server-side confirmation tokens and the durable audit trail |
+
+### What the audit found broken, and what was repaired
+
+Every defect below was reproduced first, against isolated files.
+
+1. **"Verify" re-read the ledger the engine had just written.** A handler
+   that reported success without changing anything was activated. Every
+   handler now answers `observe` - the component's real version read from
+   where it actually lives (the governed config by default; the credential
+   store for a provider's model; the file hash for an identity) - and a
+   change is ACTIVE only when that reading equals the target.
+2. **A handler exception escaped the engine**, leaving a partial write and
+   nothing recorded. Exceptions are now a recorded, persisted failure.
+3. **A failed apply left whatever it half-did.** The engine compensates
+   through the handler's own rollback and re-reads - and says whether the
+   prior state was confirmed. It never "compensates" a refused apply that
+   changed nothing (found while testing this repair).
+4. **A component changed outside governance was overwritten** on a stale
+   assumption. The real state is now read before applying, and a mismatch is
+   refused before any write.
+5. **Rollback could undo a newer change** (rolling back A after B changed the
+   same target silently undid B while B stayed "active"), **could remove a
+   change others depended on**, and **recorded ROLLED_BACK even when the real
+   rollback failed**. Rollback is now refused while a later change or an
+   active dependent holds the target, and is recorded only once the prior
+   version is re-read; a rollback that did not land leaves the change ACTIVE
+   and the ledger unchanged.
+6. **Rolling back a provider model change on an account with no pinned model
+   wrote the display label `(default model)` into the account as its model.**
+   The label now maps back to "no model".
+7. **Persisted state this code could not read**: a governed config in a newer
+   schema was read silently (and the next save would have rewritten it in the
+   older shape); a damaged config crashed the reader; an unknown status in the
+   ledger crashed the Control Center. Now: an unreadable governed config reads
+   as no values with a stated reason and a warning in the inventory, and
+   **is never overwritten** (`GovernedConfigUnreadable`); an unreadable ledger
+   is refused with `MigrationUnavailable` and reported truthfully. Both files
+   are written atomically (temporary file, `os.replace`).
+8. **A record that disagreed with reality went unnoticed** (found by runtime
+   verification against a copy of the real data): the production ledger
+   records `capability.general_conversation` ACTIVE at `12` while the
+   governed config holds no value, so the running system uses its default,
+   `6`. Handlers now declare a truthful `default_version` (the real value when
+   nothing is stored, or None when that cannot be known - a surface's depends
+   on its agent, so it declares `absence_restores` for its rollback-by-removal
+   instead); the planner names the drift, a new change built on the stale
+   record is refused before any write, and rolling the stale record back is
+   the governed way out. **The production data itself was not changed** - the
+   owner decides whether to roll that record back (`ecosystem
+   capability.general_conversation rollback capability.general_conversation-1
+   yes`) or re-apply `12`.
+9. **`ecosystem system upgrade <v> yes` bypassed confirmation and audit** -
+   harmless while no store migration exists, a real governance hole the day
+   one does. It is now an administrative write; its output leads with a
+   truthful OK / NOTHING CHANGED / FAILED line.
+
+### What was genuinely missing, and was added
+
+- **Compatibility requirements and provenance on the described change**:
+  `EvolutionProposal.requires` (`component -> exact version`) and
+  `provenance`. Versions are compared exactly, never ordered - they are each
+  handler's opaque facts. A requirement whose version cannot be established
+  is unmet, never assumed. Enforced at evaluation (so the executor refuses)
+  and shown by the planner. Pre-Phase-11 ledgers load unchanged.
+- **The Upgrade Planner for component changes**: `src/evolution.py`
+  `plan_proposal` (pure, deterministic) and `ecosystem_evolution.plan`
+  (supplies the handler facts): blockers, prerequisites, dependency order
+  (deepest first, cycles and dead dependencies found), compatibility, stale
+  open changes, active changes affected, drift between record and reality,
+  and rollback availability. It reads and never writes.
+- **Control Center**: `ecosystem <component> plan <id>`; `propose ...
+  |requires c=v,...|after id,...` (provenance recorded as the door); the
+  served panel gained "plan (changes nothing)" and a "system manifest"
+  button. Planning needs no confirmation; running and rolling back still do.
+
+### Current entities stopped being architecture
+
+The hardcoding audit (every executable comparison against an entity name in
+`src/`, `scripts/`, `main.py`, by AST) found these in shared layers and moved
+each fact to the thing it describes:
+
+- The ecosystem registry decided credential requirements by vendor name
+  (`key not in ("null", "local")`, `key == "elevenlabs"`, the transcription
+  list). Each factory now declares it beside its builders
+  (`provider_requires_credential` - with `register_provider(...,
+  requires_credential=False)` for a new local runtime -
+  `speech_requires_credential`, `video_understanding_requires_credential`).
+- The evolution layer, inventory and Control Center hardcoded Gmail's adapter
+  versions (`connection.gmail`, `("1", "2")`). A connection now declares its
+  own implementations (`connection_factory._ADAPTER_VERSIONS`,
+  `register_connection(..., adapter_versions=...)`); the handler governs any
+  `connection.<name>` that declares more than one, and sessions are built
+  with each connection's governed version.
+- The Control Center's `connections` command knew Gmail by name. A connection
+  that authenticates through its own flow now describes itself
+  (`Connection.self_authentication()` -> method, connect, disconnect, local
+  status details); the command lists and refuses typed credentials for any
+  such connection. Output for Gmail is unchanged.
+- The Control Center chose how an evolution goes live by category prefix
+  (`brain.`, `surface.`, `capability.`, `specialist.`). The owning handler
+  now declares its `activation`; the one rule kept is the surface's own -
+  whatever feeds reasoning (`GOVERNED_REASONING_FIELDS`) is rebound as
+  reasoning.
+- The Upgrade Manifest read exactly five visual surfaces by name, so the
+  avatar-body, symbolic and hair environments the UI already versions were
+  invisible and a new one needed a code change. It now discovers every
+  registry declaration of the `{ id, version }` shape, keeping the five
+  existing surface ids exactly (so every version on record keeps its id).
+
+Legitimate, and left: vendor names inside each vendor's own factory (the
+registration point itself), `null`/`none` (the architecture's honest-absence
+sentinels), the legacy `"alfred"` component id (it is a real key in
+persisted ledgers), human-readable help text, and the Gmail connection's own
+code.
+
+### Brain compatibility
+
+Evolution is deterministic governance: it runs identically in Half Brain and
+with a Full Brain whose every reasoning call fails, and leaves the Brain as it
+was. Nothing in `src/manager`, `src/agents`, `src/conversation` or
+`src/channels` imports the executor or its handlers, so no model can approve,
+run or roll back a change; the Brain's prompts carry no evolution metadata.
+Memory, Personality, VoiceProfile and identity are untouched by the engine
+(an identity document evolves only through its own handler, backed up and
+restorable byte-for-byte, as before).
+
+### Intentionally not done
+
+- **Public `register_*` for every provider axis.** A new vendor for a non-LLM
+  axis is its builder plus one entry in that axis's own factory - the
+  registration point, not a rebuild. Only the LLM axis (and now connections)
+  have a public registration function; adding eleven more would be surface
+  area with no caller.
+- **A new provider *category*** still needs its `Settings` field and its
+  consumer, because a new axis of technology is new code where it is used;
+  `GOVERNED_BACKEND_FIELDS` duplication remains the deferred item recorded in
+  52.75.
+- **Automatic rollback.** Rollback stays a governed, approved decision; only
+  the compensation of a half-done apply is automatic, because it restores
+  what was just approved, not a decision someone made.
+- **Version ordering.** Component versions are opaque and compared exactly;
+  no semver resolver was invented.
+
+### Verified
+
+- **Tests:** baseline 8319 (8318 passed plus one structural test tripped by
+  this campaign's own in-flight edit, then made precise and wider - see
+  `test_no_core_lifecycle_function_branches_on_target`). After: **8361 passed**
+  in fixed forward order, **8361** in reverse file order, and **8361** in
+  random order with a fake Anthropic key present. The 42 new tests are in
+  `tests/test_phase_11_extensibility.py`. Three existing fixtures were updated
+  to the new contract, never weakened: two handlers that kept state in memory
+  (or changed nothing while reporting success) now declare `observe`; one
+  refusal message now carries the connection's own name.
+- **Mutation:** 30 mutations of the Phase 11 invariants - executor
+  verification, drift refusal, exception containment, compensation, rollback
+  guards, compatibility, authorization, planner, unreadable-state protection,
+  persistence, Control Center wiring, hardcoded activation, credential
+  declarations, adapter declarations, connection self-description, the
+  truthful default, surface absence, and the manifest. **30 caught.** The
+  three that survived the first pass were real test gaps and were closed
+  with new tests (the executor refusing an unmet requirement, a fresh config
+  saved over an unreadable file, a never-declared surface rolled back). Every
+  mutated file was restored byte-identically (sha256).
+- **Runtime, real served instance and real Edge**, from an isolated copy of
+  the repository and its real data: 29/29 checks. They cover drift found by
+  the plan, refused over HTTP, and resolved by governed rollback; propose
+  with a requirement; plan; confirmation-token gating; run; the real
+  governed file; genuine restarts preserving proposal, requirement and
+  version; rollback to the real prior value; history; manifest; the gated
+  system upgrade; connections described by themselves; and the rendered panel
+  doing propose, plan, approve and roll back.
+- **Full Brain with the real local model** (`provider=local brain=llm`): a
+  governed evolution planned, ran, verified and rolled back beside it; a real
+  reasoning turn completed (22 s); the Brain and its provider were unchanged
+  by evolution. (The 1.5B model's answer merely restated the question - model
+  quality, not a Phase 11 concern.)
+- **Production:** all 79 production data, identity and profile files were
+  byte-identical before and after, with none added or removed. No temporary
+  extension, test component or fixture name remains in `src/`, `scripts/` or
+  `ui/` (`git grep` inside the proof).
+- **Found by the harness, not the code:** a random-order run with a fake
+  *OpenAI* key failed `test_a_failed_switch_changes_nothing_and_saves_nothing`
+  (that test needs no OpenAI key to exist). It fails identically at 9f5e54d
+  with the same variable, and passes without it.
+
+### 54.1 The final gate - goal -> work -> result, run for real (2026-09-25)
+
+The gate sent validation goals ("teach me this project", "build me a webpage",
+"design an interactive diagram of ...", "create a workspace", "change your
+voice", and unseen variants) through the real Manager in Half Brain and with the
+real local model, from isolated copies of the real data. What it found, and the
+generalized repair for each - never a handler for an example:
+
+- **Half Brain was honest throughout** - no false completions except one: a
+  diagram with no image produced was reported completed. Now an honest failure
+  that says the description was kept for a later rendering.
+- **Construction requests missed their capabilities** because routing was a
+  fixed phrase list. One shared "verb + descriptors + noun" shape now serves
+  diagrams, and 3D intent accepts descriptors before "3D".
+- **With a real Full Brain, one clarification captured the whole session.**
+  `ManagerSkills.execute` sent every remark to open conversation while a
+  question was pending, and each unmatched remark raised another - so "create a
+  workspace", which a capability answers deterministically, was swallowed.
+  Scripted doubles never raise clarifications, which is why it was unseen. A
+  request another capability claims now drops the stale question; a reply is
+  an answer only if it is the candidate plus a few answering words (a new
+  request that merely *named* a candidate had been acted on as a choice and
+  remembered as a fact); a model's echo is never put to the person.
+- **3D content could not move.** Motion is now the same kind of open registry
+  shapes are: geometry over time, asked for with -ing words, written as real
+  glTF animations, checked by `inspect_glb`, and played by the viewer.
+- **The default timezone was the owner's city**, and without tzdata no other
+  named zone could be configured at all. The default is now the machine's own
+  local time (`SystemLocalTime`), identical here, correct anywhere.
+- **What already worked and was verified:** authorized documents -> retrieval
+  -> the Brain -> teaching (real local model), honest denial of an unconnected
+  source, agent construction with an unseen role through rebuild and removal,
+  and 17 existing environment/surface/room/workspace/output/provider checks.
+- **What remains partial, and why:** single-word retrieval (REC-07, a recorded
+  boundary); coaching tones as a fixed intensity scale (per-person data, by
+  design); homes, appliances, TVs and devices are not implemented (REC-05) -
+  there was nothing of theirs to regress, and their seams work.
+- **Genuinely requires a Full Brain:** open-ended teaching and explanation,
+  writing code/webpages/applications, decomposing an undescribed subject into
+  3D parts, organizing an objective into a handout, and research synthesis.
+  Half Brain refuses each honestly and names the structured path where one
+  exists.
+
+### 54.2 Phase 11 closure - the shape was the architecture, and the nouns were the examples (2026-09-28)
+
+The closure campaign ran the whole ecosystem from isolated copies of the real
+data, in Half Brain and with the real local model, and asked of every repair the
+same question the brief asks: does this fix the sentence, or the mechanism?
+
+**The defect that ran through everything.** A capability recognised its own work
+by an enumerated noun. `_HANDOUT_NOUNS` held `"handout"` alone, so "create a
+worksheet titled Fractions with: Monday - halves; Tuesday - quarters" matched no
+construction capability, fell through to `calendar` (which sorts earlier and does
+claim a weekday), and was written to real calendar state as an event named
+"quarters", reported as done. Adding "worksheet" to the list would have fixed
+that sentence and left the next unseen noun failing identically.
+
+The repair is a shape, not a list. `named_construction_request` reads a
+production verb, an **open** kind phrase, and a naming clause and/or an inline
+content list; `structured_construction_request` narrows it by deferring to the
+kinds other surfaces already own - the sibling construction claims asked
+directly, plus the scheduling, task and agent object nouns, each declared once
+and read from both sides of its own boundary. `calendar_intent`'s existing
+construction deferral then covers every unseen noun with no change of its own.
+The same generalization was applied where the repository had already established
+it for diagrams and never carried across: `document_generation_intent` and
+`media_production_intent` now read the shared "verb + descriptors + own noun"
+shape instead of fixed phrase lists.
+
+The revision side is the same shape with the **store** as the authority: every
+plausible title/kind split of "the Fractions worksheet" is offered, and
+`find_titled` decides which one was ever real. Nothing is guessed from the words.
+
+**Half Brain could not build what it had been handed.** The only structure
+`create_artifact` could read without a model was its own `TITLE:`/`SECTION:`
+block - the *Brain's* answer format - so a request carrying a title and its
+entries failed, and the handler printed that internal instruction at the person
+as if it were something to type. `document_from_construction` now builds real
+`DocumentContent` from the person's own shape, and `document_with_additions` does
+the same for an additive revision. Both declines name the human shape.
+
+**Other generalized repairs, each found at runtime:**
+
+- The calendar's ADD extractor had three narrow vocabularies, so the
+  long-standing "create a meeting on Friday at 3pm" produced no item at all:
+  the lead-verb set, the date preposition, and `this|next|coming <weekday>`.
+- A question *about* a specialist's domain was work *in* it. One token of
+  overlap was the whole test, so "why do phishing emails so often use urgent
+  language?" fetched and listed six real inbox messages. `asks_for_explanation`
+  lives in the shared conversation floor - the module that exists for exactly
+  this class of defect - and is grammatical, so a domain specialist nobody has
+  written yet inherits it.
+- `discussion` lost every request whose *subject* mentioned a day or a week,
+  because any scheduling word anywhere disqualified it. The calendar now wins on
+  its own evidence instead: a real extractable dated item, or a scheduling word
+  standing before the discussion word.
+- A birthday needed a relation word ("my sister Ada's"), so a bare name reached
+  nothing. The owner slot accepts a relation or a name; pronouns are excluded and
+  the person's own birthday still never matches there.
+- "what can you do?" was answered with a biography. `asks_who_you_are` already
+  yields to `roster_intent`, so naming the shape there was the whole repair.
+- `knowledge` was unreachable by natural phrasing. A possessive-plus-format-noun
+  pattern reaches the person's own material, and a plain definitional question
+  reaches settled knowledge - with a seventh deferral to `read_back`, which owns
+  reading back what Alfred was asked to keep.
+
+**What was missing, and was added: artifacts could be made and never run.**
+Creation ended at a saved artifact. A verified browser driver - real Chromium
+over CDP - had existed in the repository for some time and was connected to
+nothing Alfred created, so an interactive artifact could only ever be reported on
+the strength of its source text. A source file is evidence that something was
+written, never evidence that it runs.
+
+Added as a provider axis, never a feature: `ArtifactRuntimeProvider`
+(`src/providers/artifact_runtime.py`) returns a real `RuntimeObservation` - what
+loaded, what the page actually contains, and every runtime error the run
+produced. `BrowserArtifactRuntime` is the first implementation; a game engine, a
+simulation runner or a native runner are others, and none of them is the
+architecture. `NullArtifactRuntime` is honest absence. `ArtifactRuntimeTool`
+resolves *which* artifact from the store and never modifies it - an observation
+is a reading, and correcting a failing artifact is a revision the person asks
+for. `RUN_ARTIFACT` makes it reachable in ordinary words, and
+`settings.artifact_runtime` makes it selectable through the Control Center like
+every other backend.
+
+One detail decided the mechanism's honesty: the error collector is inserted as
+the artifact's **own first script**. A handler attached from outside the page,
+after its load event, has already missed everything the page's own scripts did -
+measured, not assumed: without it a real thrown `TypeError` was invisible and the
+broken page was reported as having run cleanly.
+
+Verified as the whole loop, in Half Brain with no model at all: create an
+interactive page -> run it in the real browser -> read the real thrown
+`Uncaught TypeError: Cannot read properties of null (reading 'addEventListener')`
+and `controls 0` -> correct it -> a new version of the *same* artifact -> run
+again -> `canvases 1, controls 2`, no errors -> survives a rebuild from disk.
+With the null engine selected, the same request says it cannot tell whether the
+artifact works, and claims nothing.
+
+**Corrections to earlier records.** §54.1 recorded that "homes, appliances, TVs
+and devices are not implemented (REC-05)". That is no longer accurate: devices
+work through the generalized declared-service connection - discovered from their
+own OpenAPI document, declared, executed from the Control Center, reached by name
+in conversation, coexisting, surviving a rebuild, and removable one at a time
+without disturbing the other. A television and a speaker were the validation
+instances; there is no TV subsystem and no speaker subsystem. What remains
+genuinely absent is a **3D renderer**, and `src/providers/environment.py` says so
+plainly: `EnvironmentProfile` is a real, swappable, persisted scene *description*,
+and building a fake rendering pipeline to make the seam look filled would be the
+sanctioned fabrication this project's own rules forbid.
+
+Four earlier claims were also corrected where a test had encoded a defect as the
+expected behaviour: reading an absent inbox is not a success, a placeholder is
+not a configured connection, a Half Brain decline must not recite the
+model-facing format, and a component whose handler is gone is reported as a stale
+record rather than vanishing. One repair of the previous run was withdrawn:
+flagging `discussion` as a room act let the Manager intercept a discussion
+addressed to a specialist and quietly reversed a Phase 10 invariant - `room_act`
+means "changes who is in the room", and a discussion is work.
+
+**Held, not performed.** The production ledger records
+`system.memory_schema = 1` while the memory files are schema 2. Schema 2 is
+canonical (`persistent.py`'s own `SCHEMA_VERSION`, what the manifest reports, and
+what the upgrade executor uses); the ledger was never told because the v1->v2
+upgrade is a memory *store* migration that runs on load and notifies nothing -
+none of the ledger's history entries mention it. The registered `Migration(1->2)`
+dates itself in the checkpoints it left (2026-09-01 and 2026-09-03) and its work
+is visible in the records themselves (v2 adds `source`). Measured on a copy, the
+governed reconcile changes exactly two files - the ledger and the audit log - and
+no memory file at all. It is safe, it is record-only, and it is a production
+mutation, so it is reported rather than done.
+
+**Not started:** Phase 12.
+
+### 54.3 Phase 11 closure re-verification - the medium was an assumption (2026-09-29)
+
+A re-inspection of the running ecosystem, not of the previous campaigns' notes.
+Every conclusion below came from running something: the routing table was read
+out of the real `select_capability`, the devices were driven against real HTTP
+servers holding real state, and the visual mechanism was verified once with the
+real local vision model rather than a double. Production `data/` was not
+mutated. Nothing was committed.
+
+**What the previous campaigns had right.** The generalized device/entity
+mechanism holds up against a device nobody anticipated. A "regolith sifter"
+serving `report_state` (GET) and `set_sift_rate` (POST) on localhost was
+declared, listed, detailed, read, written, observed changing on the real
+server, persisted to the registry, rebuilt from disk in a second process, read
+again after the rebuild, reflected in the Control Center's own capability view
+(`Connection - default=regolith_sifter`), and reached by ordinary conversation
+in Half Brain - twelve steps, no source change, no category code. This
+re-confirms 54.2's own television/speaker finding with a word that exists
+nowhere in the tree. The owner's own installation already carries the same
+shape as data: `data/connections/services.json` holds a `smart_tv` with
+`power` and `volume`, and no file in `src/` mentions a television.
+
+**Containment is data too, and belongs to the entity.** "The thing in the north
+berth" needed no grouping subsystem: one declared endpoint with a `berth` body
+parameter addressed two entities independently, each state change was verified
+on the hub itself, and an unknown berth was refused by the hub rather than by
+Alfred. That is the correct division - a hub owns its own topology, and Alfred
+addresses it - and it is why no Home, Room or Appliance type was added. What
+Alfred genuinely lacks is a convenience for grouping entities *across*
+independent connections; that would be a new axis, and it is recorded as such
+rather than built.
+
+**The real gap was one assumption: that a visual medium holds still.**
+`image_analysis` resolved only `("image",)` from the artifact store and only
+still extensions from a named path, and nothing anywhere turned a recording
+into something a vision provider could read. Routing every natural phrasing of
+the same ask through the real selector showed what that cost:
+
+| request | reached, before |
+|---|---|
+| "what do you see in this video?" | `open_conversation` |
+| "what is happening in this video?" | `live_information` |
+| "say what it is doing in the footage" | `translate` |
+| "tell me what the dog is doing in this video" | `open_conversation` |
+
+The last is the one that matters most. With a Full Brain, ordinary
+conversation answers confidently about a recording it never looked at.
+
+**The repair is one primitive and one list, not a subsystem.**
+`sample_frames` (`src/providers/media/video.py`) decodes real, evenly spaced
+stills out of any container FFmpeg can read, each carrying the second it came
+from - the visual counterpart of the audio half `extract_audio_wav`'s own
+docstring has named as this project's video-understanding pipeline since it was
+written. Above it, `image_analysis` treats the medium as data: `_VISUAL_NOUNS`
+is one table the 270-entry marker set is generated from (every phrase the
+hand-written list held is still in it), `_is_moving_medium` reads the artifact
+store's own recorded kind and falls back to the file itself, and
+`_moving_visual_analysis` sends each frame through the identical vision path a
+still already went through. There is no second provider, no second kind of
+reasoning, and nothing anywhere that knows what is in a picture. A medium that
+does not exist yet is one entry in that table.
+
+**Honesty across time.** An account built from sampled moments says so
+(`_SAMPLED_LOOK_NOTE`), every observation is attributed to the second it came
+from, and a request that asks Alfred to speak *for* what is in the medium
+("voice out what it is doing", "say what he is thinking") adds one line saying
+the reading is of what is visible and not of words or intentions the subject
+expressed. The dog in the brief is a subject, not a feature: a machine, a
+crowd or a weather front reaches the identical code.
+
+**Verified with the real model, once.** A real 6-second encoded recording, the
+real Moondream2 pair on this machine, through the real capability: three frames
+sampled at 1.5s / 3.0s / 4.5s, three real per-frame descriptions, the sampled
+and interpretive notes, the local-vision attribution, 322 seconds wall clock.
+The mechanism is verified; the *quality* of a small local vision model on a
+synthetic scene is poor and is labelled as exactly that, never as verified
+reasoning. Everything else is covered by
+`tests/test_visual_understanding_of_moving_media.py` (59 tests) with scripted
+vision and genuinely encoded media - a suite cannot spend five minutes a frame.
+
+**A defect the live run found on its own.** The vision model was being asked
+the person's sentence with the filesystem path still in it ("...in this video:
+C:\...\subject.mp4"). The path is how this process found the file and is noise
+to something being shown the picture; `_vision_prompt` now removes it, and
+falls back to the plain question when nothing askable is left.
+
+**The one failing test was a fixture whose premise had expired.**
+`test_starting_a_session_asks_a_genuine_question_on_an_arbitrary_topic` chose
+"the biology of deep-sea anglerfish" precisely because it was unrelated to
+anything in the project. On 2026-09-29 at 08:38 the owner's governed config
+gained `agent_definition.marine_expert` - "marine biology and oceanographic
+research" - and the router correctly delegated the quiz to that specialist
+instead of Alfred starting a guided activity. The routing is the architecture
+working; no source file anywhere names that specialist. What was wrong was the
+file's hidden assumption that nothing in the owner's installation would ever
+claim its topic, so the assumption was removed rather than the topic changed:
+any topic can become someone's specialism.
+
+**The assumption is not confined to one file.** `memory="ephemeral"` isolates
+memory; it does not isolate the governed config, which is where `agent create`
+persists a specialist. 49 of the 62 test files that build the real system do
+not redirect `DEFAULT_CONFIG_PATH` (50 before this pass fixed one), so the
+suite's result depends on which specialists the owner happens to have created. That is what turned a suite that
+passed 8386/8386 on 2026-09-28 into one with a failure twelve hours later, with
+no code change in between. Making the suite hermetic by default is a
+one-mechanism change to `conftest.py` with a suite-wide blast radius, so it is
+measured and reported here rather than performed.
+
+**Six of the seven baseline failures were the machine, not the code.** The
+first full run of this pass shared the laptop with a 3.7GB vision model load;
+the four voice-switching tests, the provider-UI test and the Node-driven
+quick-view test all passed in isolation, and the Node one had failed on a
+30-second subprocess timeout.
+
+**The management surface was told.** The capability panel said "Image Analysis
+(visual reasoning)" and "Video Understanding (transcription)", which after this
+repair under-reported both halves. The rows now say stills *and* moving media,
+and that the transcription row is the speech half only. The Image Analysis
+row's READY flag is deliberately unchanged - it reflects the Brain's own
+vision, which is what "visual reasoning" means here. An installed local vision
+model is a real second path the handler falls back to, and it is now named in
+the detail line, attributed; flipping the row on it would claim more than the
+Brain can do, and that is an owner's call rather than this pass's.
+
+**What this pass could not finish.** The post-repair full-suite run was killed
+by the host for system memory pressure part-way through, so there is no
+post-repair full-suite number here. The pre-repair baseline was 8435 passed, 7
+failed, 2 skipped. Every repair above is verified by its own test file and the
+files adjacent to it - 645 tests across 18 files in one run, all passing - and a full-suite
+re-run is still owed before this is called closed.
+
+
+### 54.4 Phase 11 final closure pass - a question put to the person is answered by the person (2026-09-30)
+
+The closure audit's Full Brain run with the real local model answered "In two
+sentences, why does a millstone need dressing?" with "Got it - I'll go with a
+millstone from now on." Tracing it end to end found one shape behind that and
+most of what followed: **something that was not the person's answer was taken
+as one** - a step the objective loop composed itself, a recall question, a
+phrase handed over to translate, a message body. Each instance was reproduced
+at the real conversation door first; the ledger (section P11F) has every row.
+
+**The loop answered for the person.** A clarification, a consequential
+action's yes/no, an open correction question and a guided activity's question
+all resolve against *whatever remark reaches the Manager next*. The Full Brain
+objective loop fed its own next step into that same door, so its step
+"Describe a millstone" resolved the model's (spurious) clarification and was
+remembered as the person's choice, and - by the same path - a pending send was
+confirmed by a step reading "make sure the message is sent". There is now one
+predicate for it, `ActivitySessions.awaits_reply`, read through
+`ManagerSkills.awaiting_reply`, and `pursue_objective` stops at NEEDS_INPUT the
+moment it is true. Half Brain never reaches the loop, which is why this was
+Full-Brain-only.
+
+**The model's output is evidence, never trusted as-is - three more places.**
+(1) A clarification is only raised about candidates the remark actually states,
+as words of their own and each in a place of its own (the model offered "a
+mill" out of "a millstone", and once the schema's own placeholder text), and
+never for a remark that is itself a question ("... Sydney or Canberra?" came
+back as "What is the capital of Australia?"). (2) An objective verdict whose
+field only repeats the schema's own wording ("What should be attempted next?")
+is no verdict. (3) Unchanged and deliberate: a `failed` or `needs_input`
+verdict may follow a successful step - that is tested design; a small model can
+still misuse it (recorded in P11F-17).
+
+**Deterministic resolvers read words, and only answers.** The confirmation
+gate matched yes/no as substrings ("are you sure?" sent a message; "yes, send
+it now" cancelled one); it now matches whole words, a question is never a yes,
+and "not"/"dont"/a curly apostrophe are read. The correction question took any
+remark mentioning an option as the choice and wrote the stale replacement over
+it; a choice now only names - the rule `select_candidate` already followed.
+
+**The caller decides what to ask Memory about.** `memory/query.py` has always
+said so; three capability callers passed the raw topic, so "the" matched every
+note and a correction about "the boiler" deleted a note about a kiln shelf.
+They ask with `distinctive_terms`. A plain note is corrected as a note, not
+through the personal-fact template.
+
+**Material is not a request.** A phrase to translate and a message to send are
+words handed over, not words said to Alfred. Translation now outranks claims on
+its own phrase - the Phase 10 rule for discussions ("talking about doing
+something must never do it") applied to words - so "translate 'add a task to
+buy milk' into Spanish" no longer adds a task - as long as the target can
+name a language ("say what the dog is doing in the footage" names footage).
+And a new declared property,
+`ManagerCapability.carries_material` (translate, translate_media,
+communication), keeps memory capture from reading "my name is Sam" inside a
+message body as the person's name - which it did before the send was even
+confirmed.
+
+**What was verified, not repaired.** A never-seen device on a live HTTP
+endpoint, declared as data, driven through conversation behind the repaired
+gate, persisted and reloaded; the Control Center's provider, voice, grant,
+workspace and connection writes, each read back by a fresh build; real offline
+translation into languages other than the German example; per-agent memory
+isolation; honest Half Brain refusals. Recorded limitations are in P11F-17.
+
+**What the full suite found that the probes did not.** The first full run
+(8 failed, 8666 passed): one failure was this pass's own - a routing case,
+fixed above - and the other seven predate it. Three were the P11Z-09
+application naming "Alfred" in `self_contained_reason` literals and writing
+"recognition" into the Manager module, which the architecture audit and the
+cognition-isolation test forbid - that pass's own full run never finished.
+Four were research tests that fail only against the owner's real roster, and
+they exposed a real defect behind the P11Z-11 coupling: since P11Z-09 lets an
+in-domain specialist be consulted, a collaboration in which every contribution
+failed still asked a Full Brain to converse with no notes, and its answer from
+memory was reported as success. An empty collaboration now falls back to
+Alfred's ordinary handling, which fails honestly.
+
+**Regression.** The final full suite, run against the owner's real
+configuration after every repair above: **8679 passed, 2 skipped, 0 failed,
+exit 0** (21m48s, completed normally, 2026-09-30 11:23-11:45 UTC). This is the
+full-suite re-run SS54.3 recorded as owed. Production `data/` byte-identical by
+mtime/size manifest before and after the pass, both full runs included.
+
+### 54.5 Phase 11 closure - examples are validation instances, and residue is not the owner's (2026-09-30)
+
+The owner closed Phase 11 with one rule and three held items. The rule: **a
+specific example is a validation instance; the general mechanism is the
+architecture.** An example never becomes a subsystem and is never "future
+work": if the mechanism it needs is missing, that mechanism is a requirement.
+The ledger has every row (sections P11X and P11R); this entry records what the
+closure found.
+
+**The leaked session file (P11F-16) is gone.** It was confirmed as the previous
+pass's harness residue before it was removed - created eleven seconds after
+that harness was saved, holding exactly the one command it sends - and a
+whole-`data/` manifest shows nothing else changed.
+
+**Two "owner's specialists" and the "owner's TV" were a probe's.** The audit
+trail made it visible: `agent create` is audited at every owner door, and the
+log holds no such entry. A Claude session on 2026-09-29 built the system with
+ephemeral memory but the real governed config, and wrote Nova (sports
+analytics), Coral (marine biology) and a `smart_tv` service into production,
+unaudited. Passes since described them as the owner's - the "specialist the
+owner created" that broke a test in SS54.3 and the "owner's real roster" of
+SS54.4 among them. The behaviour those passes verified stands, since the router
+was right about the roster it was given; what was wrong was provenance. The
+residue is recorded (P11X-02) and left for the owner, because only the session
+file was authorised for removal.
+
+**One seam behind all three writes.** `Settings` carries a path for most owner
+state but not for the governed config, credential store, service and site
+registries, evolution ledger, action log or sessions directory, and
+`run_command` audits only when asked to. A harness that isolates memory
+therefore still writes the rest, silently. The suite cannot - its conftest
+refuses any write under `data/` - so every one of the three writes came from a
+probe run outside pytest; the suite's own coupling is read-only. That is
+P11Z-11's real shape. It is
+not a Phase 11 acceptance blocker - no accepted behaviour depends on it (the
+evidence, and its one gap, are below) - and it is not deferred either: the mechanism is
+named (those paths carried by `Settings`, owner-state writes audited by
+default) and proposed as the first change after this commit.
+
+**The memory-schema record (P11-C-15) is rehearsed, not applied.** The governed
+per-component `reconcile` corrected '1' to '2' on a full copy, touching exactly
+the ledger and the audit log and no memory file. It was not run on production:
+the command's component seeding would also have recorded the probe residue's
+surfaces, and this session's permission layer refused the write. It is ready
+for the owner to run once the residue is decided.
+
+**Nine of fourteen example classes had no row.** Smart devices, translation,
+creation, visual understanding and future devices were recorded; team
+analytics, interactive 3D and games, aerial herd analytics, high-precision
+inspection, bio-electrical signals, AR with robot control, autonomous robots,
+everyday recording and health data lived only in conversation. P11R now records
+all fourteen as validation instances and names the fifteen general mechanisms
+they need that do not exist: observation history, condition -> response,
+structured perception, streaming transport, a spatial model, live data-bound
+interfaces, multi-file projects, authorised deployment, series analysis,
+spatial interaction, supervised device tasks, a consented capture pipeline, a
+sensitivity class, speaker separation and cross-connection grouping. None was
+built here, and none is attached to a domain. Device control, translation and
+small-scale creation are verified; most of the examples are not yet
+realizable, and the ledger now says exactly why.
+
+**Verification.** No source or test file changed in this pass; the tree is
+md5-identical to its start except the ledger and this document. The full suite
+on the final tree, against production configuration: **8679 passed, 2 skipped,
+0 failed, exit 0** (2026-09-30 14:05-14:24 UTC) - the P11F result stands.
+Production `data/` identical by md5 before and after. The hermetic counterpart
+was stopped by the host for memory pressure at 19% (about 1,667 tests, none
+failed) and was not restarted unasked; the last complete hermetic run is
+2026-09-29's, identical to its production-config twin, so a complete one on
+the final tree is still owed. A real turn on a full copy with no
+`data/sessions` recreated the directory and saved the session.
+
+### 54.6 Phase 11 closure decisions executed, and the mechanisms measured (2026-09-30)
+
+The owner decided the held items; each was rehearsed on a full copy of the
+tree, run through the operator's own door one fresh process at a time, and
+verified by reading back from a new process.
+
+**The probe residue is gone, through governance.** Grants were revoked first,
+because `agent remove` keeps a removed specialist's grants by design; then both
+specialists were removed and the service forgotten. Five audited operator rows
+record it. The resulting config and service files are byte-identical to the
+pre-probe copies - used as a check, never copied over - and the owner's own
+setting (`capability.general_conversation = 6`) survived. A fresh process lists
+Alfred and Arthur only and no services; addressing "Nova" reaches Alfred.
+
+**The memory-schema record says 2.** The governed per-component `reconcile`
+ran after the residue was gone, so its component seeding recorded only one
+real new component (`provider.artifact_runtime`) and none of the residue's
+surfaces. Installed code, both memory files (untouched), the system manifest
+and the ledger now agree. Two older drift records remain because they were not
+authorised, and one of them shows a real gap: `reconcile` refuses a record
+whose component is gone, so no governed path retires a stale record.
+
+**The fifteen mechanisms, measured rather than described.** Read from the
+code, eleven of GM-01..GM-15 have no implementation and four exist in part:
+time-triggered proactive delivery (GM-02), the extents of *generated* 3D
+models (GM-05), the capture lifecycle without its pipeline (GM-12), and a
+credential refusal without graded sensitivity (GM-13). None is production
+verified. Two findings are deficiencies of existing contracts rather than
+missing features, and they come first when implementation begins:
+`ConnectionResult` carries only text, so no reading can be kept as a value
+(D-1); and the proactive pipeline enumerates its four event sources in one
+function, so no declared condition can join it (D-2). The build order in the
+ledger follows those dependencies, not the phase in which a gap was found. The
+owner approved it at the Phase 11 commit decision - D-1 with GM-01, D-2 with
+GM-02, GM-04, GM-13, then the rest by dependency - as a sequence for the
+implementation campaign after this commit, not a deferral: every GM stays an
+active requirement until built as a general mechanism and proven through its
+validation instances. Nothing was implemented for them in the Phase 11 tree.
+
+**Verification.** The owner/isolation files (12 files, 531 tests) passed after
+the cleanup. Then two complete full-suite runs, each one process with nothing
+else running: hermetic, with every owner-state path pointed at an empty
+directory, **8679 passed, 2 skipped, 0 failed, exit 0** (20m09s); and against
+the cleaned production configuration, **8679 passed, 2 skipped, 0 failed, exit
+0** (15m53s). The earlier hermetic attempt the host stopped at 19% is not
+counted. With owner state present, absent and cleaned, the result is the same,
+which is the evidence behind P11Z-11's disposition. Production `data/` was
+identical by md5 across every run; since this pass began, the tree differs only
+in the ledger, this document and the four files the governed commands wrote.
+

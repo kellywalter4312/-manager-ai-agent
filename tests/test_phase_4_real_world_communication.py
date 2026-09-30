@@ -250,10 +250,22 @@ class TestConsequentialActionConfirmation:
 
 class TestReadAndReplyUnaffected:
     def test_reading_messages_needs_no_confirmation(self):
+        """Reading is not a consequential act, so nothing is confirmed.
+
+        This used to assert ``turn.succeeded`` as well, with no communication
+        provider configured - and it passed, because reading an absent inbox
+        answered "No recent messages or calls." and called that a success. That
+        is the false-empty-inbox the Phase 11 closure campaign found (F-02):
+        "there is nothing there" and "there is nothing to look in" are
+        different answers, and only one of them was true. What this test is
+        actually about - that reading asks for no confirmation - is unchanged
+        and still asserted; the outcome must now be honest instead.
+        """
         runtime, manager, channel, conversation = real_system()
         turn = exchange(channel, conversation, "check my messages")
-        assert turn.succeeded
         assert "(yes/no)" not in turn.outcome
+        assert not turn.succeeded
+        assert "no authorized communication connection" in turn.outcome.lower()
 
     def test_reply_is_still_honestly_refused_never_guessed(self):
         runtime, manager, channel, conversation = real_system()

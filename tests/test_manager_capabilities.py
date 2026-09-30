@@ -311,6 +311,11 @@ class TestHandlersAreSelectedThroughTheRegistry:
             # identity, a new real version rather than a disconnected file.
             "revise_diagram",
             "roster_report",
+            # Phase 11 closure: runs an artifact this agent owns in a real
+            # runtime and reports what actually happened. Creation ended at a
+            # saved file; a source file is evidence that something was written,
+            # never that it runs.
+            "run_artifact",
             # Agent-autonomous voice selection checkpoint: chooses a
             # real, currently-available voice matching a requested
             # language/accent, never overriding an explicit user choice.

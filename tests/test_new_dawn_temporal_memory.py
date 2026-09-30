@@ -109,8 +109,19 @@ class TestTimezoneResolution:
         for name in FIXED_OFFSET_ZONES:
             assert name in {"utc", "africa/lagos"}
 
-    def test_the_setting_defaults_to_lagos(self):
-        assert settings().timezone == "Africa/Lagos"
+    def test_the_setting_defaults_to_the_machines_own_local_time(self):
+        """Phase 11 final gate: the default was one person's city, and without
+        tzdata no other named zone could even be configured. The default is now
+        the machine's own local time; a named zone is still honoured."""
+        from datetime import datetime as _dt
+        from src.services.memory.day import SystemLocalTime
+
+        assert settings().timezone == "local"
+        zone = resolve_timezone(settings().timezone)
+        assert isinstance(zone, SystemLocalTime)
+        instant = _dt(2026, 8, 21, 23, 0, tzinfo=timezone.utc)
+        assert instant.astimezone(zone).utcoffset() == instant.astimezone().utcoffset()
+        assert Settings(timezone="Africa/Lagos").timezone == "Africa/Lagos"
 
     def test_the_setting_is_not_lowercased(self):
         """IANA names are case-sensitive identifiers."""
@@ -121,7 +132,8 @@ class TestTimezoneResolution:
             Settings(timezone="   ")
 
     def test_describe_reports_it(self):
-        assert "timezone=Africa/Lagos" in settings().describe()
+        assert "timezone=local" in settings().describe()
+        assert "timezone=Africa/Lagos" in settings(timezone="Africa/Lagos").describe()
 
 
 # ----------------------------------------------------------------------

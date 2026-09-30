@@ -35,6 +35,7 @@ from src.manager.collaboration_entry import (
 )
 from src.manager.discussion import act_on as act_on_discussion
 from src.manager.discussion import discussion_notes, note_agent_reply, note_person_remark
+from src.manager.capabilities import MANAGER_CAPABILITIES, OPEN_CONVERSATION
 from src.services.sessions.store import SessionStore, default_session_store
 from src.services.audit.action_log import (
     CONSEQUENTIAL_CAPABILITIES,
@@ -283,8 +284,15 @@ def exchange(
         handled_by_capability=turn.capability, handled_successfully=turn.succeeded,
         addressed_to=to_agent if turn.handled_by == to_agent else None,
     )
-    if retained and not turn.succeeded:
-        turn = _acknowledge_successful_retention(turn, retained, only_asked_to_remember=_only_asked_to_remember(request))
+    # Phase 11 closure: a turn that only asked to remember, and that no
+    # capability of its own took, is answered by what was kept - in either
+    # Brain mode. With a model, the open-ended fallback "succeeded" with its
+    # own words and the person was never told the note was kept; with the
+    # real local model the objective loop even replaced those words with
+    # "What should be attempted next?".
+    only_remember = _only_asked_to_remember(request)
+    if retained and (not turn.succeeded or (only_remember and turn.capability == OPEN_CONVERSATION.name)):
+        turn = _acknowledge_successful_retention(turn, retained, only_asked_to_remember=only_remember)
         response = replace(response, turn=turn, text=turn.outcome, speech=speakable(turn))
 
     # Stage 17.3: the real production speech/presence synchronisation
@@ -571,7 +579,7 @@ def retain_what_was_asked_for(
 
     **Stage 12 addition: a bare, first-person self-introduction is also
     offered, alongside an explicit "remember that X".** "My name is
-    Kelly. I was born September 27, 2006" asks to be kept just as
+    Sam. I was born March 3, 1998" asks to be kept just as
     plainly as "remember that X" does - see
     ``user_facts.py``'s own docstring for why recognising this small,
     fixed set of self-introduction grammars is not the guessing
@@ -579,6 +587,13 @@ def retain_what_was_asked_for(
     source, still passes through the identical governed policy gate
     below - nothing here writes anything on its own authority.
     """
+    # Phase 11 closure: words the handling capability declares are material -
+    # a phrase to translate, a message to send - were never said *to* Alfred,
+    # so nothing in them was asked to be kept ("translate my name is Sam into
+    # Spanish" stored the person's name as Sam).
+    handled = MANAGER_CAPABILITIES.get(handled_by_capability or "")
+    if handled is not None and handled.carries_material:
+        return ()
     requested = retention_requests([request], conversation_id=conversation.id)
     declared = extract_declared_facts(request)
 
@@ -686,7 +701,7 @@ def _brain_judged_retention(
 def _dated_if_recognisable(candidate) -> "MemoryRecord":
     """Enrich a candidate with a structured date when its own content
     names one a person recognisably stated - "remember that I was born
-    September 27, 2006" becomes just as computable as the bare
+    March 3, 1998" becomes just as computable as the bare
     declarative form, without extraction and enrichment having to be
     the same pass. A candidate that already carries a date (from
     ``extract_declared_facts`` directly) is returned unchanged.

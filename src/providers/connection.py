@@ -243,5 +243,25 @@ class Connection(ABC):
         ``DeclaredConnection.operation_description_for``)."""
         return ""
 
+    def self_authentication(self) -> "SelfAuthentication | None":
+        """How this connection authenticates when it is *not* by a typed
+        credential in the shared credential store - its own flow (an OAuth
+        token file, a device pairing) - or None, the default, when it is.
+        A surface managing connections asks this rather than knowing any
+        connection by name (Phase 11), so a new self-authenticating
+        connection is described correctly with no surface change."""
+        return None
+
     def __repr__(self) -> str:
         return f"<{type(self).__name__} name={self.name!r}>"
+
+
+@dataclass(frozen=True)
+class SelfAuthentication:
+    """A self-authenticating connection's own account of itself - plain
+    words for a person managing it, never a credential."""
+
+    method: str                       # e.g. "OAuth - connected via a token file, not a typed credential"
+    connect: str                      # how to connect (or re-authorize)
+    disconnect: str                   # how to disconnect
+    details: tuple[str, ...] = ()     # extra status lines read locally, e.g. a token's recorded expiry

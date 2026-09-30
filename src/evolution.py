@@ -1,10 +1,28 @@
 """Stage 11.B - governed self-improvement / evolution.
 
-The complementary layer to Stage 11.A's extension lifecycle
-(``src/extensions.py``): where 11.A governs *new* capabilities arriving,
-this governs Alfred *changing something that already exists* - a prompt, a
-retrieval strategy, a routing rule, a parameter - never by rewriting
-himself unsupervised.
+Stage 11.A's separate extension ledger (``src/extensions.py``) was removed
+on 2026-09-15 as a second answer to the question this module and
+``src/services/evolution/`` already answer; a category nobody has named yet
+joins this lifecycle by registering a handler
+(``src/services/evolution/handlers.py::register_handler``). This governs
+the system *changing something* - a prompt, a retrieval strategy, a
+routing rule, a parameter, a newly registered component - never by
+rewriting itself unsupervised.
+
+**Phase 11 names, mapped onto what already existed rather than rebuilt:**
+
+    Upgrade Manifest      an ``EvolutionProposal`` - identity, target,
+                          current and desired version, dependencies,
+                          compatibility requirements (``requires``),
+                          migration description, risk, provenance, and the
+                          rollback target (its own ``current_version``).
+                          Not ``src/control_center/manifest.py``'s
+                          ``UpgradeManifest``, which describes what is
+                          *installed*, not a change.
+    Upgrade Planner       ``plan_proposal`` below - deterministic, never a
+                          model's opinion.
+    Governed Executor     ``src/services/evolution/ecosystem_evolution.py``
+                          ``run``/``rollback``, over this module's gates.
 
     OBSERVE / IDENTIFY   outside this module - Alfred's Brain, or a person,
                          noticing something worth changing. This module
@@ -141,9 +159,25 @@ class EvolutionProposal:
     risk_level: RiskLevel = RiskLevel.LOW
     dependencies: tuple[str, ...] = ()
     status: EvolutionStatus = EvolutionStatus.PROPOSED
+    # Phase 11: compatibility requirements - other components that must be
+    # at an exact recorded version for this change to be safe, as
+    # ``(component_id, version)`` pairs (a mapping is accepted and
+    # normalised). Versions are compared exactly, never ordered: each
+    # component's version is its own handler's opaque fact (a content hash,
+    # a model name, a count), so "at least" has no meaning this module
+    # could invent.
+    requires: "tuple[tuple[str, str], ...]" = ()
+    # Where the proposal came from (a door, a person, a tool) - recorded,
+    # never consulted to decide anything.
+    provenance: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "dependencies", tuple(self.dependencies))
+        pairs = self.requires.items() if isinstance(self.requires, Mapping) else self.requires
+        object.__setattr__(self, "requires", tuple((str(c), str(v)) for c, v in pairs))
+
+    def requirements(self) -> "dict[str, str]":
+        return dict(self.requires)
 
     def to_dict(self) -> dict:
         return {
@@ -157,6 +191,8 @@ class EvolutionProposal:
             "risk_level": self.risk_level.value,
             "dependencies": list(self.dependencies),
             "status": self.status.value,
+            "requires": dict(self.requires),
+            "provenance": self.provenance,
         }
 
 
@@ -242,7 +278,35 @@ def validate_proposal(proposal: EvolutionProposal) -> ValidationResult:
         return ValidationResult(False, "a proposal must actually change the version of its target")
     if proposal.proposal_id in proposal.dependencies:
         return ValidationResult(False, "a proposal cannot depend on itself")
+    problem = requirement_problem(proposal)
+    if problem is not None:
+        return ValidationResult(False, problem)
     return ValidationResult(True, "well-formed")
+
+
+def requirement_problem(proposal: EvolutionProposal) -> "str | None":
+    """Why a proposal's compatibility requirements are malformed, or None."""
+    for component_id, version in proposal.requires:
+        if not component_id.strip() or not version.strip():
+            return "a compatibility requirement must name a component and a version"
+        if component_id == proposal.target:
+            return "a proposal cannot require its own target - its current_version already says that"
+    return None
+
+
+def unmet_requirements(proposal: EvolutionProposal, *, ledger: EvolutionLedger) -> "list[str]":
+    """Every compatibility requirement the ledger's independent record does
+    not satisfy, in plain words. A component the ledger has no version for
+    is unmet too: compatibility that cannot be established is never
+    assumed."""
+    unmet = []
+    for component_id, version in proposal.requires:
+        observed = ledger.version_of(component_id)
+        if observed is None:
+            unmet.append(f"'{component_id}' has no recorded version, so compatibility with {version!r} cannot be established")
+        elif observed != version:
+            unmet.append(f"requires '{component_id}' at {version!r}; it is at {observed!r}")
+    return unmet
 
 
 @dataclass(frozen=True)
@@ -277,6 +341,14 @@ def evaluate_proposal(proposal: EvolutionProposal, *, ledger: EvolutionLedger) -
         return EvaluationResult(
             EvolutionStatus.REJECTED,
             f"depends on proposal(s) not currently active: {', '.join(missing)}",
+            replace(proposal, status=EvolutionStatus.REJECTED),
+        )
+
+    incompatible = unmet_requirements(proposal, ledger=ledger)
+    if incompatible:
+        return EvaluationResult(
+            EvolutionStatus.REJECTED,
+            "incompatible: " + "; ".join(incompatible),
             replace(proposal, status=EvolutionStatus.REJECTED),
         )
 
@@ -421,6 +493,17 @@ def rollback_proposal(
         )
     if not approved:
         return RollbackResult(False, "not approved", proposal, ledger)
+    recorded = ledger.version_of(proposal.target)
+    if recorded != proposal.proposed_version:
+        # A later change now holds this target: restoring this proposal's
+        # prior version would silently undo that one while it still claims
+        # to be active. Roll the newest change back first.
+        return RollbackResult(
+            False,
+            f"'{proposal.target}' is at {recorded!r}, not the {proposal.proposed_version!r} this proposal "
+            "applied - a later change holds it; roll that back first",
+            proposal, ledger,
+        )
 
     rolled_back = replace(proposal, status=EvolutionStatus.ROLLED_BACK)
     return RollbackResult(True, "rolled back", rolled_back, ledger.with_rolled_back_change(rolled_back))
@@ -506,4 +589,211 @@ def run_evolution_lifecycle(
         proposal=activation.proposal,
         before_ledger=ledger,
         after_ledger=application.ledger,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 11 - the Upgrade Planner, over the same gates the executor runs.
+# ---------------------------------------------------------------------------
+
+_OPEN_STATUSES = (EvolutionStatus.PROPOSED, EvolutionStatus.EVALUATED, EvolutionStatus.APPROVED)
+
+
+@dataclass(frozen=True)
+class EvolutionPlan:
+    """Whether one proposal can safely run *now*, and what stands in the way.
+
+    Deterministic and read-only: the same ledger, proposals and observation
+    always give the same plan, and nothing here changes anything. It asks
+    the same questions ``evaluate_proposal`` asks when the change actually
+    runs, so a plan can never promise what the executor will refuse, plus
+    the ones only a planner can answer ahead of time: the order unmet
+    prerequisites must run in, other open changes this would make stale,
+    active changes that were approved against the version this replaces,
+    whether the real state still matches the record, and whether the
+    change can be rolled back.
+    """
+
+    proposal_id: str
+    target: str
+    from_version: str
+    to_version: str
+    can_proceed: bool
+    blockers: tuple[str, ...]
+    warnings: tuple[str, ...]
+    prerequisites: tuple[str, ...]
+    order: tuple[str, ...]
+    affected: tuple[str, ...]
+    rollback: str
+
+    def to_dict(self) -> dict:
+        return {
+            "proposal_id": self.proposal_id,
+            "target": self.target,
+            "from_version": self.from_version,
+            "to_version": self.to_version,
+            "can_proceed": self.can_proceed,
+            "blockers": list(self.blockers),
+            "warnings": list(self.warnings),
+            "prerequisites": list(self.prerequisites),
+            "order": list(self.order),
+            "affected": list(self.affected),
+            "rollback": self.rollback,
+        }
+
+    def describe(self) -> str:
+        lines = [
+            f"PLAN {self.proposal_id}: {self.target} {self.from_version} -> {self.to_version}",
+            f"  can proceed : {'yes' if self.can_proceed else 'no'}",
+        ]
+        for label, items in (("blocked by", self.blockers), ("warnings", self.warnings),
+                             ("prerequisites", self.prerequisites)):
+            if items:
+                lines.append(f"  {label}:")
+                lines.extend(f"    - {item}" for item in items)
+        lines.append(f"  run order   : {' -> '.join(self.order)}")
+        lines.append(f"  affects     : {', '.join(self.affected)}")
+        lines.append(f"  rollback    : {self.rollback}")
+        return "\n".join(lines)
+
+
+def _dependency_order(
+    proposal: EvolutionProposal, proposals: "Mapping[str, EvolutionProposal]", ledger: EvolutionLedger
+) -> "tuple[tuple[str, ...], list[str]]":
+    """The open prerequisites, deepest first, then ``proposal`` itself - and
+    every problem found on the way (an unknown, closed or circular
+    dependency). Active dependencies are already satisfied and not listed."""
+    order: list[str] = []
+    problems: list[str] = []
+    visiting: set[str] = set()
+
+    def visit(current: EvolutionProposal, path: tuple[str, ...]) -> None:
+        for dep in current.dependencies:
+            if ledger.is_proposal_active(dep) or dep in order:
+                continue
+            if dep in path or dep in visiting:
+                problems.append(f"circular dependency: {' -> '.join(path + (dep,))}")
+                continue
+            prerequisite = proposals.get(dep)
+            if prerequisite is None:
+                problems.append(f"depends on '{dep}', which does not exist")
+                continue
+            if prerequisite.status not in _OPEN_STATUSES:
+                problems.append(f"depends on '{dep}', which is {prerequisite.status.value} and can never become active")
+                continue
+            visiting.add(dep)
+            visit(prerequisite, path + (dep,))
+            visiting.discard(dep)
+            order.append(dep)
+
+    visit(proposal, (proposal.proposal_id,))
+    return tuple(order) + (proposal.proposal_id,), problems
+
+
+def plan_proposal(
+    proposal: EvolutionProposal,
+    *,
+    ledger: EvolutionLedger,
+    proposals: "Mapping[str, EvolutionProposal]",
+    has_handler: bool,
+    can_roll_back: bool,
+    observed_version: "str | None" = None,
+) -> EvolutionPlan:
+    """PLAN: can ``proposal`` safely run now? ``has_handler``/``can_roll_back``
+    and ``observed_version`` (the target's real current state, read by its
+    own handler, or None when it cannot say) come from the caller, so this
+    stays pure: it never reads a file, imports a handler, or asks a model.
+    """
+    blockers: list[str] = []
+    warnings: list[str] = []
+    prerequisites: list[str] = []
+
+    if not has_handler:
+        blockers.append(f"no evolution handler owns '{proposal.target}', so nothing could apply it")
+    if proposal.status != EvolutionStatus.PROPOSED:
+        blockers.append(f"it is already {proposal.status.value}; only a PROPOSED change can run")
+
+    validity = validate_proposal(proposal)
+    if not validity.valid:
+        blockers.append(validity.reason)
+
+    order, problems = _dependency_order(proposal, proposals, ledger)
+    blockers.extend(problems)
+    for dep in proposal.dependencies:
+        satisfied = ledger.is_proposal_active(dep)
+        prerequisites.append(f"proposal '{dep}' active - {'yes' if satisfied else 'not yet'}")
+    unmet_first = [dep for dep in order[:-1]]
+    if unmet_first:
+        blockers.append(f"run {', '.join(unmet_first)} first (in that order)")
+
+    for component_id, version in proposal.requires:
+        observed = ledger.version_of(component_id)
+        prerequisites.append(
+            f"'{component_id}' at {version!r} - "
+            + ("yes" if observed == version else f"no (recorded: {observed!r})")
+        )
+    blockers.extend(unmet_requirements(proposal, ledger=ledger))
+
+    recorded = ledger.version_of(proposal.target)
+    if recorded is not None and recorded != proposal.current_version:
+        blockers.append(
+            f"'{proposal.target}' is recorded at {recorded!r}, not the {proposal.current_version!r} "
+            "this change starts from - it is stale"
+        )
+    if observed_version is not None and observed_version != proposal.current_version:
+        blockers.append(
+            f"the real state of '{proposal.target}' is {observed_version!r}, not the "
+            f"{proposal.current_version!r} on record - it was changed outside governance"
+        )
+
+    stale = sorted(
+        other.proposal_id for other in proposals.values()
+        if other.proposal_id != proposal.proposal_id and other.target == proposal.target
+        and other.status in _OPEN_STATUSES and other.current_version == proposal.current_version
+    )
+    if stale:
+        warnings.append(f"running this makes {', '.join(stale)} stale (they start from the same version)")
+
+    holders = {
+        p.proposal_id for p in proposals.values()
+        if p.target == proposal.target and ledger.is_proposal_active(p.proposal_id)
+    }
+    affected = [proposal.target]
+    for other in sorted(proposals.values(), key=lambda p: p.proposal_id):
+        if ledger.is_proposal_active(other.proposal_id) and holders.intersection(other.dependencies):
+            warnings.append(
+                f"'{other.proposal_id}' ({other.target}) was approved on top of "
+                f"{', '.join(sorted(holders.intersection(other.dependencies)))}, whose version this replaces"
+            )
+            if other.target not in affected:
+                affected.append(other.target)
+        if ledger.is_proposal_active(other.proposal_id) and dict(other.requires).get(proposal.target) == proposal.current_version:
+            warnings.append(
+                f"'{other.proposal_id}' ({other.target}) requires '{proposal.target}' at "
+                f"{proposal.current_version!r}, which this replaces"
+            )
+            if other.target not in affected:
+                affected.append(other.target)
+
+    if proposal.risk_level in (RiskLevel.HIGH, RiskLevel.CRITICAL):
+        warnings.append(f"declared {proposal.risk_level.value} risk (recorded for whoever approves; never decides)")
+
+    if can_roll_back:
+        rollback = f"governed rollback restores '{proposal.target}' to {proposal.current_version!r} through its handler"
+    else:
+        rollback = "none - this change could not be undone through governance"
+        warnings.append("no rollback is available for this change")
+
+    return EvolutionPlan(
+        proposal_id=proposal.proposal_id,
+        target=proposal.target,
+        from_version=proposal.current_version,
+        to_version=proposal.proposed_version,
+        can_proceed=not blockers,
+        blockers=tuple(blockers),
+        warnings=tuple(warnings),
+        prerequisites=tuple(prerequisites),
+        order=order,
+        affected=tuple(affected),
+        rollback=rollback,
     )

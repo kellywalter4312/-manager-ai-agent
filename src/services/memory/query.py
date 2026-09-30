@@ -21,20 +21,12 @@ a specialist importing it from src/manager/ would have been worse still.
 
 from __future__ import annotations
 
-from src.core.contracts import tokenize
+from src.core.contracts import STOPWORDS, tokenize
 
-# Words too common to make a record relevant.
-STOPWORDS: frozenset[str] = frozenset(
-    {
-        "a", "an", "and", "any", "are", "as", "at", "be", "been", "but", "by",
-        "can", "did", "do", "does", "for", "from", "get", "had", "has", "have",
-        "how", "i", "if", "in", "into", "is", "it", "its", "last", "me", "my",
-        "no", "not", "of", "on", "or", "our", "out", "so", "than", "that",
-        "the", "their", "them", "then", "there", "these", "they", "this",
-        "to", "up", "us", "was", "we", "were", "what", "when", "which", "who",
-        "will", "with", "would", "you", "your",
-    }
-)
+# Words too common to make a record relevant. Declared beside ``tokenize`` in
+# src/core/contracts.py (see the note there for why it moved) and re-exported
+# here under the name this module has always published it as.
+__all__ = ["STOPWORDS", "distinctive_terms"]
 
 
 def distinctive_terms(text: str) -> str:

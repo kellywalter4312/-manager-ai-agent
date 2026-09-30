@@ -69,8 +69,15 @@ class WorkspaceType:
         if not ident or not ident.replace("_", "").replace("-", "").isalnum():
             raise ValueError(f"a workspace type needs a plain id, got {self.workspace_id!r}")
         panels = tuple(p.strip().lower() for p in self.panels if str(p).strip())
-        if not panels or not all(_valid_panel(p) for p in panels):
-            raise ValueError(f"workspace type {ident!r} has panels the page cannot render: {panels}")
+        if not panels:
+            raise ValueError(f"workspace type {ident!r} has no panels")
+        # Name only the panels that are wrong, and why - a message that listed
+        # every panel called a perfectly good one unrenderable (Phase 11 final gate).
+        wrong = [p for p in panels if not _valid_panel(p)]
+        if wrong:
+            needs = [p for p in wrong if p.partition(":")[0] in _PANELS_WITH_ARGUMENT]
+            reason = f" ({', '.join(needs)} need(s) a value after a colon, e.g. artifacts:image)" if needs else ""
+            raise ValueError(f"workspace type {ident!r} has panels the page cannot render: {tuple(wrong)}{reason}")
         object.__setattr__(self, "workspace_id", ident)
         object.__setattr__(self, "panels", panels)
         object.__setattr__(self, "label", " ".join(str(self.label or ident).split()) or ident)

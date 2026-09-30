@@ -483,7 +483,11 @@ class TestLegacySingleOperationConnectionsAreUnaffected:
         manager = real_manager(connection=NullConnection())
         result = manager.handle_task(Task(description="check my connected account"))
         assert not result.succeeded
-        assert "no supported actions" in result.error
+        # Phase 11 closure reworded this: "the 'null' connection is configured
+        # but offers no supported actions" called a placeholder a configured
+        # connection. What is true is that nothing that can act is set up.
+        assert "offers no actions" in result.error
+        assert "set up" in result.error
 
 
 class TestNoHardcodingWasIntroduced:

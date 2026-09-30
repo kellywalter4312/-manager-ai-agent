@@ -1511,20 +1511,23 @@
             <div class="mgmt-buttons">
               <button type="button" class="mgmt-btn" data-cc-verb="ecosystem">inventory</button>
               <button type="button" class="mgmt-btn" data-cc-verb="ecosystem history">history</button>
+              <button type="button" class="mgmt-btn" data-cc-verb="ecosystem system">system manifest</button>
             </div>
             <div class="mgmt-row">
               <input type="text" id="cc-eco-component" placeholder="component id, e.g. provider.llm_provider"/>
               <select id="cc-eco-action">
                 <option value="detail">detail</option>
                 <option value="propose">propose</option>
+                <option value="plan">plan (changes nothing)</option>
                 <option value="run">run (approve)</option>
                 <option value="reject">run (reject)</option>
                 <option value="rollback">rollback (approve)</option>
+                <option value="reconcile">reconcile record (approve)</option>
               </select>
             </div>
             <div class="mgmt-row">
               <input type="text" id="cc-eco-args"
-                placeholder="propose: version risk reason|benefit  -  run/rollback: proposal-id"/>
+                placeholder="propose: version risk reason|benefit[|requires c=v][|after id]  -  plan/run/rollback: proposal-id"/>
               <button type="button" id="cc-eco-go">Go</button>
             </div>
             <div class="mgmt-note">Every operation here is the identical, already-governed
@@ -2413,9 +2416,10 @@
   }
 
   // A minimal, generic glTF 2.0 binary reader - triangle meshes with positions,
-  // normals, indices, base colours and the node hierarchy (no textures,
-  // skins or animation). Any standard GLB of that shape renders, not only
-  // the ones built here; anything else is reported, never faked.
+  // normals, indices, base colours, the node hierarchy, and keyframed
+  // translation/rotation/scale animation (no textures or skins). Any standard
+  // GLB of that shape renders and moves, not only the ones built here;
+  // anything else is reported, never faked.
   const model3DChoice = new Map();
   function readGlb(THREE, buffer){
     const view = new DataView(buffer);
@@ -2434,9 +2438,11 @@
       const c = ((m.pbrMetallicRoughness || {}).baseColorFactor) || [0.8, 0.8, 0.8, 1];
       return new THREE.MeshStandardMaterial({color: new THREE.Color(c[0], c[1], c[2]), roughness: 0.75, metalness: 0.05});
     });
+    const built = new Map();
     const build = index => {
       const node = doc.nodes[index];
       const obj = new THREE.Group();
+      built.set(index, obj);
       if(node.matrix){ obj.matrix.fromArray(node.matrix); obj.matrix.decompose(obj.position, obj.quaternion, obj.scale); }
       if(node.translation) obj.position.fromArray(node.translation);
       if(node.rotation) obj.quaternion.fromArray(node.rotation);
@@ -2457,6 +2463,20 @@
     };
     const root = new THREE.Group();
     (doc.scenes[doc.scene || 0].nodes || []).forEach(index => root.add(build(index)));
+    // Keyframed motion, exactly as the file declares it - one clip per glTF
+    // animation, one track per channel, on the node that channel targets.
+    const property = {translation: "position", rotation: "quaternion", scale: "scale"};
+    root.userData.clips = (doc.animations || []).map((animation, n) => {
+      const tracks = [];
+      for(const channel of animation.channels || []){
+        const target = built.get(channel.target.node), sampler = animation.samplers[channel.sampler];
+        const path = property[channel.target.path];
+        if(!target || !path || !sampler) continue;
+        const Track = path === "quaternion" ? THREE.QuaternionKeyframeTrack : THREE.VectorKeyframeTrack;
+        tracks.push(new Track(`${target.uuid}.${path}`, Array.from(accessor(sampler.input)), Array.from(accessor(sampler.output))));
+      }
+      return new THREE.AnimationClip(animation.name || `motion ${n + 1}`, -1, tracks);
+    }).filter(clip => clip.tracks.length);
     return root;
   }
 
@@ -2465,8 +2485,12 @@
       const holder = new THREE.Group();
       scene.add(holder);
       scene.add(new THREE.HemisphereLight(0xffffff, 0x333344, 1.4));
-      const status = {loaded: false, meshes: 0, error: ""};
+      const status = {loaded: false, meshes: 0, error: "", animations: 0, tracks: 0};
       holder.userData.model3d = status;
+      // Read-only, for verifying what actually rendered - the same singleton
+      // convention as window.__alfredVoice and friends.
+      (window.__alfredModel3D = window.__alfredModel3D || {})[artifactId] = status;
+      let mixer = null;
       fetch(`artifact/${encodeURIComponent(artifactId)}.glb`).then(r => {
         if(!r.ok) throw new Error(`the model file answered ${r.status}`);
         return r.arrayBuffer();
@@ -2481,10 +2505,26 @@
         wrapper.scale.setScalar(fit);
         holder.add(wrapper);
         model.traverse(o => { if(o.isMesh) status.meshes++; });
+        const clips = model.userData.clips || [];
+        if(clips.length){
+          mixer = new THREE.AnimationMixer(model);
+          clips.forEach(clip => mixer.clipAction(clip).play());
+          status.animations = clips.length;
+          status.tracks = clips.reduce((n, clip) => n + clip.tracks.length, 0);
+          status.moving = [];
+          model.traverse(o => { if(clips.some(c => c.tracks.some(k => k.name.startsWith(o.uuid + ".")))) status.moving.push(o); });
+        }
         status.loaded = true;
         status.size = [size.x, size.y, size.z];
       }).catch(e => { status.error = String(e && e.message || e); });
-      return t => { holder.rotation.y = t * 0.5; holder.rotation.x = 0.35; };
+      return t => {
+        holder.rotation.y = t * 0.5; holder.rotation.x = 0.35;
+        if(mixer){
+          mixer.setTime(t);
+          // What moved, as rendered this frame - read by verification, never by the scene.
+          status.pose = (status.moving || []).map(o => [...o.position.toArray(), ...o.quaternion.toArray()].map(v => +v.toFixed(4)));
+        }
+      };
     };
   }
 
@@ -5413,9 +5453,11 @@
         let command = null;
         if(action === "detail") command = "ecosystem " + component;
         else if(action === "propose") command = "ecosystem " + component + " propose " + args;
+        else if(action === "plan") command = "ecosystem " + component + " plan " + args;
         else if(action === "run") command = "ecosystem " + component + " run " + args + " yes";
         else if(action === "reject") command = "ecosystem " + component + " run " + args + " no";
         else if(action === "rollback") command = "ecosystem " + component + " rollback " + args + " yes";
+        else if(action === "reconcile") command = "ecosystem " + component + " reconcile yes";
         if(command) runCommand(command);
       });
     }

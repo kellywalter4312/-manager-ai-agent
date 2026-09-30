@@ -245,6 +245,10 @@ class TestEnvironmentHttpRoute:
 
 class TestHalfBrainAcrossOldAndNewCapabilities:
     def test_deterministic_capabilities_still_work_with_no_brain_configured(self, tmp_path):
+        pytest.importorskip(
+            "kokoro_onnx",
+            reason="kokoro_onnx is not installed; local narration cannot be verified",
+        )
         runtime, manager, channel, conversation = real_system(
             media="local", media_asset_dir=str(tmp_path), artifacts_dir=str(tmp_path / "artifacts")
         )

@@ -306,7 +306,10 @@ class TestGovernedCapabilityExecution:
         manager = real_manager(connection=NullConnection())
         result = manager.handle_task(CONNECTED_TASK)
         assert not result.succeeded
-        assert "no supported actions" in result.error
+        # See the same assertion in
+        # tests/test_connected_action_operation_selection.py for why the
+        # wording changed: a placeholder is not a configured connection.
+        assert "offers no actions" in result.error
 
     def test_unsupported_operation_is_reported_by_the_connection_itself(self):
         connection = ScriptedConnection(operations=())
@@ -624,7 +627,11 @@ class TestExistingStagesRemainIntact:
         ])
         manager = real_manager(tools=tools, connection=connection)
         result = manager.handle_task(Task(description="Who called me?"))
-        assert result.succeeded
+        # Reached communication (not the connection): with nothing connected
+        # it now says so honestly (Phase 11 closure) instead of reporting a
+        # checked, empty call log.
+        assert not result.succeeded
+        assert "no authorized communication connection is configured" in (result.error or "")
 
     def test_stage15_messages_routing_fix_still_holds(self):
         manager = manager_with_connection()

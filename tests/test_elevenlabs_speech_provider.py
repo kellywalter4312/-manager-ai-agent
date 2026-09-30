@@ -22,6 +22,8 @@ from types import SimpleNamespace
 
 import pytest
 
+pytest.importorskip("elevenlabs", reason="elevenlabs SDK not installed")
+
 from src.channels.speech import Listener, Speaker, SpeechAdapter, SpeechUnavailable
 from src.providers.availability import AvailabilityState
 import src.providers.elevenlabs_speech_provider as elevenlabs_speech_provider

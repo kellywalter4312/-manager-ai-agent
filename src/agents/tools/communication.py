@@ -41,6 +41,11 @@ class CommunicationReadTool(Tool):
         )
 
     def run(self, **arguments: object) -> str:
+        # Nothing connected is not the same as nothing received: say which
+        # it is, never "No recent messages" for an inbox nobody could read.
+        reason = self._provider.unavailable_reason()
+        if reason:
+            raise RuntimeError(f"{reason}, so there is nothing I can read")
         events = self._provider.read_messages(limit=10)
         if not events:
             return "No recent messages or calls."

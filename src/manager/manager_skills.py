@@ -454,6 +454,20 @@ class ManagerSkills(BaseAgent):
         straight to a specialist, silently abandoning the session before
         it ever reaches ``open_conversation``'s own handling of it.
         """
+        if self._session_in_progress(task):
+            return True
+        return self._a_capability_claims(task, self_contained_only=False)
+
+    def _session_in_progress(self, task: Task) -> bool:
+        """Whether something this Manager is already in the middle of claims
+        ``task`` outright - independent of any capability's own shape check.
+
+        A session, a pending confirmation, an open correction question or a
+        request naming one of this Manager's own equipped connections is this
+        Manager's work by the state it is in, not by what any capability
+        declares. Split out so both ``claims`` (recognition) and ``owns``
+        (ownership) rest on exactly the same set of in-progress facts.
+        """
         if (
             self._activity_sessions.pending_clarification(self.name) is not None
             or self._activity_sessions.activity(self.name) is not None
@@ -474,11 +488,64 @@ class ManagerSkills(BaseAgent):
         # A request that names one of this Manager's own equipped connections
         # (a declared website or service) is this Manager's - never delegated
         # away on a specialist's incidental word overlap.
-        if self._names_equipped_connection(task.description):
-            return True
+        return self._names_equipped_connection(task.description)
+
+    def _a_capability_claims(self, task: Task, *, self_contained_only: bool) -> bool:
+        """Whether any registered capability's own ``claims`` recognises
+        ``task`` - optionally only those declaring themselves self-contained
+        Manager work. No capability is named here; the filter is the
+        declaration each capability makes about itself."""
+        names = tuple(a.name for a in self._roster())
         return any(
             capability.claims is not None
-            and capability.claims(task, tuple(a.name for a in self._roster()))
+            and (capability.self_contained or not self_contained_only)
+            and capability.claims(task, names)
+            for capability in self._capabilities.values()
+        )
+
+    def owns(self, task: Task) -> bool:
+        """Whether this task is the Manager's *own* work - and may therefore
+        pre-empt routing it to a specialist.
+
+        **Recognition and ownership are two questions, and conflating them was
+        a real defect (P11Z-09).** ``claims`` above answers the first: does one
+        of my capabilities recognise this request's shape? ``ManagerAgent.decide``
+        and ``collaboration_candidates`` need the second, and used to ask the
+        first - so every capability that recognised a request also owned it.
+
+        The justification for that was written when the only capabilities with
+        a ``claims`` predicate were a handful of self-contained operations of
+        Alfred's own, none of which a specialist could contribute to. Nearly
+        every capability carries one now, including research, knowledge,
+        artifacts, diagrams, 3D, media, documents, content analysis and
+        translation - which is exactly the work an owner creates a specialist
+        and grants it capabilities to do. Measured on an unseen domain: a
+        specialist granted the two capabilities that recognise research and
+        knowledge received none of six requests inside its own declared area.
+        The domain itself is deliberately not named here; the evidence lives in
+        ARCHITECTURE.md and the ledger, and no subject word belongs in routing.
+
+        So ownership is now each capability's own declaration
+        (``ManagerCapability.self_contained``, which must state its grounds),
+        and a session already in progress still settles a remark outright.
+        Everything else falls through to the router exactly as an unrecognised
+        request already did - and when no specialist's declared words overlap,
+        the Manager takes it anyway and runs the identical capability, so a
+        request nobody else can do is unaffected.
+        """
+        if self._session_in_progress(task):
+            return True
+        return self._a_capability_claims(task, self_contained_only=True)
+
+    def claims_room_act(self, task: Task) -> bool:
+        """Whether one of this Manager's own room-act capabilities (declared
+        ``room_act``: invite, excuse, discuss) recognises ``task`` - asked by
+        ``ManagerAgent.decide`` before honouring an address to a specialist,
+        because who is in the room is the orchestrator's to change whoever
+        the sentence was said to (Phase 11 closure)."""
+        names = tuple(a.name for a in self._roster())
+        return any(
+            getattr(capability, "room_act", False) and capability.claims is not None and capability.claims(task, names)
             for capability in self._capabilities.values()
         )
 
@@ -627,6 +694,20 @@ class ManagerSkills(BaseAgent):
             return self._last_selected[1]
         return None
 
+    def completed_request(self, task_id: str) -> bool:
+        """Whether the capability chosen for ``task_id`` declares that its
+        success is the whole of the request (``completes_request``) - read by
+        the objective loop, which never pursues such a request further."""
+        name = self.selected_capability_for(task_id)
+        capability = self._capabilities.get(name) if name else None
+        return bool(getattr(capability, "completes_request", False))
+
+    def awaiting_reply(self) -> bool:
+        """Whether this Manager has asked the person something only the
+        person may answer - read by the objective loop, which must stop there
+        rather than send its own next step into that question."""
+        return self._activity_sessions.awaits_reply(self.name)
+
     def _answers_pending_correction(self, text: str) -> bool:
         """Whether ``text`` answers this agent's open "which one did you
         mean?" correction question. A new statement drops the question and is
@@ -637,6 +718,34 @@ class ManagerSkills(BaseAgent):
             self._activity_sessions.clear_correction(self.name)
             return False
         return self._activity_sessions.correction_reply_is_for_pending(self.name, text)
+
+    def _drop_clarification_for_a_new_request(self, task: Task) -> None:
+        """A pending "which did you mean?" question keeps a remark only while
+        the remark could be its answer. A remark that picks none of the
+        candidates *and* is a concrete request one of this agent's own
+        capabilities claims means the person moved on: the question is
+        dropped and the request is handled on its own - the rule the
+        correction question already follows.
+
+        Found by the Phase 11 final gate with a real local model: one
+        clarification the model raised on the first request captured every
+        later one - "create a workspace", which a capability answers
+        deterministically, among them - and each unmatched remark raised yet
+        another, so the session could not leave. Half Brain never raises one,
+        which is why it went unseen. Guided activities and pending
+        confirmations keep their unconditional capture: an activity's answer
+        may incidentally match another claim, and a confirmation guards a
+        consequential act."""
+        pending = self._activity_sessions.pending_clarification(self.name)
+        if pending is None or pending.select_candidate(task.description) is not None:
+            return
+        participants = [agent.name for agent in self._roster()]
+        for capability in self._capabilities.values():
+            if capability is OPEN_CONVERSATION or capability.claims is None:
+                continue
+            if capability.claims(task, participants):
+                self._activity_sessions.clear_clarification(self.name)
+                return
 
     def execute(self, task: Task) -> TaskResult:
         """Pick the handler this task is asking for, and run it.
@@ -651,6 +760,7 @@ class ManagerSkills(BaseAgent):
         this method reads the same with one handler or with twenty.
         """
         log = task_logger(logger, task.id)
+        self._drop_clarification_for_a_new_request(task)
         # A pending clarification or an active guided activity outranks
         # ordinary claims/scoring entirely - found during a full-ecosystem
         # audit: an in-progress session's own reply ("that's enough for

@@ -122,8 +122,12 @@ def collaboration_candidates(manager: ManagerAgent, task: Task) -> tuple[str, ..
     # hand-over is that decision already made, so nobody else is drafted in.
     if manager.delegation_for(task) is not None:
         return ()
-    claims = getattr(manager.own_skills, "claims", None)
-    if claims is not None and claims(task):
+    # P11Z-09: *owns*, not *claims* - see ManagerSkills.owns. Suppressing
+    # collaboration on mere recognition shut an authorised specialist out of
+    # the two paths at once; the Stage 15 case this guard exists for
+    # (communication) declares itself self-contained and still suppresses it.
+    owns = getattr(manager.own_skills, "owns", None) or getattr(manager.own_skills, "claims", None)
+    if owns is not None and owns(task):
         return ()
     tokens = tokenize(task.description)
     return tuple(
@@ -196,6 +200,14 @@ def answer_with_collaboration(manager: ManagerAgent, task: Task) -> TaskResult:
     )
     contributed_by = {contribution.source for contribution in collaboration.contributions}
     collaboration.close()
+
+    # Phase 11 closure: nobody contributed, so there is nothing to synthesise.
+    # A Full Brain asked to converse with no notes answered a research request
+    # from memory and it was reported as success - the "synthesis from an empty
+    # collaboration" this docstring rules out, reachable since P11Z-09 let an
+    # in-domain specialist be consulted. Alfred's ordinary handling decides.
+    if not notes:
+        return manager.handle_task(task)
 
     decision = manager.brain.converse(task, notes)
     if decision.is_decided and decision.reason.strip():

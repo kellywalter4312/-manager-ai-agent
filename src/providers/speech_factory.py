@@ -174,9 +174,20 @@ _BUILDERS: dict[
 }
 
 
+# The speech engines that need a credential (an API key) - declared beside
+# their builders, so nothing that lists or manages providers has to know one
+# by name (Phase 11). Every other engine runs without one.
+_CREDENTIALED = frozenset({"elevenlabs"})
+
+
 def available_speech_providers() -> list[str]:
     """Every speech provider name that can currently be configured."""
     return sorted(_BUILDERS)
+
+
+def speech_requires_credential(name: str) -> bool:
+    """Whether the speech engine ``name`` needs a credential to build."""
+    return name in _CREDENTIALED
 
 
 def build_speech(

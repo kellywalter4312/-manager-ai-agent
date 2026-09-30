@@ -58,6 +58,25 @@ _ALLOWED_PARAMETER_LOCATIONS: tuple[str, ...] = ("path", "query", "body")
 
 _PATH_PLACEHOLDER_PATTERN = re.compile(r"\{([a-zA-Z0-9_]+)\}")
 
+_CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+
+
+def normalise_operation_name(name: str) -> str:
+    """An operation's identifier, its word boundaries kept: "getState",
+    "get state" and "get_state" are all ``get_state``. Operation names are
+    this project's own handles (never sent to the service), and they are
+    what a person's words are matched against - lower-casing "getState"
+    to "getstate" erased the very word ("state") a request would use
+    (Phase 11 closure sweep)."""
+    spaced = " ".join(str(name).split())
+    return _CAMEL_BOUNDARY.sub("_", spaced).lower().replace(" ", "_")
+
+
+def _legacy_operation_name(name: str) -> str:
+    """How an operation name was normalised before word boundaries were
+    kept - still recognised, so a service declared earlier keeps working."""
+    return " ".join(str(name).split()).lower().replace(" ", "_")
+
 
 @dataclass(frozen=True)
 class ServiceParameter:
@@ -82,7 +101,13 @@ class ServiceParameter:
     required: bool = True
 
     def __post_init__(self) -> None:
-        name = " ".join(str(self.name).split()).lower().replace(" ", "_")
+        # The name is the service's own wire name - the JSON field, query key
+        # or path placeholder it is sent as - so its spelling is kept exactly.
+        # Lower-casing it (as before the Phase 11 closure) sent "deviceid"
+        # to an API that reads "deviceId", and made a camelCase "{deviceId}"
+        # path placeholder impossible to fill. Matching is case-insensitive
+        # instead (``ServiceOperation.parameter``).
+        name = " ".join(str(self.name).split()).replace(" ", "_")
         if not name:
             raise ValueError("ServiceParameter.name must not be empty")
         object.__setattr__(self, "name", name)
@@ -116,7 +141,7 @@ class ServiceOperation:
     parameters: "tuple[ServiceParameter, ...]" = ()
 
     def __post_init__(self) -> None:
-        name = " ".join(str(self.name).split()).lower().replace(" ", "_")
+        name = normalise_operation_name(self.name)
         if not name:
             raise ValueError("ServiceOperation.name must not be empty")
         object.__setattr__(self, "name", name)
@@ -150,7 +175,7 @@ class ServiceOperation:
         object.__setattr__(self, "description", " ".join(str(self.description or "").split()))
 
         parameters = tuple(self.parameters)
-        names = [p.name for p in parameters]
+        names = [p.name.lower() for p in parameters]
         if len(names) != len(set(names)):
             raise ValueError("ServiceOperation.parameters must have unique names")
 
@@ -178,8 +203,8 @@ class ServiceOperation:
         object.__setattr__(self, "parameters", parameters)
 
     def parameter(self, name: str) -> "ServiceParameter | None":
-        normalised = " ".join(str(name).split()).lower().replace(" ", "_")
-        return next((p for p in self.parameters if p.name == normalised), None)
+        wanted = " ".join(str(name).split()).replace(" ", "_").lower()
+        return next((p for p in self.parameters if p.name.lower() == wanted), None)
 
     @property
     def required_parameters(self) -> "tuple[str, ...]":
@@ -231,8 +256,8 @@ class ServiceDescriptor:
         """The declared operation named ``name``, or ``None`` - never
         raises, the same honest-absence shape ``CredentialStore.get``
         already returns for an unknown account."""
-        normalised = " ".join(str(name).split()).lower().replace(" ", "_")
-        return next((op for op in self.operations if op.name == normalised), None)
+        wanted = {normalise_operation_name(name), _legacy_operation_name(name)}
+        return next((op for op in self.operations if op.name in wanted), None)
 
     @property
     def operation_names(self) -> "tuple[str, ...]":

@@ -33,8 +33,12 @@ from src.providers.communication_factory import (
 )
 from src.providers.connection_factory import available_connection_providers, build_connection
 from src.providers.documents.factory import available_document_rendering_backends, build_document_rendering
+from src.providers.artifact_runtime_factory import (
+    available_artifact_runtimes,
+    build_artifact_runtime,
+)
 from src.providers.environment_factory import available_environment_providers, build_environment_provider
-from src.providers.factory import available_providers, build_provider
+from src.providers.factory import available_providers, build_provider, provider_requires_credential
 from src.providers.knowledge_factory import available_knowledge_providers, build_knowledge_provider
 from src.providers.live_info_factory import available_live_info_providers, build_live_info_provider
 from src.providers.media.factory import (
@@ -43,8 +47,9 @@ from src.providers.media.factory import (
     available_video_generation_backends,
     available_video_understanding_backends,
     build_media,
+    video_understanding_requires_credential,
 )
-from src.providers.speech_factory import available_speech_providers, build_speech
+from src.providers.speech_factory import available_speech_providers, build_speech, speech_requires_credential
 from src.services.credentials.account import CredentialStore, ProviderAccount
 from src.services.memory.factory import available_memories, build_memory
 from src.services.ecosystem.contracts import EcosystemRegistry, GenericCategoryAdapter
@@ -101,7 +106,7 @@ def build_ecosystem_registry(settings: Settings) -> EcosystemRegistry:
             build=lambda key, credential: build_provider(
                 replace(settings, provider=key), account=_credentialed_account(key, credential)
             ),
-            requires_credential=lambda key: key not in ("null", "local"),
+            requires_credential=provider_requires_credential,
             dependents=("the Manager's own reasoning (ManagerBrain)", "every specialist's own brain"),
         )
     )
@@ -130,7 +135,7 @@ def build_ecosystem_registry(settings: Settings) -> EcosystemRegistry:
                 video_understanding_account=_credentialed_account(key, credential),
             ),
             # "windows" and "local_whisper" run on this machine - no key to hold.
-            requires_credential=lambda key: key not in ("null", "windows", "local_whisper"),
+            requires_credential=video_understanding_requires_credential,
             dependents=(
                 "the media_production capability's transcribe operation "
                 "(feeding clip_video's real, audio-derived moment selection)",
@@ -214,7 +219,7 @@ def build_ecosystem_registry(settings: Settings) -> EcosystemRegistry:
             build=lambda key, credential: build_speech(
                 replace(settings, speech=key), account=_credentialed_account(key, credential)
             ),
-            requires_credential=lambda key: key == "elevenlabs",
+            requires_credential=speech_requires_credential,
             dependents=("VoiceChannel's spoken delivery",),
         )
     )
@@ -282,6 +287,23 @@ def build_ecosystem_registry(settings: Settings) -> EcosystemRegistry:
             ),
             requires_credential=lambda key: False,
             dependents=("every agent's presented scene/lighting description",),
+        )
+    )
+
+    registry.register(
+        GenericCategoryAdapter(
+            # Phase 11 closure: which engine runs a created artifact so that
+            # what it actually did can be observed. A selectable axis like every
+            # other, so the engine is replaceable through the ordinary governed
+            # path and nothing has to be rewritten to change it.
+            "artifact_runtime",
+            list_backends=available_artifact_runtimes,
+            active_key=lambda: settings.artifact_runtime,
+            build=lambda key, credential: build_artifact_runtime(
+                replace(settings, artifact_runtime=key)
+            ),
+            requires_credential=lambda key: False,
+            dependents=("running a created artifact and reporting what it actually did",),
         )
     )
 
@@ -388,6 +410,8 @@ def build_ecosystem_registry(settings: Settings) -> EcosystemRegistry:
             "capability",
             list_backends=available_capabilities,
             active_key=lambda: None,
+            single_selection=False,
+            selection_note="enable, disable, grant or revoke each one with 'capabilities'",
         )
     )
 

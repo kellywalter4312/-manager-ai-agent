@@ -12,7 +12,7 @@ identity hardcoded into the selection logic.
 architectural boundary the brief states directly:
 
     Memory / Milestone event
-      -> Brain + Personality decide meaning/words   ("Happy birthday, Kelly.")
+      -> Brain + Personality decide meaning/words   ("Happy birthday, Sam.")
       -> CelebrationReaction is selected             (this module)
       -> VisualEnvironment / Avatar presents it       (a future seam - see
                                                         this stage's own

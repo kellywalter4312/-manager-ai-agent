@@ -406,6 +406,7 @@ class TestFullSystemMediaArtifactIntegration:
         assert artifacts[0].owner_agent == runtime.identity.name
 
     def test_multi_step_production_chain_produces_linked_artifacts(self, tmp_path):
+        pytest.importorskip("kokoro_onnx", reason="kokoro_onnx not installed")
         from src.core.contracts import Task
         import re
 
@@ -453,6 +454,7 @@ class TestFullSystemMediaArtifactIntegration:
         assert "delivery=download" in listing
 
     def test_control_center_and_snapshot_both_show_the_real_derivation_chain(self, tmp_path):
+        pytest.importorskip("kokoro_onnx", reason="kokoro_onnx not installed")
         """The full narrate -> illustrate -> compose -> clip chain,
         proven through the real production path, with the real
         derivation links visible through both surfaces that already
@@ -514,6 +516,7 @@ class TestFullSystemMediaArtifactIntegration:
         assert "png" in entry["renditions"]
 
     def test_a_real_video_artifact_is_served_with_the_correct_content_type(self, tmp_path):
+        pytest.importorskip("kokoro_onnx", reason="kokoro_onnx not installed")
         import re
 
         import scripts.serve_ui as su
@@ -557,6 +560,7 @@ class TestUIRendersVideoAndAudioArtifacts:
         return None
 
     def test_a_real_video_artifact_renders_as_a_real_video_player(self, tmp_path):
+        pytest.importorskip("kokoro_onnx", reason="kokoro_onnx not installed")
         import re
         import subprocess
 

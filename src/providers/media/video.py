@@ -304,3 +304,122 @@ def probe_duration_seconds(video_bytes: bytes, *, ffmpeg_path: str | None = None
         )
     hours, minutes, seconds = match.groups()
     return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+
+class SampledFrame(NamedTuple):
+    """One real still frame decoded out of a moving-image file, and the
+    moment in the file it was taken from."""
+
+    at_seconds: float
+    image_bytes: bytes
+    media_type: str = "image/png"
+
+
+# How wide a sampled frame is handed on. A frame is sampled to be *looked
+# at*, never to be kept as a rendition, so it is scaled down to something a
+# visual-reasoning provider actually reads: a 4K still costs many times more
+# to send and to reason over and adds nothing a description would carry.
+# Height follows the source's own aspect ratio (-1), never stretched.
+FRAME_SAMPLE_WIDTH = 640
+
+
+def sample_frames(
+    video_bytes: bytes,
+    *,
+    count: int = 4,
+    ffmpeg_path: str | None = None,
+    width: int = FRAME_SAMPLE_WIDTH,
+) -> "tuple[SampledFrame, ...]":
+    """``count`` real still frames decoded out of ``video_bytes``, evenly
+    spaced across its own real duration, each carrying the second it was
+    taken at.
+
+    **The visual half of the pipeline ``extract_audio_wav`` already opens.**
+    That function's own docstring names this project's video-understanding
+    pipeline as ``video -> audio extraction -> speech/audio analysis ->
+    temporal understanding``; until this function existed there was no
+    counterpart for the half of a moving image that is *seen* rather than
+    heard, so a video's visual content could not be reasoned about at all -
+    only its speech could. Local and deterministic, exactly like
+    ``extract_audio_wav``/``probe_duration_seconds``: real FFmpeg, no
+    vendor, no credential, no model. What is done with the frames
+    afterwards - which provider looks at them, what is concluded - is a
+    separate concern this function knows nothing about, the identical split
+    ``extract_audio_wav`` already keeps.
+
+    **Not video-specific by accident.** A frame is a still image taken from
+    a moving one; the same mechanism serves any container FFmpeg can decode,
+    including formats that do not exist yet, because nothing here names a
+    codec, a container or a subject. A caller that wants one look asks for
+    ``count=1``; a caller that wants a sequence asks for more.
+
+    Raises ``VideoError`` when the source carries no decodable visual stream
+    at all, or when not one frame could be decoded - never a blank or
+    invented frame standing in for a picture that was never there, the same
+    honesty rule every other real inspection in this module holds itself to.
+    """
+    if count < 1:
+        raise ValueError("sample_frames needs to take at least one frame")
+    if width < 1:
+        raise ValueError("a sampled frame needs a positive width")
+    if not video_bytes:
+        raise VideoError("there are no bytes to take a frame from")
+
+    ffmpeg = resolve_ffmpeg(ffmpeg_path)
+
+    # The source's own real, decoded duration decides where the samples sit -
+    # never an assumed length. A file whose duration cannot be read is already
+    # reported honestly by probe_duration_seconds itself.
+    duration = probe_duration_seconds(video_bytes, ffmpeg_path=ffmpeg)
+
+    # Sample strictly inside the file. The first and last instants of a
+    # recording are where a decoder is least likely to have a complete
+    # picture (a container's final packet is routinely short), and a frame
+    # taken at exactly `duration` decodes to nothing at all.
+    if count == 1:
+        offsets = [duration / 2.0]
+    else:
+        span = max(duration - (duration / (count + 1)) * 2, 0.0)
+        first = (duration / (count + 1)) if duration > 0 else 0.0
+        offsets = [first + (span * index / (count - 1)) for index in range(count)]
+
+    frames: "list[SampledFrame]" = []
+    failures: "list[str]" = []
+    with tempfile.TemporaryDirectory(prefix="alfred_frames_") as workdir:
+        work = Path(workdir)
+        source_path = work / "source"
+        source_path.write_bytes(video_bytes)
+        for index, offset in enumerate(offsets):
+            output_path = work / f"frame_{index}.png"
+            try:
+                run_ffmpeg(
+                    ffmpeg,
+                    [
+                        # -ss before -i seeks without decoding everything up to
+                        # the offset, which is what keeps this affordable on a
+                        # long recording.
+                        "-ss", f"{max(offset, 0.0):.3f}",
+                        "-i", str(source_path),
+                        "-frames:v", "1",
+                        "-vf", f"scale={int(width)}:-1:flags=bicubic",
+                        "-f", "image2",
+                        str(output_path),
+                    ],
+                    timeout=60,
+                )
+            except VideoError as exc:
+                # FFmpeg's own stderr opens with its build banner, so the
+                # sentence that says what actually went wrong is at the end -
+                # the tail is kept, the banner is not, the same reason
+                # probe_duration_seconds already reports `stderr[-400:]`.
+                failures.append(" ".join(str(exc).split())[-200:])
+                continue
+            if not output_path.is_file() or output_path.stat().st_size == 0:
+                failures.append(f"no frame decoded at {offset:.3f}s")
+                continue
+            frames.append(SampledFrame(round(float(offset), 3), output_path.read_bytes()))
+
+    if not frames:
+        detail = failures[-1] if failures else "no frame could be decoded"
+        raise VideoError(f"this file has no visual content to look at ({detail})")
+    return tuple(frames)

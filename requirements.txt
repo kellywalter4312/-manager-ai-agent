@@ -26,10 +26,19 @@ kokoro-onnx>=0.4
 # Optional - only needed for MANAGER_MEDIA=local (real narration/image/video
 # production - see src/providers/media/). Pillow renders local title-card
 # images; imageio-ffmpeg bundles a real, statically-linked FFmpeg binary so
-# video composition needs no system-wide install. All imported lazily; the
-# project runs without them installed.
+# video composition needs no system-wide install. numpy is the geometry
+# backend for real 3D GLB mesh assembly (src/providers/media/model3d.py);
+# all imported lazily where possible; the project runs without them installed
+# except that numpy is a hard import in model3d.py and must be installed for
+# any test that imports scripts/control_center.py.
 Pillow>=10.0
 imageio-ffmpeg>=0.5
+numpy>=1.24
+
+# Optional - only needed for MANAGER_SPEECH=elevenlabs (cloud TTS via the
+# ElevenLabs API - see src/providers/elevenlabs_speech_provider.py).
+# Imported lazily; the project runs without it installed.
+elevenlabs>=1.0
 
 # Optional - only needed to read .pdf files placed in the user's own
 # knowledge_dir (see src/providers/document_knowledge_provider.py). Real

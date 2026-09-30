@@ -132,6 +132,8 @@ class ArtifactProductionTool(Tool):
             return self._get(content)
         if operation == "find_latest":
             return self._find_latest(content)
+        if operation == "find_titled":
+            return self._find_titled(content)
         if operation == "read_content":
             return self._read_content(content)
         if operation == "list_content":
@@ -145,7 +147,7 @@ class ArtifactProductionTool(Tool):
         raise ValueError(
             f"unknown artifact_production operation {operation!r}; expected one of: "
             "create_document, revise_document, create_image, revise_image, get, find_latest, "
-            "read_content, list_content, derive_document, describe, find_recording"
+            "find_titled, read_content, list_content, derive_document, describe, find_recording"
         )
 
     # ------------------------------------------------------------------
@@ -461,6 +463,32 @@ class ArtifactProductionTool(Tool):
         except ValueError:
             return raw
 
+    def _find_titled(self, content: str) -> str:
+        """The newest artifact of a type this agent owns whose title carries
+        every meaningful word the person used for it - "<type>\\n<words>".
+
+        Phase 11 closure: "revise the water cycle diagram" named which one;
+        only an explicit id or "the most recent" could be resolved, so naming
+        an older diagram would have revised a different one. Never a guess
+        between titles: no match is an honest error naming what exists."""
+        from src.core.contracts import tokenize
+        from src.services.memory.query import STOPWORDS
+
+        artifact_type, _sep, words = content.partition("\n")
+        wanted = tokenize(words) - STOPWORDS
+        if not wanted:
+            raise ArtifactError("name the artifact by the words of its title")
+        owned = [
+            a for a in self._store.all()
+            if a.owner_agent == self._owner_agent and (not artifact_type.strip() or a.type == artifact_type.strip())
+        ]
+        matches = [a for a in owned if wanted <= tokenize(a.latest.title or "")]
+        if not matches:
+            titles = ", ".join(f"'{a.latest.title}'" for a in owned[-5:]) or "none yet"
+            raise ArtifactError(f"no {artifact_type.strip() or 'artifact'} titled like that - the ones I have: {titles}")
+        newest = max(matches, key=lambda a: a.latest.created_at)
+        return newest.artifact_id
+
     def _find_latest(self, content: str) -> str:
         artifact_type = content.strip() or None
         artifact = self._store.find_latest(owner_agent=self._owner_agent, type=artifact_type)
@@ -484,5 +512,11 @@ class ArtifactProductionTool(Tool):
             fmt, path = next(iter(renditions.items()))
             line += f" {fmt}={path}"
         else:
-            line += f" (no rendition produced: {render_note})"
+            line += f" {NO_RENDITION_MARKER} {render_note})"
         return line
+
+
+# The words that say an artifact was kept without any rendition - one
+# definition, read by any capability that must not report a visual as
+# delivered when none was produced.
+NO_RENDITION_MARKER = "(no rendition produced:"

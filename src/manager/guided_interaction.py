@@ -54,6 +54,7 @@ always has.
 
 from __future__ import annotations
 
+import re
 from typing import Sequence
 
 from src.core.contracts import TaskResult
@@ -79,9 +80,19 @@ _CONFIRM_WORDS: tuple[str, ...] = (
     "go ahead", "do it", "send it", "make the call", "please do",
 )
 _CANCEL_WORDS: tuple[str, ...] = (
-    "no", "nope", "nah", "cancel", "stop", "don't", "do not",
+    "no", "nope", "nah", "cancel", "stop", "don't", "dont", "do not", "not",
     "never mind", "nevermind", "forget it",
 )
+
+
+def _says(reply: str, words: Sequence[str]) -> bool:
+    """Whether ``reply`` says one of ``words`` as words of its own. Phase 11
+    closure: these were matched as bare substrings, so "are you sure?" and
+    "what is the pressure like?" confirmed a real send ("sure"), "yesterday"
+    did too ("yes"), and "yes, send it now" cancelled one ("no" in "now").
+    "not" is a cancel word so a doubt ("I'm not sure") is never read as the
+    "sure" inside it."""
+    return any(re.search(rf"(?<![\w']){re.escape(word)}(?![\w'])", reply) for word in words)
 
 
 def _try_resolve_confirmation(
@@ -100,13 +111,13 @@ def _try_resolve_confirmation(
     otherwise this is Phase 4's original communication send/call -
     never two resolvers, one dispatch on which real thing is pending.
     """
-    reply = " ".join(str(request.task.description or "").split()).strip().lower()
+    reply = " ".join(str(request.task.description or "").split()).strip().lower().replace("\u2019", "'")
     if not reply:
         return None
 
     target = pending.connection or pending.party
 
-    if any(word in reply for word in _CANCEL_WORDS):
+    if _says(reply, _CANCEL_WORDS):
         sessions.clear_confirmation(agent_key)
         return TaskResult.success(
             request.task, request.own_name,
@@ -123,7 +134,8 @@ def _try_resolve_confirmation(
             },
         )
 
-    if any(word in reply for word in _CONFIRM_WORDS):
+    # A question ("are you sure?", "yes?") asks; it never says yes.
+    if not reply.endswith("?") and _says(reply, _CONFIRM_WORDS):
         sessions.clear_confirmation(agent_key)
 
         if pending.connection:
@@ -159,6 +171,47 @@ def _credited(result: TaskResult, capability: str) -> TaskResult:
     from dataclasses import replace as _replace
 
     return _replace(result, payload=payload)
+
+
+def _is_a_real_question(question: str, request_text: str) -> bool:
+    """A model's clarification is only put to the person when it is a
+    question and not the request handed back - a model's output is evidence,
+    never trusted as-is (Phase 11 final gate: a small local model "clarified"
+    "Build me a webpage." with "Build me a webpage.", and the turn was
+    reported completed)."""
+    def norm(text: str) -> str:
+        return " ".join(re.sub(r"[^\w\s]", " ", str(text or "").lower()).split())
+
+    asked = str(question or "").strip()
+    if not asked.endswith("?"):
+        return False
+    # A near-restatement ("What do my documents say about X?" handed back as
+    # "What do the documents say about X?") asks nothing new either.
+    from difflib import SequenceMatcher
+
+    return SequenceMatcher(None, norm(asked), norm(request_text)).ratio() < 0.85
+
+
+def _candidates_were_stated(candidates: Sequence[str], remark: str) -> bool:
+    """Whether every candidate a model names is said in the remark itself, as
+    words of their own and each in a place of its own - the ambiguity prompt's
+    "never inventing a candidate that was not actually said", checked rather
+    than trusted. Phase 11 closure, with the real local model: "why does a
+    millstone need dressing?" came back with the candidates "a millstone" and
+    "a mill" (only ever a piece of the first), and on another run with the
+    schema's own placeholder text as the candidates."""
+    text = " ".join(str(remark or "").lower().split())
+    wanted = {" ".join(str(c).lower().split()).strip(" .,;:!?\"'") for c in candidates}
+    if len(wanted) < 2 or "" in wanted:
+        return False
+    taken: list[tuple[int, int]] = []
+    for candidate in sorted(wanted, key=len, reverse=True):
+        spans = (m.span() for m in re.finditer(rf"(?<!\w){re.escape(candidate)}(?!\w)", text))
+        free = next((s for s in spans if all(s[1] <= a or s[0] >= b for a, b in taken)), None)
+        if free is None:
+            return False
+        taken.append(free)
+    return True
 
 
 def guided_interaction_response(request) -> "TaskResult | None":
@@ -207,14 +260,24 @@ def guided_interaction_response(request) -> "TaskResult | None":
 
     notes = tuple(request.recognition.notes()) + tuple(_conversation_notes(request))
 
-    ambiguity = ops.discern_ambiguity(request.task, notes)
-    if ambiguity.is_decided and ambiguity.reason.strip() and len(ambiguity.steps) >= 2:
-        clarification = PendingClarification(question=ambiguity.reason, candidates=ambiguity.steps)
-        sessions.raise_clarification(agent_key, clarification)
-        return TaskResult.success(
-            request.task, request.own_name, clarification.question,
-            payload={"handled_by": "open_conversation", "clarification": "raised", "candidates": list(clarification.candidates)},
-        )
+    # A remark that is itself a question asks for an answer; putting it back
+    # to the person as "which is correct?" is never that (Phase 11 closure:
+    # the real local model turned "What's the capital of Australia, Sydney or
+    # Canberra?" into a clarification, whose reply would have been remembered
+    # as a doubt the person never had). Stated uncertainty is a statement.
+    if not str(request.task.description or "").strip().endswith("?"):
+        ambiguity = ops.discern_ambiguity(request.task, notes)
+        if (
+            ambiguity.is_decided and ambiguity.reason.strip() and len(ambiguity.steps) >= 2
+            and _is_a_real_question(ambiguity.reason, request.task.description)
+            and _candidates_were_stated(ambiguity.steps, request.task.description)
+        ):
+            clarification = PendingClarification(question=ambiguity.reason, candidates=ambiguity.steps)
+            sessions.raise_clarification(agent_key, clarification)
+            return TaskResult.success(
+                request.task, request.own_name, clarification.question,
+                payload={"handled_by": "open_conversation", "clarification": "raised", "candidates": list(clarification.candidates)},
+            )
 
     start = ops.discern_activity_start(request.task, notes)
     if start.is_decided and start.reason.strip():
