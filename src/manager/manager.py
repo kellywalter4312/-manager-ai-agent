@@ -724,8 +724,21 @@ class ManagerAgent:
         """
         verdict = self.memory_policy.evaluate(record)
         if verdict.allowed:
+            # GM-13: the record carries how carefully it is to be handled -
+            # the owner's rules and the person's own words - from the moment
+            # it is written, through the one governed write path.
+            sensitivity = getattr(self, "_sensitivity", None)
+            if sensitivity is not None:
+                record = sensitivity.stamp(record)
             self.memory.remember(record)
         return verdict
+
+    def bind_sensitivity(self, policy, reasoning_ceiling) -> None:
+        """GM-13: the owner's sensitivity policy, and the highest level this
+        Manager's reasoning may receive (a callable, read per use, so a live
+        switch of who reasons changes it at once)."""
+        self._sensitivity = policy
+        self._recall_ceiling = reasoning_ceiling
 
     def recall_context(
         self, task: Task, limit: int = MEMORY_CONTEXT_LIMIT
@@ -773,6 +786,17 @@ class ManagerAgent:
         except Exception as exc:  # noqa: BLE001 - deliberate boundary catch
             log.exception("could not recall context: %s", type(exc).__name__)
             return ()
+
+        # GM-13: the Brain is given only what its reasoning backend may
+        # receive - nothing above the owner's cloud allowance reaches a
+        # vendor's model; a local model or no model may hold up to "sensitive".
+        ceiling = getattr(self, "_recall_ceiling", None)
+        if ceiling is not None:
+            from src.core.sensitivity import rank
+            from src.services.memory.sensitivity import level_of
+
+            cap = ceiling()
+            records = tuple(r for r in records if rank(level_of(r)) <= rank(cap))
 
         try:
             notes = tuple(

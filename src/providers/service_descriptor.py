@@ -47,6 +47,15 @@ from dataclasses import dataclass
 # a person's own declared data instead of the real Gmail connection.
 RESERVED_SERVICE_NAMES = frozenset({"null", "gmail"})
 
+# GM-04: how an operation answers - once, or as a stream it keeps sending.
+OPERATION_MODES = ("request", "stream")
+# The media types a stream arrives as, whichever service sends it - used to
+# recognise a stream in a service's own OpenAPI document and to parse one.
+STREAM_MEDIA_TYPES = (
+    "text/event-stream", "application/x-ndjson", "application/jsonl", "application/json-seq",
+    "multipart/x-mixed-replace",
+)
+
 _ALLOWED_METHODS: tuple[str, ...] = ("GET", "POST")
 
 # Data-flow-through-execution checkpoint: the closed, small set of places
@@ -139,8 +148,20 @@ class ServiceOperation:
     # so every operation declared before this field existed keeps
     # working completely unchanged.
     parameters: "tuple[ServiceParameter, ...]" = ()
+    # GM-04: "request" - one answer per call (every operation declared before
+    # this field existed) - or "stream": the service keeps sending (events,
+    # samples, frames) and is listened to within limits. Only a GET may
+    # stream: a streamed write would be a consequential action nobody
+    # confirmed each part of.
+    mode: str = "request"
 
     def __post_init__(self) -> None:
+        mode = str(self.mode or "request").strip().lower()
+        if mode not in OPERATION_MODES:
+            raise ValueError(f"ServiceOperation.mode must be one of {OPERATION_MODES}, got {self.mode!r}")
+        if mode == "stream" and str(self.method).strip().upper() != "GET":
+            raise ValueError("only a GET operation can be a stream - a streamed write is never declared")
+        object.__setattr__(self, "mode", mode)
         name = normalise_operation_name(self.name)
         if not name:
             raise ValueError("ServiceOperation.name must not be empty")

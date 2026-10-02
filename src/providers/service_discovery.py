@@ -340,6 +340,24 @@ def _openapi_parameters(op_obj: dict) -> "tuple[ServiceParameter, ...]":
     return tuple(parameters)
 
 
+def _openapi_mode(method: str, op_obj: dict) -> str:
+    """"stream" when a GET's own success responses are a stream media type."""
+    from src.providers.service_descriptor import STREAM_MEDIA_TYPES
+
+    if method.lower() != "get":
+        return "request"
+    responses = op_obj.get("responses") or {}
+    for status, response in responses.items() if isinstance(responses, dict) else ():
+        if not str(status).startswith("2") or not isinstance(response, dict):
+            continue
+        content = response.get("content") or {}
+        produces = list(content) if isinstance(content, dict) else []
+        produces += list(op_obj.get("produces") or [])
+        if any(str(kind).split(";")[0].strip().lower() in STREAM_MEDIA_TYPES for kind in produces):
+            return "stream"
+    return "request"
+
+
 def _try_openapi(name: str, base_url: str, candidate_path: str, timeout: float) -> DiscoveryResult:
     """Source 2: a bounded subset of OpenAPI/Swagger at one of the real,
     conventional locations - the genuinely open-ended source, since it
@@ -404,6 +422,11 @@ def _try_openapi(name: str, base_url: str, candidate_path: str, timeout: float) 
                         # identical except ValueError below - never a
                         # second check duplicated here.
                         parameters=_openapi_parameters(op_obj),
+                        # GM-04: a GET the document says answers as a stream
+                        # (server-sent events, JSON lines, a multipart frame
+                        # stream) is declared as one - read from the
+                        # service's own description, never guessed.
+                        mode=_openapi_mode(method, op_obj),
                     )
                 )
             except ValueError:

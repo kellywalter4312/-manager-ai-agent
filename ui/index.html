@@ -2332,6 +2332,22 @@
   // Which workspace an agent is in is one saved fact (S.agents[].active_workspace):
   // chosen here, in the Control Center, or by the agent in conversation.
 
+  // The live-view renderer is loaded once, only when a live panel is shown.
+  let liveRendererLoading = null;
+  function ensureLiveRenderer(){
+    if(window.AlfredLive) return Promise.resolve();
+    if(!liveRendererLoading){
+      liveRendererLoading = new Promise((resolve, reject) => {
+        const script = document.createElement("script");
+        script.src = "live.js";
+        script.onload = resolve;
+        script.onerror = reject;
+        document.head.appendChild(script);
+      });
+    }
+    return liveRendererLoading;
+  }
+
   // One renderer per panel kind - a new workspace type is a new combination
   // of these, never a new page.
   function workspacePanel(panel, a, board){
@@ -2346,6 +2362,17 @@
       const named = found ? found.name : owner;
       return `<div class="ws-panel ws-panel-surface" data-ws-surface="${esc(named + "/" + screen)}">
           ${LIVE ? surfaceBody(named, screen) : `<div class="ws-empty">${esc(screen)} - live only</div>`}</div>`;
+    }
+    if(kind === "live"){
+      // GM-06: a live data-bound view - drawn by the one widget renderer the
+      // server serves (live.js), from its last reading on every redraw of this
+      // page, and redrawn in place by the view's own poller as the data moves.
+      const viewId = String(arg || "");
+      if(!LIVE) return `<div class="ws-panel ws-panel-live"><div class="ws-empty">${esc(viewId)} - live only</div></div>`;
+      ensureLiveRenderer().then(() => { window.AlfredLive.watch(viewId, ""); window.AlfredLive.paint(viewId); });
+      const drawn = window.AlfredLive ? window.AlfredLive.html(window.AlfredLive.cached(viewId), "")
+                                      : `<div class="ws-empty">Reading ${esc(viewId)}…</div>`;
+      return `<div class="ws-panel ws-panel-live" data-live-view="${esc(viewId)}" data-live-base="">${drawn}</div>`;
     }
     if(kind === "tasks"){
       return `<div class="ws-panel ws-panel-tasks"><div class="ws-tasks">

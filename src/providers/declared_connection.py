@@ -67,8 +67,10 @@ from src.providers.connection import (
     Connection,
     ConnectionResult,
     ConnectionStatus,
+    StreamResult,
     utc_now,
 )
+from src.providers.stream_readers import read_stream
 from src.providers.service_descriptor import ServiceDescriptor
 from src.services.credentials.account import ProviderAccount
 
@@ -97,6 +99,40 @@ class ParameterError(ValueError):
     """A caller supplied a parameter value this connection will not
     forward - never silently dropped, never coerced into something it
     was not."""
+
+
+# D-1: the largest answer kept whole. A camera frame or a short recording fits;
+# anything larger is refused honestly rather than cut into something invalid.
+_MAX_PAYLOAD_BYTES = 25 * 1024 * 1024
+
+
+def _is_textual(content_type: str) -> bool:
+    kind = content_type.split(";")[0].strip().lower()
+    return (
+        not kind or kind.startswith("text/") or kind.endswith("+json") or kind.endswith("+xml")
+        or kind in ("application/json", "application/xml", "application/javascript", "application/x-ndjson")
+    )
+
+
+def structured_answer(raw: bytes, content_type: str) -> "dict[str, Any]":
+    """D-1: one answer's bytes as the ``ConnectionResult`` fields that keep
+    its meaning - ``detail`` for a person, ``data`` for a JSON answer (kept
+    whole, never re-serialised and cut), ``payload`` for anything that is
+    not text. Decided by what the bytes are, never by which service sent
+    them."""
+    kind = content_type.split(";")[0].strip().lower()
+    if not _is_textual(kind):
+        return {
+            "detail": f"{len(raw)} bytes of {kind or 'binary data'}",
+            "payload": raw,
+            "content_type": kind or "application/octet-stream",
+        }
+    text = raw.decode("utf-8", errors="replace")
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return {"detail": text[:_MAX_DETAIL_CHARS], "content_type": kind}
+    return {"detail": json.dumps(parsed)[:_MAX_DETAIL_CHARS], "data": parsed, "content_type": kind or "application/json"}
 
 
 class DeclaredConnection(Connection):
@@ -210,10 +246,15 @@ class DeclaredConnection(Connection):
     def supported_operations(self) -> "tuple[str, ...]":
         return self._descriptor.operation_names
 
-    def execute(self, operation: str, **params: Any) -> ConnectionResult:
+    def _prepare(self, operation: str, **params: Any) -> "tuple[Any, Any, ConnectionResult | None]":
+        """The one real request ``operation`` means - its declared path, its
+        parameters where the service reads them, its credential - or the
+        honest refusal that stops it before anything is sent. Shared by
+        ``execute`` and ``stream`` (GM-04) so the two can never disagree about
+        what a declared operation is allowed to send."""
         op = self._descriptor.operation(operation)
         if op is None:
-            return ConnectionResult(
+            return op, None, ConnectionResult(
                 operation=operation,
                 status=ConnectionStatus.UNSUPPORTED,
                 detail=f"'{self.name}' declares no operation named '{operation}'",
@@ -221,7 +262,7 @@ class DeclaredConnection(Connection):
                 executed_at=utc_now(),
             )
         if op.requires_auth and self._account is None:
-            return ConnectionResult(
+            return op, None, ConnectionResult(
                 operation=operation,
                 status=ConnectionStatus.UNAUTHORIZED,
                 detail=f"'{self.name}' is not authorized - no credential is on file for it",
@@ -231,7 +272,7 @@ class DeclaredConnection(Connection):
 
         for key, value in params.items():
             if not isinstance(value, _SCALAR_TYPES):
-                return ConnectionResult(
+                return op, None, ConnectionResult(
                     operation=operation,
                     status=ConnectionStatus.FAILED,
                     detail=(
@@ -262,7 +303,7 @@ class DeclaredConnection(Connection):
             if parameter.location != "path":
                 continue
             if parameter.name not in remaining_params:
-                return ConnectionResult(
+                return op, None, ConnectionResult(
                     operation=operation,
                     status=ConnectionStatus.FAILED,
                     detail=f"'{operation}' on '{self.name}' needs '{parameter.name}', which was not supplied",
@@ -286,10 +327,22 @@ class DeclaredConnection(Connection):
             headers["Content-Type"] = "application/json"
 
         request = urllib.request.Request(url, data=body, method=op.method, headers=headers)
+        return op, request, None
+
+    def execute(self, operation: str, **params: Any) -> ConnectionResult:
+        op, request, refusal = self._prepare(operation, **params)
+        if refusal is not None:
+            return refusal
+        if op.mode == "stream":
+            # GM-04: asked once, a stream answers with its first item.
+            return self._first_item(operation, **params)
+
 
         try:
             with urllib.request.urlopen(request, timeout=self._timeout) as response:
-                raw = response.read().decode("utf-8", errors="replace")
+                raw_bytes = response.read()
+                headers = getattr(response, "headers", None)
+                content_type = (headers.get("Content-Type", "") if headers is not None else "") or ""
         except urllib.error.HTTPError as exc:
             # A real, honest rejection from the real service - most
             # often a missing/invalid parameter Alfred never fabricated
@@ -316,15 +369,94 @@ class DeclaredConnection(Connection):
             )
 
         self._availability = Availability(state=AvailabilityState.AVAILABLE)
-        try:
-            parsed = json.loads(raw)
-            detail = json.dumps(parsed)
-        except json.JSONDecodeError:
-            detail = raw
+        if len(raw_bytes) > _MAX_PAYLOAD_BYTES:
+            return ConnectionResult(
+                operation=operation,
+                status=ConnectionStatus.FAILED,
+                detail=f"'{self.name}' answered with more than {_MAX_PAYLOAD_BYTES} bytes - refused rather than truncated",
+                source=self.name,
+                executed_at=utc_now(),
+            )
         return ConnectionResult(
             operation=operation,
             status=ConnectionStatus.SUCCEEDED,
-            detail=detail[:_MAX_DETAIL_CHARS],
             source=self.name,
             executed_at=utc_now(),
+            **structured_answer(raw_bytes, content_type),
         )
+
+    # -- GM-04: streams --------------------------------------------------
+
+    def supports_streaming(self, operation: str) -> bool:
+        op = self._descriptor.operation(operation)
+        return op is not None and op.mode == "stream"
+
+    def stream(
+        self,
+        operation: str,
+        *,
+        max_items: int = 100,
+        max_seconds: float = 30.0,
+        on_item: "Any | None" = None,
+        **params: Any,
+    ) -> StreamResult:
+        """Listen to a declared stream within limits - the same prepared
+        request ``execute`` would send (path, parameters, credential), read as
+        whatever stream its Content-Type says it is."""
+        op, request, refusal = self._prepare(operation, **params)
+        if refusal is not None:
+            return StreamResult(operation=operation, status=refusal.status, detail=refusal.detail,
+                                source=self.name, ended_because="error")
+        if op.mode != "stream":
+            return StreamResult(operation=operation, status=ConnectionStatus.UNSUPPORTED,
+                                detail=f"'{operation}' on '{self.name}' answers once - it is not a stream",
+                                source=self.name, ended_because="error")
+        try:
+            response = urllib.request.urlopen(request, timeout=min(self._timeout, max(0.5, float(max_seconds))))
+        except urllib.error.HTTPError as exc:
+            self._availability = Availability(state=AvailabilityState.AVAILABLE)
+            detail = exc.read().decode("utf-8", errors="replace") if exc.fp else str(exc)
+            return StreamResult(operation=operation, status=ConnectionStatus.FAILED,
+                                detail=f"'{self.name}' rejected the request (HTTP {exc.code}): {detail[:_MAX_DETAIL_CHARS]}",
+                                source=self.name, ended_because="error")
+        except (urllib.error.URLError, OSError) as exc:
+            self._availability = Availability(state=AvailabilityState.UNAVAILABLE, reason=str(exc))
+            return StreamResult(operation=operation, status=ConnectionStatus.FAILED,
+                                detail=f"could not reach '{self.name}': {exc}", source=self.name,
+                                ended_because="error")
+        self._availability = Availability(state=AvailabilityState.AVAILABLE)
+        try:
+            headers = getattr(response, "headers", None)
+            content_type = (headers.get("Content-Type", "") if headers is not None else "") or ""
+            items, ended = read_stream(response, content_type, max_items=max_items,
+                                       max_seconds=max_seconds, on_item=on_item)
+        finally:
+            try:
+                response.close()
+            except Exception:  # noqa: BLE001 - closing a finished stream never fails the listen
+                pass
+        return StreamResult(
+            operation=operation, status=ConnectionStatus.SUCCEEDED, items=tuple(items),
+            detail=f"{len(items)} item(s) from '{self.name}' ({ended})", source=self.name, ended_because=ended,
+        )
+
+    def _first_item(self, operation: str, **params: Any) -> ConnectionResult:
+        """A stream asked for once: its first item, as an ordinary answer."""
+        result = self.stream(operation, max_items=1, max_seconds=self._timeout, **params)
+        if not result.ok:
+            return ConnectionResult(operation=operation, status=result.status, detail=result.detail,
+                                    source=self.name, executed_at=utc_now())
+        if not result.items:
+            return ConnectionResult(operation=operation, status=ConnectionStatus.FAILED,
+                                    detail=f"'{self.name}' sent nothing on '{operation}' within {self._timeout:g}s",
+                                    source=self.name, executed_at=utc_now())
+        item = result.items[0]
+        if item.payload is not None:
+            detail = f"{len(item.payload)} bytes of {item.content_type or 'binary data'}"
+        elif item.data is not None:
+            detail = json.dumps(item.data)[:_MAX_DETAIL_CHARS]
+        else:
+            detail = item.text[:_MAX_DETAIL_CHARS]
+        return ConnectionResult(operation=operation, status=ConnectionStatus.SUCCEEDED, detail=detail,
+                                source=self.name, executed_at=item.received_at, data=item.data,
+                                payload=item.payload, content_type=item.content_type)

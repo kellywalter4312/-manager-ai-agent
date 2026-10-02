@@ -99,6 +99,7 @@ from src.providers.knowledge_factory import build_knowledge_provider
 from src.providers.live_info import LiveInfoProvider
 from src.providers.live_info_factory import build_live_info_provider
 from src.providers.media.factory import MediaTools, build_media
+from src.providers.perception.factory import build_perception
 from src.providers.speech_factory import build_speech
 from src.registry.agent_registry import AgentRegistry
 from src.services.email.mailbox import Mailbox
@@ -323,6 +324,15 @@ class Runtime:
     # connected screen reading the snapshot. One per runtime, kept across a
     # live backend rebind.
     translation_display: Any = None
+    # GM campaign: the ecosystem's own declared state (observations, watches,
+    # conditions, groups, ...) under settings.ecosystem_dir - one shared set of
+    # file-backed stores, the same role ``artifacts`` plays. Not a backend, so a
+    # live rebind carries it over unchanged. None only for a Runtime built by hand.
+    ecosystem: Any = None
+    # GM-03: how things are found, followed and counted in a still or a
+    # recording - a provider axis (Settings.perception), replaced by a live
+    # rebind like every other. None only for a Runtime built by hand.
+    perception: Any = None
 
     # ------------------------------------------------------------------
     # Named accessors for the one specialist this project ships.
@@ -594,12 +604,30 @@ def build_runtime(
 
     from src.services.translation.outputs import TranslationDisplay
 
+    from src.services.ecosystem_state import build_ecosystem_state
+
     runtime = _replace(
         runtime, translation=build_interpreter(settings, transcriber=runtime.media.transcriber),
         translation_display=TranslationDisplay(),
+        ecosystem=build_ecosystem_state(settings),
+        perception=build_perception(settings),
     )
+    _bind_ecosystem_providers(runtime)
     logger.info("runtime ready: %s", runtime.describe())
     return runtime
+
+
+def _bind_ecosystem_providers(runtime: Runtime) -> None:
+    """GM-03: the live backends the ecosystem's own mechanisms consume (the
+    perception axis, for frames a watch delivers) - bound here, at start and on
+    every live rebind, so a watch always sees through the backend the owner
+    chose now."""
+    ecosystem = getattr(runtime, "ecosystem", None)
+    if ecosystem is None:
+        return
+    import src.services.perception.frames  # noqa: F401 - registers the "perception" frame consumer
+
+    ecosystem.bind_provider("perception", runtime.perception)
 
 
 def build_defined_specialist(
@@ -789,6 +817,10 @@ def rebind_reasoning(
 
     manager.brain = manager_brain
     manager.router = router
+    # GM-13: the ceiling on what the Brain may receive follows the provider.
+    reasoning_state = getattr(manager, "_reasoning_state", None)
+    if isinstance(reasoning_state, dict):
+        reasoning_state["provider"] = getattr(provider, "name", "")
     skills = manager.own_skills
     if skills is not None:
         skills._converse = manager_brain.converse
@@ -869,7 +901,13 @@ def rebind_backends(
         artifact_runtime=build_artifact_runtime(settings),
         document_renderer=build_document_rendering(settings),
     )
-    replacement = _replace(replacement, translation=build_interpreter(settings, transcriber=media.transcriber))
+    replacement = _replace(replacement, translation=build_interpreter(settings, transcriber=media.transcriber),
+                           perception=build_perception(settings))
+    if getattr(replacement, "ecosystem", None) is not None:
+        from src.manager.ecosystem_capabilities import bind_ecosystem
+
+        bind_ecosystem(replacement.ecosystem, replacement.connections)
+        _bind_ecosystem_providers(replacement)
     assist = build_local_assistant(settings)
     new_tools = tools(replacement) if tools is not None else None
 
@@ -932,6 +970,15 @@ def build_manager(
     is what lets a persistent store re-read its file each tick.
     """
     registry = AgentRegistry()
+    if getattr(runtime, "ecosystem", None) is not None:
+        # GM campaign: what the ecosystem observes, watches and is connected to
+        # is the live vocabulary the ecosystem capabilities' claims recognise.
+        from src.manager.ecosystem_capabilities import bind_ecosystem
+        # GM-02 via D-2: fired conditions join the proactive pipeline every
+        # entry point already runs (registered on import).
+        import src.manager.proactive_conditions  # noqa: F401
+
+        bind_ecosystem(runtime.ecosystem, runtime.connections)
 
     # The Manager's memory owner is his stable technical key, MANAGER -
     # never runtime.identity.name, which is only whatever IDENTITY.md's
@@ -961,12 +1008,27 @@ def build_manager(
     # remembered, through this exact policy, on every real turn.
     manager_memory = build_memory(runtime.settings, MANAGER)
     manager_memory_policy = ManagerMemoryPolicy()
+    # GM-13: every indirect use of memory (capabilities, the profile knowledge
+    # the Brain is given, what specialists are granted read-only) recalls
+    # through a gate - nothing above what the current reasoning provider may
+    # receive. A direct question asks past it explicitly.
+    sensitivity = getattr(getattr(runtime, "ecosystem", None), "sensitivity", None)
+    reasoning = {"provider": getattr(runtime.provider, "name", "")}
+    reasoning_ceiling = None
+    memory_recall = manager_memory.recall
+    if sensitivity is not None:
+        from src.services.memory.sensitivity import gated_recall
+
+        def reasoning_ceiling() -> str:
+            return sensitivity.reasoning_ceiling(reasoning["provider"])
+
+        memory_recall = gated_recall(manager_memory.recall, ceiling=reasoning_ceiling)
     # Pre-Stage-9 Campaign 1: one canonical view of the person, built over
     # the Manager's own governed store (where everything taught in
     # conversation is written) and the per-run USER.md profile. Handed to
     # Alfred and granted, read-only, to every specialist below - never a
     # second store and never a copy.
-    user_knowledge = UserKnowledge(base_profile=profile, recall=manager_memory.recall)
+    user_knowledge = UserKnowledge(base_profile=profile, recall=memory_recall)
 
     # Built as a local rather than inline, so its governed write path
     # (``retain``) can be bound once the ManagerAgent that owns the real
@@ -1023,7 +1085,7 @@ def build_manager(
         translate=translate_for(runtime),
         # Stage 12: the exact same store ManagerAgent itself uses
         # below - never a second memory.
-        recall=manager_memory.recall,
+        recall=memory_recall,
         forget=manager_memory.forget,
         # Stage 12 closure: the single, Settings-selected provider every
         # agent's own celebration reaction now comes from, in place of
@@ -1089,6 +1151,23 @@ def build_manager(
     # ManagerAgent.retain, never a second implementation of it. This is
     # the only place this call happens.
     own_skills.bind_retain(manager.retain)
+    if sensitivity is not None:
+        manager.bind_sensitivity(sensitivity, reasoning_ceiling)
+        # Kept so a live reasoning switch (rebind_reasoning) changes the
+        # ceiling at once: a move to a vendor's model tightens it.
+        manager._reasoning_state = reasoning
+        # Retention (GM-13) applies to the live stores this Manager and every
+        # agent registered with it hold - read per tick, so an agent created
+        # later is covered.
+        runtime.ecosystem.bind_memories(lambda: [
+            memory for memory in (getattr(agent, "memory", None) for agent in (manager, *manager.registry.all_agents()))
+            if memory is not None
+        ])
+        from src.core.shared_context import bind_note_screen
+
+        # A note carried to another agent is screened against the owner's
+        # rules (src/core/shared_context.py) - the one carrier between agents.
+        bind_note_screen(lambda text: sensitivity.classify(text))
 
     # Every registered specialist, built and registered the same way. This
     # loop is the whole of Step 3: before it, adding a specialist meant

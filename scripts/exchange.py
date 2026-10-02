@@ -164,6 +164,42 @@ def exchange(
     action_log_path: "str | Path | None" = None,
     sessions: "SessionStore | None" = None,
 ):
+    """One request and its answer - see ``_exchange``.
+
+    GM-13, at the door every person's words come through: how carefully what
+    they say is to be kept is decided here, once - their own marker
+    ("remember privately that ...", "this is confidential: ...") or the
+    owner's rules - and held for the whole exchange, the turn and whatever it
+    asks to be remembered alike. The marker says how to keep what is said,
+    not what is said, so every capability sees the words without it; the
+    room keeps exactly what the person said."""
+    from src.services.memory.sensitivity import requested as requested_sensitivity
+    from src.services.memory.sensitivity import requested_level, without_markers
+
+    level = requested_level(request)
+    policy = getattr(channel.manager, "_sensitivity", None)
+    if policy is not None:
+        level = policy.classify(request, explicit=level)
+    words = without_markers(request) if requested_level(request) else request
+    with requested_sensitivity(level):
+        return _exchange(
+            channel, conversation, words, said=request, level=level, addressed=addressed, speak=speak,
+            action_log_path=action_log_path, sessions=sessions,
+        )
+
+
+def _exchange(
+    channel: Channel,
+    conversation: Conversation,
+    request: str,
+    *,
+    said: "str | None" = None,
+    level: str = "",
+    addressed: str | None = None,
+    speak: bool = False,
+    action_log_path: "str | Path | None" = None,
+    sessions: "SessionStore | None" = None,
+):
     """One request and its answer, recorded in the room they happened in.
 
     ``sessions`` (Phase 10), when given, is where this room's session - its
@@ -249,7 +285,12 @@ def exchange(
                     conversation.join(Participant(to_agent, ParticipantKind.AGENT))
 
     conversation.say(
-        Utterance(speaker=person, text=request, addressed=to_agent or inferred)
+        Utterance(
+            speaker=person, text=said if said is not None else request, addressed=to_agent or inferred,
+            # GM-13: how carefully this was asked to be kept - read by the
+            # session store, which never saves a sensitive utterance's words.
+            detail={"sensitivity": level} if level else None,
+        )
     )
 
     store = sessions if sessions is not None else _UNSAVED_SESSIONS

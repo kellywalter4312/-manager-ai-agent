@@ -549,6 +549,17 @@ class ManagerSkills(BaseAgent):
             for capability in self._capabilities.values()
         )
 
+    def _connection_object_capability(self, task: Task):
+        """The first capability (by name, as every claim pass here orders)
+        declaring ``operates_on_connections`` whose own claim recognises
+        ``task`` - or None. No capability is named here."""
+        participants = [agent.name for agent in self._roster()]
+        for capability in sorted(self._capabilities.values(), key=lambda c: c.name):
+            if (capability.operates_on_connections and capability.claims is not None
+                    and capability.claims(task, participants)):
+                return capability
+        return None
+
     def _names_equipped_connection(self, text: str) -> bool:
         """Whether this request names a connection this agent actually has -
         the routing question, which is not the same as ``named_connection``'s
@@ -748,6 +759,26 @@ class ManagerSkills(BaseAgent):
                 return
 
     def execute(self, task: Task) -> TaskResult:
+        """Handle ``task`` with the sensitivity the person's own words ask for
+        in force (GM-13: "remember privately ...", "this is confidential ...")
+        - read by the one memory write path while this request is handled,
+        and by nothing once it ends."""
+        from dataclasses import replace as _replace
+
+        from src.services.memory.sensitivity import requested, requested_level, without_markers
+
+        level = requested_level(task.description)
+        if not level:
+            # Whatever the door already decided for this exchange stays in force.
+            return self._execute(task)
+        # A marker that reached the Manager directly (not through the door):
+        # it says how to keep what is said, not what is said - handled as if
+        # it were absent, with the level in force.
+        task = _replace(task, description=without_markers(task.description))
+        with requested(level):
+            return self._execute(task)
+
+    def _execute(self, task: Task) -> TaskResult:
         """Pick the handler this task is asking for, and run it.
 
         Selection is the same scoring the router used one level up: match the
@@ -783,8 +814,10 @@ class ManagerSkills(BaseAgent):
             capability = OPEN_CONVERSATION
         elif self._names_equipped_connection(task.description):
             # A declared website or service named in the request is reached
-            # through the one governed connected_action capability.
-            capability = self._capabilities[CONNECTED_ACTION.name]
+            # through the one governed connected_action capability - unless a
+            # capability that takes the connection itself as its object
+            # (declared ``operates_on_connections``) recognises the request.
+            capability = self._connection_object_capability(task) or self._capabilities[CONNECTED_ACTION.name]
         elif self._answers_pending_correction(task.description):
             # Pre-Stage-9 Campaign 2: the person is answering "which one did
             # you mean?" - resolved deterministically, with or without a

@@ -431,30 +431,36 @@ def manager_component(settings: Settings) -> ComponentSnapshot:
 alfred_component = manager_component
 
 
-def _image_technique_components(config) -> tuple[ComponentSnapshot, ...]:
-    """Every image technique available now - built in, registered in code, or
-    composed through governance - and every one the owner withdrew, as
-    governable components (``image_technique.<id>``)."""
-    from src.providers.media.image_techniques import (
-        DISABLED, ENABLED, TECHNIQUE_COMPONENT_PREFIX, image_techniques,
-    )
+def _technique_components(config) -> tuple[ComponentSnapshot, ...]:
+    """Every technique of every family available now - built in, registered
+    in code, or composed through governance - and every one the owner
+    withdrew, as governable components (``<category>.<id>``: image techniques,
+    series techniques (GM-09), and any family registered later)."""
+    import src.providers.media.image_techniques  # noqa: F401 - registers its family
+    import src.services.observations.techniques  # noqa: F401 - registers its family
+    from src.core.techniques import DISABLED, ENABLED, technique_families
 
     values = dict(config.values)
     listed: list[ComponentSnapshot] = []
-    for technique in image_techniques(values):
-        component_id = TECHNIQUE_COMPONENT_PREFIX + technique.technique_id
-        listed.append(ComponentSnapshot(
-            component_id=component_id, category="image_technique", label=technique.label,
-            version=values.get(component_id, ENABLED), detail=f"{technique.purpose}: {', '.join(technique.words[:4])}",
-        ))
-    shown = {component.component_id for component in listed}
-    for component_id, value in values.items():
-        if component_id.startswith(TECHNIQUE_COMPONENT_PREFIX) and component_id not in shown and value == DISABLED:
+    for family in technique_families():
+        for technique in family.available(values):
+            component_id = family.prefix + technique.technique_id
             listed.append(ComponentSnapshot(
-                component_id=component_id, category="image_technique",
-                label=component_id[len(TECHNIQUE_COMPONENT_PREFIX):] + " (withdrawn)", version=DISABLED,
+                component_id=component_id, category=family.category, label=technique.label,
+                version=values.get(component_id, ENABLED), detail=f"{technique.purpose}: {', '.join(technique.words[:4])}",
             ))
+        shown = {component.component_id for component in listed}
+        for component_id, value in values.items():
+            if family.owns(component_id) and component_id not in shown and value == DISABLED:
+                listed.append(ComponentSnapshot(
+                    component_id=component_id, category=family.category,
+                    label=family.technique_id(component_id) + " (withdrawn)", version=DISABLED,
+                ))
     return tuple(listed)
+
+
+# Kept for any caller written against the first family's name.
+_image_technique_components = _technique_components
 
 
 def discover_components(
@@ -499,7 +505,7 @@ def discover_components(
 
     components.extend(_capability_config_components(config))
     components.extend(_tool_config_components(config, settings))
-    components.extend(_image_technique_components(config))
+    components.extend(_technique_components(config))
 
     manifest = upgrade_manifest(snapshot_version=SNAPSHOT_VERSION)
     components.extend(_system_components(manifest))

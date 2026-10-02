@@ -85,6 +85,9 @@ def load_service_registry(path: "Path | str" = DEFAULT_SERVICES_PATH) -> "dict[s
                         )
                         for param in op.get("parameters", [])
                     ),
+                    # GM-04: absent in a file written before streams existed
+                    # - read as the one-answer "request" it always was.
+                    mode=op.get("mode", "request"),
                 )
                 for op in entry.get("operations", [])
             )
@@ -126,6 +129,7 @@ def save_service_registry(
                             {"name": p.name, "location": p.location, "required": p.required}
                             for p in op.parameters
                         ],
+                        "mode": op.mode,
                     }
                     for op in descriptor.operations
                 ],

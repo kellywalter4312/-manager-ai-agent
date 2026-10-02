@@ -199,6 +199,24 @@ def build_ecosystem_registry(settings: Settings) -> EcosystemRegistry:
         )
     )
 
+    # GM-03: structured perception - what is where in a still or a recording,
+    # followed over time - on its own axis.
+    from src.providers.perception.factory import available_perception_backends, build_perception
+
+    registry.register(
+        GenericCategoryAdapter(
+            "perception_provider",
+            list_backends=available_perception_backends,
+            active_key=lambda: settings.perception,
+            build=lambda key, credential: build_perception(replace(settings, perception=key)),
+            requires_credential=lambda key: False,
+            dependents=(
+                "the perceive_media capability (a shared still or recording)",
+                "watches that hand their frames to perception (a live camera)",
+            ),
+        )
+    )
+
     # Pre-Stage-9 Campaign 8 (PRV-07): image generation on its own axis.
     registry.register(
         GenericCategoryAdapter(

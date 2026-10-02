@@ -684,33 +684,42 @@ class SurfaceHandler(EvolutionHandler):
         return ACTIVATION_ON_READ
 
 
-class ImageTechniqueHandler(EvolutionHandler):
-    """An image technique - how a real image can be transformed, enhanced or
-    reconstructed - governed like every other component
-    (``image_technique.<id>``). ``enabled``/``disabled`` withdraws or restores
-    any technique; ``pipeline:<step>,<step>|<label>|<phrase>;<phrase>`` adds a
-    brand-new one composed from existing techniques, with no code. A newly
-    developed implementation registered in code
-    (``register_image_technique``) is governed through the same id. Read live by
-    ``ImageIntelligenceTool`` on every call."""
+def _technique_families():
+    """Every technique family, its registering modules imported first."""
+    import src.providers.media.image_techniques  # noqa: F401 - registers "image_technique"
+    import src.services.observations.techniques  # noqa: F401 - registers "series_technique"
+    from src.core.techniques import technique_families
+
+    return technique_families()
+
+
+def _family(component_id: str):
+    return next((f for f in _technique_families() if f.owns(component_id)), None)
+
+
+class TechniqueHandler(EvolutionHandler):
+    """A technique of any registered family - how a real image can be
+    transformed (``image_technique.<id>``), what can be found in a series of
+    readings (``series_technique.<id>``, GM-09), or any family registered
+    later - governed like every other component, by one handler.
+    ``enabled``/``disabled`` withdraws or restores a technique;
+    ``pipeline:<step>,<step>|<label>|<phrase>;<phrase>`` adds a brand-new one
+    composed from existing techniques of the same family, with no code. A newly
+    developed implementation registered in code is governed through the same
+    id. Read live by the family's tool on every call."""
 
     def applies_to(self, component_id: str) -> bool:
-        from src.providers.media.image_techniques import TECHNIQUE_COMPONENT_PREFIX
-
-        return component_id.startswith(TECHNIQUE_COMPONENT_PREFIX) and component_id.count(".") == 1
+        return _family(component_id) is not None
 
     def initial_version(self, component_id: str) -> "str | None":
-        from src.providers.media.image_techniques import TECHNIQUE_COMPONENT_PREFIX, ENABLED, image_techniques
+        from src.core.techniques import ENABLED
 
-        technique_id = component_id[len(TECHNIQUE_COMPONENT_PREFIX):]
-        known = {t.technique_id for t in image_techniques({})}
-        return ENABLED if technique_id in known else "undeclared"
+        family = _family(component_id)
+        return ENABLED if family is not None and family.technique_id(component_id) in family.known_ids() else "undeclared"
 
     def apply(self, proposal: EvolutionProposal, *, context: HandlerContext) -> HandlerResult:
-        from src.providers.media.image_techniques import TECHNIQUE_COMPONENT_PREFIX, validate_technique_value
-
-        technique_id = proposal.target[len(TECHNIQUE_COMPONENT_PREFIX):]
-        problem = validate_technique_value(technique_id, proposal.proposed_version)
+        family = _family(proposal.target)
+        problem = family.validate(family.technique_id(proposal.target), proposal.proposed_version)
         if problem is not None:
             return HandlerResult(False, f"'{proposal.proposed_version}' is not a technique state: {problem}")
         config = load_governed_config(context.config_path).with_value(proposal.target, proposal.proposed_version)
@@ -720,11 +729,9 @@ class ImageTechniqueHandler(EvolutionHandler):
         return HandlerResult(True, f"'{proposal.target}' is now {proposal.proposed_version} (independently re-read from disk)")
 
     def rollback(self, proposal: EvolutionProposal, *, context: HandlerContext) -> HandlerResult:
-        from src.providers.media.image_techniques import validate_technique_value, TECHNIQUE_COMPONENT_PREFIX
-
+        family = _family(proposal.target)
         config = load_governed_config(context.config_path)
-        technique_id = proposal.target[len(TECHNIQUE_COMPONENT_PREFIX):]
-        if validate_technique_value(technique_id, proposal.current_version) is None:
+        if family.validate(family.technique_id(proposal.target), proposal.current_version) is None:
             config = config.with_value(proposal.target, proposal.current_version)
         else:
             config = config.without_value(proposal.target)
@@ -740,6 +747,10 @@ class ImageTechniqueHandler(EvolutionHandler):
         return ACTIVATION_PER_TURN
 
 
+# Kept for any caller written against the first family's name.
+ImageTechniqueHandler = TechniqueHandler
+
+
 # The open-ended registration point (Section 11's own requirement): a
 # future category registers one handler here (or calls
 # ``register_handler`` at import time from its own module) and needs no
@@ -752,7 +763,7 @@ _HANDLERS: "list[EvolutionHandler]" = [
     ConnectionAdapterHandler(),
     BrainModeHandler(),
     SurfaceHandler(),
-    ImageTechniqueHandler(),
+    TechniqueHandler(),
 ]
 
 

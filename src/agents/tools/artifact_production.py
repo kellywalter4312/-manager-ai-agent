@@ -245,6 +245,9 @@ class ArtifactProductionTool(Tool):
             "type": artifact.type,
             "title": latest.title,
             "content_kind": str(latest.metadata.get("content_kind", "")),
+            # How a derived file was made ("perception", "edit", ...) - so a
+            # capability can tell the person's own picture from Alfred's view of it.
+            "technique": str(latest.metadata.get("technique", "")),
             "filename": str(latest.metadata.get("filename", "")),
             "media_type": str(latest.metadata.get("media_type", "")),
             "renditions": dict(latest.renditions),

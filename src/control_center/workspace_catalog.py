@@ -38,9 +38,12 @@ from typing import Iterable, Mapping
 # findings of an analysis, whatever a future agent registers), drawn by the
 # page's one generic screen renderer. This is what keeps a workspace nobody
 # anticipated composable without page code: a new agent screen is a new panel.
-PANEL_KINDS = ("tasks", "diagram3d", "artifacts", "produced", "model3d", "surface")
+# ``live:<view>`` - a live data-bound view (GM-06): widgets bound to observed
+# readings, their history, groups, events or what a camera saw, redrawn as the
+# data changes by the one widget renderer (``ui/live_view.js``).
+PANEL_KINDS = ("tasks", "diagram3d", "artifacts", "produced", "model3d", "surface", "live")
 # Panels that need an argument after the colon.
-_PANELS_WITH_ARGUMENT = ("artifacts", "surface")
+_PANELS_WITH_ARGUMENT = ("artifacts", "surface", "live")
 # The artifact metadata key naming the workspace an artifact was made in.
 ARTIFACT_WORKSPACE_KEY = "workspace"
 WORKSPACE_TYPE_PREFIX = "workspace_type."

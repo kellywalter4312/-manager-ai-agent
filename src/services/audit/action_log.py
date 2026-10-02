@@ -74,7 +74,16 @@ MIGRATIONS = MigrationChain(())
 # web_search): real and governed, but not consequential in the sense Phase 8
 # means by the word - nothing external changes because of them.
 CONSEQUENTIAL_CAPABILITIES: frozenset[str] = frozenset(
-    {"connected_action", "communication", "media_production", "generate_document"}
+    {"connected_action", "communication", "media_production", "generate_document",
+     # GM campaign: declaring what the ecosystem watches, or a condition over
+     # it, is a durable write the person asked for, recorded like any other.
+     "observation_watch", "condition_watch",
+     # GM-13: a rule about how personal information is handled is policy.
+     "sensitivity_rules",
+     # GM-15: declaring a group, or an action confirmed on all its members.
+     "entity_groups",
+     # GM-06: declaring or changing a live view.
+     "live_view"}
 )
 
 # A hard cap on how many entries a single load keeps in memory / rewrites on

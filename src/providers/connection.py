@@ -55,6 +55,21 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def is_json_value(value: Any, _depth: int = 0) -> bool:
+    """Whether ``value`` is plain JSON data - what a structured answer may
+    hold. Bounded depth, so a pathological structure is refused rather than
+    walked forever."""
+    if _depth > 64:
+        return False
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return True
+    if isinstance(value, (list, tuple)):
+        return all(is_json_value(item, _depth + 1) for item in value)
+    if isinstance(value, dict):
+        return all(isinstance(key, str) and is_json_value(item, _depth + 1) for key, item in value.items())
+    return False
+
+
 class AuthorizationState(str, Enum):
     """Whether a credential is configured for this connection - a
     genuinely different fact from whether the service is currently
@@ -116,6 +131,15 @@ class ConnectionResult:
     detail: str = ""
     source: str = ""
     executed_at: datetime | None = None
+    # D-1 (GM campaign): the reading itself, not only its words. ``detail`` is
+    # what a person reads; ``data`` is the same answer as a value something
+    # can store, compare and aggregate (a JSON-compatible dict, list or
+    # scalar), and ``payload`` carries an answer that is not text at all (a
+    # camera frame, a recording) with its ``content_type``. All optional and
+    # additive: a connection that sets none of them behaves exactly as before.
+    data: Any = None
+    payload: "bytes | None" = None
+    content_type: str = ""
 
     def __post_init__(self) -> None:
         if not str(self.operation).strip():
@@ -124,16 +148,77 @@ class ConnectionResult:
         object.__setattr__(self, "source", " ".join(str(self.source or "").split()))
         if self.executed_at is not None and not isinstance(self.executed_at, datetime):
             raise ValueError("ConnectionResult.executed_at must be a datetime")
+        if self.data is not None and not is_json_value(self.data):
+            raise ValueError("ConnectionResult.data must be a JSON-compatible value (dict, list, str, number, bool)")
+        if self.payload is not None and not isinstance(self.payload, (bytes, bytearray)):
+            raise ValueError("ConnectionResult.payload must be bytes")
+        if self.payload is not None:
+            object.__setattr__(self, "payload", bytes(self.payload))
+        object.__setattr__(self, "content_type", str(self.content_type or "").split(";")[0].strip().lower())
 
     @property
     def ok(self) -> bool:
         return self.status.ok
+
+    @property
+    def has_structure(self) -> bool:
+        """Whether this answer carries a value beyond its words."""
+        return self.data is not None or self.payload is not None
 
     def describe(self) -> str:
         """A short line for logs. Excludes ``detail``, which may carry
         service content - the same rule ``CommunicationResult.describe``
         already follows."""
         return f"{self.operation}: {self.status.value}"
+
+
+@dataclass(frozen=True)
+class StreamItem:
+    """One thing a streaming operation delivered (GM-04): an event, a sample,
+    a frame. The same three shapes a single answer can take - ``data``
+    (structured), ``payload`` (binary, with ``content_type``), ``text`` -
+    stamped with when it arrived and its place in the stream."""
+
+    sequence: int
+    received_at: datetime
+    data: Any = None
+    payload: "bytes | None" = None
+    content_type: str = ""
+    text: str = ""
+    event: str = ""
+
+    def __post_init__(self) -> None:
+        if self.data is not None and not is_json_value(self.data):
+            raise ValueError("StreamItem.data must be a JSON-compatible value")
+        if self.payload is not None:
+            object.__setattr__(self, "payload", bytes(self.payload))
+        object.__setattr__(self, "content_type", str(self.content_type or "").split(";")[0].strip().lower())
+
+
+@dataclass(frozen=True)
+class StreamResult:
+    """How one bounded listen to a stream ended (GM-04).
+
+    A stream is always listened to within limits - a number of items or a
+    length of time - so a listen always ends and says why: ``ended_because``
+    is "limit" (enough items), "time" (the window closed), "closed" (the
+    service ended it), "stopped" (the caller asked) or "error". ``items`` holds
+    what arrived (bounded by the caller's own limit)."""
+
+    operation: str
+    status: ConnectionStatus
+    items: "tuple[StreamItem, ...]" = ()
+    detail: str = ""
+    source: str = ""
+    ended_because: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.status.ok
+
+    def describe(self) -> str:
+        """A short line for logs - never the items' content."""
+        return f"{self.operation}: {self.status.value}, {len(self.items)} item(s), ended: {self.ended_because or '?'}"
 
 
 class Connection(ABC):
@@ -242,6 +327,31 @@ class Connection(ABC):
         operations carry real descriptive metadata (see
         ``DeclaredConnection.operation_description_for``)."""
         return ""
+
+    def supports_streaming(self, operation: str) -> bool:
+        """Whether ``operation`` delivers a stream rather than one answer
+        (GM-04). Default: False - a connection that declares no stream never
+        pretends to have one."""
+        return False
+
+    def stream(
+        self,
+        operation: str,
+        *,
+        max_items: int = 100,
+        max_seconds: float = 30.0,
+        on_item: "Any | None" = None,
+        **params: Any,
+    ) -> StreamResult:
+        """Listen to ``operation`` within limits (GM-04). ``on_item`` is
+        called with each ``StreamItem`` as it arrives - so a caller can act on
+        arrival rather than at the end - and returning False from it stops the
+        listen. Default: an honest UNSUPPORTED, never an empty success."""
+        return StreamResult(
+            operation=operation, status=ConnectionStatus.UNSUPPORTED,
+            detail=f"'{self.name}' offers no stream named '{operation}'", source=self.name,
+            ended_because="error",
+        )
 
     def self_authentication(self) -> "SelfAuthentication | None":
         """How this connection authenticates when it is *not* by a typed

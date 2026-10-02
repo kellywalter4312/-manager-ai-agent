@@ -91,6 +91,13 @@ from src.composition import (  # noqa: E402
 )
 from src.config.coherence import ConfigurationError, check_configuration  # noqa: E402
 from src.config.settings import Settings  # noqa: E402
+from src.control_center.ecosystem_commands import (  # noqa: E402
+    MECHANISM_HELP,
+    MECHANISM_VERBS,
+    classify_mechanism_write,
+    mechanism_write_succeeded,
+    run_mechanism_command,
+)
 from src.control_center.observer import ControlCenter  # noqa: E402
 from src.control_center.render import (  # noqa: E402
     render_agent,
@@ -467,7 +474,7 @@ HELP = """
                            pipeline (plan -> execute -> verify)
   help                     this
   quit                     leave
-""".strip("\n")
+""".strip("\n") + "\n\n" + MECHANISM_HELP.strip("\n")
 
 # Natural Conversation: how many recent turns a capability handler that
 # consults the Brain (open_conversation, knowledge_inquiry,
@@ -477,7 +484,7 @@ HELP = """
 CONVERSATION_HISTORY_LIMIT = 6
 
 
-def _connection_tools(resolver: ConnectionResolver) -> "list[ConnectionActionTool]":
+def _connection_tools(resolver: ConnectionResolver, ecosystem=None) -> "list[ConnectionActionTool]":
     """Grant a real ``ConnectionActionTool`` for every operation every
     connection ``resolver`` holds declares - the exact missing half of
     Stage 16, generalized (Phase 7 - Universal Connection Layer) from
@@ -530,6 +537,7 @@ def _connection_tools(resolver: ConnectionResolver) -> "list[ConnectionActionToo
     ``supported_operations``/``parameters_for``.
     """
     tools: "list[ConnectionActionTool]" = []
+    observe = ecosystem.reading_observer() if ecosystem is not None else None
     for name in resolver.names:
         connection = resolver.get(name)
         for operation in connection.supported_operations:
@@ -546,6 +554,7 @@ def _connection_tools(resolver: ConnectionResolver) -> "list[ConnectionActionToo
                     # has can actually reach the connection, never merely a
                     # decision about which operation to call.
                     parameters=connection.parameters_for(operation),
+                    observe=observe,
                 )
             )
     return tools
@@ -592,6 +601,9 @@ GOVERNED_BACKEND_FIELDS = {
     # artifact is examined, never the memory, conversation or identity the
     # "deployment setting" exclusion below exists to protect.
     "artifact_runtime": "artifact_runtime",
+    # GM-03: how things are found and followed in a picture or recording - an
+    # owner choice for the same reason; it changes what is seen, never who.
+    "perception_provider": "perception",
 }
 
 
@@ -1167,6 +1179,39 @@ def bind_workspaces(runtime, manager) -> None:
     runtime.artifacts.bind_creation_context(lambda owner: workspace_artifact_metadata(owner, values()))
 
 
+def _ecosystem_tools(runtime, settings: Settings, *, owner: str) -> list:
+    """The GM campaign's tools over ``runtime.ecosystem`` - empty for a runtime
+    built by hand without one. A specialist's copy reads observations only up
+    to "personal" (GM-13); the Manager's up to "sensitive"."""
+    ecosystem = getattr(runtime, "ecosystem", None)
+    if ecosystem is None:
+        return []
+    from src.agents.tools.automation import AutomationTool
+    from src.agents.tools.observation import ObservationTool
+    from src.agents.tools.sensitivity import SensitivityTool
+
+    ceiling = "sensitive" if owner == runtime.identity.name else "personal"
+    tools = [
+        ObservationTool(ecosystem, runtime.connections, owner_agent=owner, max_sensitivity=ceiling),
+        AutomationTool(ecosystem, runtime.connections, owner_agent=owner),
+    ]
+    if getattr(runtime, "perception", None) is not None:
+        # GM-03: every agent may find, follow and count what is in a picture
+        # or recording it holds - through the owner's chosen perception axis.
+        from src.agents.tools.perception import PerceptionTool
+
+        tools.append(PerceptionTool(runtime.artifacts, runtime.perception, ecosystem, owner_agent=owner))
+    from src.agents.tools.groups import GroupTool
+    from src.agents.tools.live_view import LiveViewTool
+
+    tools.append(GroupTool(ecosystem, runtime.connections, owner_agent=owner, max_sensitivity=ceiling))
+    tools.append(LiveViewTool(ecosystem, runtime.connections, owner_agent=owner, max_sensitivity=ceiling))
+    if owner == runtime.identity.name:
+        # GM-13: the owner's rules are managed through the orchestrator only.
+        tools.append(SensitivityTool(ecosystem, owner_agent=owner))
+    return tools
+
+
 def manager_tools(runtime, settings: Settings, config, agent_names=None, owner: "str | None" = None) -> ToolSet:
     """Everything the Manager is equipped with, built from ``runtime``'s current
     backends. One construction, used by ``build`` at start and by a live
@@ -1180,6 +1225,10 @@ def manager_tools(runtime, settings: Settings, config, agent_names=None, owner: 
     through a capability the agent is authorised for."""
     owner = owner or runtime.identity.name
     bind_image_technique_values(_governed_image_values)
+    # GM-09: series techniques read the same governed values, live.
+    from src.services.observations.techniques import bind_governed_values as bind_series_technique_values
+
+    bind_series_technique_values(_governed_image_values)
     return ToolSet([
             LiveInformationTool(runtime.live_info),
             WebSearchTool(runtime.live_info),
@@ -1198,7 +1247,7 @@ def manager_tools(runtime, settings: Settings, config, agent_names=None, owner: 
             # tool grant itself). Empty for an installation equipped
             # with only "null" (no operations at all) and unchanged for
             # every existing single-connection caller.
-            *_connection_tools(runtime.connections),
+            *_connection_tools(runtime.connections, getattr(runtime, "ecosystem", None)),
             # Stage 18: read-only access to the documents, books and notes
             # the user themselves put in runtime.knowledge's folder. It
             # sits beside live_information rather than replacing it -
@@ -1304,6 +1353,10 @@ def manager_tools(runtime, settings: Settings, config, agent_names=None, owner: 
             # Moving between the workspaces the owner created - one saved fact
             # the Control Center, the page and a restart all read.
             workspace_tool(agent_names or (lambda: (runtime.identity.name,))),
+            # GM campaign: the ecosystem's general mechanisms - observation,
+            # conditions, groups, perception, ... - one tool each over the
+            # shared runtime.ecosystem stores, granted here like every other.
+            *_ecosystem_tools(runtime, settings, owner=owner),
             # Files/Documents completion: real visual reasoning reaches
             # Alfred through the Brain's own analyze_image question
             # (bound below via ManagerSkills, exactly like converse) -
@@ -3082,7 +3135,7 @@ def _op_spec(op: "ServiceOperation") -> str:
     ``name:location:required|optional``, mirroring the outer shape at a
     smaller scale rather than inventing a different one.
     """
-    base = f"{op.name}:{op.method}:{op.path}:{'auth' if op.requires_auth else 'open'}"
+    base = f"{op.name}:{op.method}:{op.path}:{'auth' if op.requires_auth else 'open'}{'+stream' if op.mode == 'stream' else ''}"
     if not op.parameters:
         return base
     params = "|".join(
@@ -3132,7 +3185,7 @@ def run_services_command(centre: "ControlCenter", rest: str) -> str:
         if descriptor.description:
             lines.append(descriptor.description)
         for op in descriptor.operations:
-            auth = "auth required" if op.requires_auth else "open"
+            auth = ("auth required" if op.requires_auth else "open") + (", a stream" if op.mode == "stream" else "")
             lines.append(
                 f"  {op.name} ({op.method} {op.path}, {auth}){_format_parameters(op)}"
                 + (f" - {op.description}" if op.description else "")
@@ -3178,7 +3231,7 @@ def run_services_command(centre: "ControlCenter", rest: str) -> str:
             f"were usable" + (f" ({dropped} malformed, dropped)" if dropped else "") + ":"
         )
         for op in d.operations:
-            auth = "auth required" if op.requires_auth else "open"
+            auth = ("auth required" if op.requires_auth else "open") + (", a stream" if op.mode == "stream" else "")
             lines.append(
                 f"    {op.name} ({op.method} {op.path}, {auth}){_format_parameters(op)}"
                 + (f" - {op.description}" if op.description else "")
@@ -3233,12 +3286,17 @@ def run_services_command(centre: "ControlCenter", rest: str) -> str:
                         )
                     except ValueError as exc:
                         return f"could not declare '{name}': {exc}"
+            # GM-04: "open+stream" / "auth+stream" declares an operation the
+            # service keeps sending (events, samples, frames) - plain "open"
+            # and "auth" are exactly the one-answer operations they always were.
+            auth_parts = auth_word.strip().lower().split("+")
             try:
                 operations.append(
                     ServiceOperation(
                         name=op_name, method=method, path=path,
-                        requires_auth=(auth_word.strip().lower() == "auth"),
+                        requires_auth=(auth_parts[0] == "auth"),
                         parameters=tuple(parameters),
+                        mode="stream" if "stream" in auth_parts[1:] else "request",
                     )
                 )
             except ValueError as exc:
@@ -3820,6 +3878,9 @@ def classify_administrative_write(command: str) -> "tuple[bool, str]":
         return False, ""
     verb = parts[0].lower()
 
+    if verb in MECHANISM_VERBS:
+        return classify_mechanism_write(parts)
+
     if verb == "capabilities" and len(parts) >= 3 and parts[1].lower() in ("enable", "disable"):
         return True, f"{parts[1].lower()} the '{parts[2]}' capability"
     if verb == "capabilities" and len(parts) >= 4 and parts[1].lower() in ("grant", "revoke"):
@@ -4002,6 +4063,8 @@ def _administrative_write_succeeded(verb: str, result: str) -> bool:
         return (text.startswith("Created the specialist ") or text.startswith("Removed the specialist ")) and " Saved - " in text
     if verb == "ecosystem":
         return text.startswith("OK:")
+    if verb in MECHANISM_VERBS:
+        return mechanism_write_succeeded(verb, text)
     return False
 
 
@@ -4830,6 +4893,14 @@ def run_command(
 
     if verb == "ecosystem":
         result = run_ecosystem_command(centre, rest)
+        _record_if_administrative_write(command, result, action_log_path)
+        return result
+
+    if verb in MECHANISM_VERBS:
+        # GM campaign: the ecosystem's general mechanisms - watches,
+        # conditions, groups, ... - managed through the same stores and tools
+        # conversation uses (src/control_center/ecosystem_commands.py).
+        result = run_mechanism_command(centre.runtime, verb, rest)
         _record_if_administrative_write(command, result, action_log_path)
         return result
 

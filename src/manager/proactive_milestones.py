@@ -31,15 +31,18 @@ string.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Callable, Iterable
 
 from src.manager.memory_policy import MemoryCategory
 from src.services.memory.calendar_items import all_current_calendar_items
 from src.services.memory.milestones import due_recurring_dates
 from src.services.memory.temporal_events import due_temporal_transitions
 from src.services.memory.temporal_facts import utc_today
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from src.manager.manager import ManagerAgent
@@ -110,8 +113,43 @@ class ProactiveEvent:
     event_type: str
     label: str
     dedup_key: str
-    source: str  # "personal" | "temporal" | "calendar" | "calendar_item" | "reminder"
+    source: str  # the registered source that produced it: "personal", "temporal", "calendar",
+                 # "calendar_item", "reminder" - or any source registered later ("condition", GM-02)
     record: "MemoryRecord | None" = None
+
+
+@dataclass(frozen=True)
+class ProactiveContext:
+    """What every proactive source is asked with (D-2). ``settings`` lets a
+    source that keeps its own declared state (conditions, GM-02) find it."""
+
+    manager: "ManagerAgent"
+    today: date
+    calendar_events: "CalendarEventProvider | None" = None
+    now: "datetime | None" = None
+    settings: "Any | None" = None
+
+
+ProactiveSource = Callable[[ProactiveContext], "Iterable[ProactiveEvent]"]
+
+# D-2 (GM campaign): what can make something proactively due is an open,
+# ordered registry - not five blocks in one function. The five sources this
+# project has always had are registered below, in their original order, so the
+# events every existing caller receives are unchanged; a new kind of
+# "something is due" (a condition over observations, GM-02) registers itself
+# and joins every caller - the heartbeat, a live server - with nothing here
+# changing.
+_SOURCES: "dict[str, ProactiveSource]" = {}
+
+
+def register_proactive_source(name: str, source: ProactiveSource) -> None:
+    """Add (or replace) a named source. Registration order is the order
+    events are reported in."""
+    _SOURCES[str(name)] = source
+
+
+def proactive_sources() -> "tuple[str, ...]":
+    return tuple(_SOURCES)
 
 
 def due_proactive_events(
@@ -120,95 +158,135 @@ def due_proactive_events(
     today: date | None = None,
     calendar_events: "CalendarEventProvider | None" = None,
     now: "datetime | None" = None,
+    settings: "Any | None" = None,
 ) -> tuple[ProactiveEvent, ...]:
-    """Every event genuinely due today, from all four sources, as one
-    uniform list - the aggregation this Stage 12 closure (and the
-    General Time/Event Awareness checkpoint's own calendar_item
-    addition) adds, and nothing more: each item below is produced by an
-    existing, unchanged function, normalised into one shape so a single
-    caller (the heartbeat, a live server) can dedup, select a real
-    experience and present over all of them identically.
+    """Every event genuinely due, from every registered source, as one
+    uniform list - so a single caller (the heartbeat, a live server) can
+    dedup, select a real experience and present over all of them
+    identically.
 
     Day/week transitions are deliberately excluded here even though
     ``due_temporal_transitions`` detects them - see that function's own
     docstring for why only new_month/new_year are curated as
     celebration-worthy by default; a caller that wants raw day/week
     awareness for some other purpose calls that function directly.
-    """
-    resolved_today = today if today is not None else utc_today()
-    events: list[ProactiveEvent] = []
 
-    for record in due_proactive_milestones(manager, today=resolved_today):
-        context = record.context or {}
-        event_type = str(context.get("fact_type") or context.get("milestone_type") or record.kind)
+    A source that fails is skipped with a log line rather than costing every
+    other source its events - the same "one failing part never silences the
+    rest" rule the ecosystem's arrival listeners follow.
+    """
+    context = ProactiveContext(
+        manager=manager, today=today if today is not None else utc_today(),
+        calendar_events=calendar_events, now=now, settings=settings,
+    )
+    events: list[ProactiveEvent] = []
+    for name, source in list(_SOURCES.items()):
+        try:
+            events.extend(source(context))
+        except Exception:  # noqa: BLE001 - one source never silences the rest
+            logger.exception("proactive source '%s' failed", name)
+    return tuple(events)
+
+
+def _personal_source(context: ProactiveContext) -> "list[ProactiveEvent]":
+    events = []
+    for record in due_proactive_milestones(context.manager, today=context.today):
+        record_context = record.context or {}
+        event_type = str(record_context.get("fact_type") or record_context.get("milestone_type") or record.kind)
         events.append(
             ProactiveEvent(
                 event_type=event_type,
                 label=event_type.replace("_", " "),
-                dedup_key=f"proactive:{record.id}:{resolved_today.isoformat()}",
+                dedup_key=f"proactive:{record.id}:{context.today.isoformat()}",
                 source="personal",
                 record=record,
             )
         )
+    return events
 
-    for transition in due_temporal_transitions(resolved_today):
+
+def _temporal_source(context: ProactiveContext) -> "list[ProactiveEvent]":
+    events = []
+    for transition in due_temporal_transitions(context.today):
         if transition.event_type not in ("new_month", "new_year"):
             continue
         events.append(
             ProactiveEvent(
                 event_type=transition.event_type,
                 label=transition.label,
-                dedup_key=f"temporal:{transition.event_type}:{resolved_today.isoformat()}",
+                dedup_key=f"temporal:{transition.event_type}:{context.today.isoformat()}",
                 source="temporal",
             )
         )
+    return events
 
-    if calendar_events is not None:
-        for occasion in calendar_events.events_on(resolved_today):
-            events.append(
-                ProactiveEvent(
-                    event_type=occasion.event_type,
-                    label=occasion.label,
-                    dedup_key=f"calendar:{occasion.event_type}:{resolved_today.isoformat()}",
-                    source="calendar",
-                )
+
+def _calendar_source(context: ProactiveContext) -> "list[ProactiveEvent]":
+    if context.calendar_events is None:
+        return []
+    return [
+        ProactiveEvent(
+            event_type=occasion.event_type,
+            label=occasion.label,
+            dedup_key=f"calendar:{occasion.event_type}:{context.today.isoformat()}",
+            source="calendar",
+        )
+        for occasion in context.calendar_events.events_on(context.today)
+    ]
+
+
+def _calendar_item_source(context: ProactiveContext) -> "list[ProactiveEvent]":
+    if context.manager.memory is None:
+        return []
+    events = []
+    for item in all_current_calendar_items(recall=context.manager.memory.recall):
+        if item.recurrence.is_recurring or item.start_date != context.today:
+            continue
+        events.append(
+            ProactiveEvent(
+                event_type=item.topic_key or "calendar_item",
+                label=item.title,
+                dedup_key=f"calendar_item:{item.item_key}:{context.today.isoformat()}",
+                source="calendar_item",
             )
+        )
+    return events
 
-    if manager.memory is not None:
-        for item in all_current_calendar_items(recall=manager.memory.recall):
-            if item.recurrence.is_recurring or item.start_date != resolved_today:
-                continue
-            events.append(
-                ProactiveEvent(
-                    event_type=item.topic_key or "calendar_item",
-                    label=item.title,
-                    dedup_key=f"calendar_item:{item.item_key}:{resolved_today.isoformat()}",
-                    source="calendar_item",
-                )
-            )
 
+def _reminder_source(context: ProactiveContext) -> "list[ProactiveEvent]":
     # Pre-Stage-9 Campaign 6: a pending reminder whose moment has arrived.
     # Only when a caller knows the time (``now``) - a day-only check never
     # guesses which reminders of today are already due.
-    if now is not None and manager.memory is not None:
-        for record in manager.memory.recall(kind="user_task", tags={"reminder"}, limit=500):
-            context = record.context or {}
-            if context.get("status") != "pending" or not context.get("due_at"):
-                continue
-            try:
-                due_at = datetime.fromisoformat(str(context["due_at"]))
-            except ValueError:
-                continue
-            if due_at > now:
-                continue
-            events.append(
-                ProactiveEvent(
-                    event_type="reminder",
-                    label=record.content,
-                    dedup_key=f"reminder:{record.id}:{due_at.isoformat()}",
-                    source="reminder",
-                    record=record,
-                )
+    if context.now is None or context.manager.memory is None:
+        return []
+    events = []
+    for record in context.manager.memory.recall(kind="user_task", tags={"reminder"}, limit=500):
+        record_context = record.context or {}
+        if record_context.get("status") != "pending" or not record_context.get("due_at"):
+            continue
+        try:
+            due_at = datetime.fromisoformat(str(record_context["due_at"]))
+        except ValueError:
+            continue
+        if due_at > context.now:
+            continue
+        events.append(
+            ProactiveEvent(
+                event_type="reminder",
+                label=record.content,
+                dedup_key=f"reminder:{record.id}:{due_at.isoformat()}",
+                source="reminder",
+                record=record,
             )
+        )
+    return events
 
-    return tuple(events)
+
+for _name, _source in (
+    ("personal", _personal_source),
+    ("temporal", _temporal_source),
+    ("calendar", _calendar_source),
+    ("calendar_item", _calendar_item_source),
+    ("reminder", _reminder_source),
+):
+    register_proactive_source(_name, _source)

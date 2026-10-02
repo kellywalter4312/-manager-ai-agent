@@ -636,6 +636,16 @@ class ManagerCapability:
     # any agent's name is consulted anywhere.
     self_contained: bool = False
     self_contained_reason: str = ""
+    # GM campaign: this capability takes a *connection itself* as the object
+    # of a request - watching it, grouping it, supervising work on it - rather
+    # than performing one of its operations. A request that names an equipped
+    # connection used to go to connected_action unconditionally, so "keep an
+    # eye on <connection> every 5 minutes" performed an operation instead of
+    # declaring a watch. With this declared, such a capability's own claim is
+    # asked first; every other connection-naming request still reaches
+    # connected_action exactly as before. A property the capability states
+    # about itself - ManagerSkills names no capability.
+    operates_on_connections: bool = False
 
     def __post_init__(self) -> None:
         if not self.name.strip():
@@ -683,6 +693,16 @@ class ManagerCapability:
 # ---------------------------------------------------------------------------
 # The built-in handler: what the Manager has always done
 # ---------------------------------------------------------------------------
+
+
+def _direct_recall(request: "CapabilityRequest", *args: Any, **kwargs: Any):
+    """GM-13: the person asking about, correcting or forgetting their own
+    memory reaches every sensitivity level - the one read that may go past the
+    gate every indirect use of memory recalls through."""
+    recall = request.recall
+    if getattr(recall, "gated", False):
+        kwargs.setdefault("max_sensitivity", "restricted")
+    return recall(*args, **kwargs)
 
 
 def report_roster(request: CapabilityRequest) -> TaskResult:
@@ -2335,7 +2355,7 @@ def forget_this(request: CapabilityRequest) -> TaskResult:
     # caller decides what to ask about). Phase 11 closure: the raw topic
     # matched any record sharing "the", and every match is forgotten.
     query = distinctive_terms(topic)
-    matches = request.recall(query, limit=5) if query else ()
+    matches = _direct_recall(request, query, limit=5) if query else ()
     if not matches:
         return TaskResult.success(
             request.task, request.own_name,
@@ -2416,7 +2436,7 @@ def recall_memory(request: CapabilityRequest) -> TaskResult:
     # Phase 11 closure: the raw topic matched any record sharing "the" - "what
     # do you remember about the boiler?" answered with a note about a kiln.
     query = distinctive_terms(topic)
-    records = request.recall(query, limit=5) if query else ()
+    records = _direct_recall(request, query, limit=5) if query else ()
     if not records:
         return TaskResult.success(
             request.task, request.own_name,
@@ -3023,7 +3043,7 @@ def correct_memory(request: CapabilityRequest) -> TaskResult:
         # the match is replaced - "update what you remembered about the boiler"
         # deleted a note about a kiln shelf.
         query = distinctive_terms(topic)
-        matches = request.recall(query, kind=MemoryCategory.USER_CONTEXT.value, limit=1) if query else ()
+        matches = _direct_recall(request, query, kind=MemoryCategory.USER_CONTEXT.value, limit=1) if query else ()
         if not matches:
             return TaskResult.success(
                 request.task, request.own_name,
@@ -3060,7 +3080,7 @@ def correct_memory(request: CapabilityRequest) -> TaskResult:
                 request, existing, taught, reply="Got it - I've corrected that.",
                 payload={"handled_by": "correct_memory", "action": "corrected", "topic": existing.topic},
             )
-        target = request.recall(kind=MemoryCategory.USER_CONTEXT.value, limit=1)
+        target = _direct_recall(request, kind=MemoryCategory.USER_CONTEXT.value, limit=1)
         new_record = MemoryRecord(
             content=replacement, kind=MemoryCategory.USER_CONTEXT.value,
             context={"source": "conversation", "corrects": target[0].id if target else None},
@@ -3686,6 +3706,10 @@ def _asks_what_can_be_seen_in_a_moving_medium(text: str) -> bool:
 
 
 def image_analysis_intent(task: Task, participants: Sequence[str] = ()) -> bool:
+    # GM-03: "tell me how many ... are in this video" asks to find and count,
+    # not to describe - perceive_media's own shape, whose name sorts later.
+    if perceive_media_intent(task, participants):
+        return False
     if _marker_present(task.description, IMAGE_ANALYSIS_MARKERS):
         return True
     # Phase 11 closure (this pass): the same ask about a moving medium, in
@@ -4015,6 +4039,145 @@ IMAGE_ANALYSIS = ManagerCapability(
 )
 
 
+# ---------------------------------------------------------------------------
+# GM-03: structured perception of a shared still or recording - how many,
+# where each went, when each arrived, stopped or left. A different question
+# from image_analysis's "what can be seen in this": that one describes, this
+# one finds, follows and counts, through the perception provider axis
+# (``runtime.perception``), in Half Brain as in Full Brain.
+#
+# Recognised by the shape of a structured ask (count / how many / track /
+# follow / where did ... go / which way / when did ... stop|arrive|leave /
+# detect / what moved) about a named visual medium (the shared noun table
+# above, a recording, a media path or an artifact id) - never by a subject.
+# "How many cows", "how many aircraft", "how many parcels" are one ask.
+# ---------------------------------------------------------------------------
+
+_PERCEPTION_ASK = re.compile(
+    r"\bhow\s+many\b|\bcount(?:s|ing)?\b|\bnumber\s+of\b|\b(?:track|follow)(?:s|ing|ed)?\b(?!\s+up)|"
+    r"\bwhere\s+did\b|\bwhich\s+(?:way|direction)\b|\bdetect(?:s|ing)?\b|\bwhat\s+moved\b|"
+    r"\bmoving\s+(?:things|objects|shapes|regions)\b|"
+    r"\bwhen\s+did\b.*\b(?:stop|arriv|leav|left|enter|exit|came|come|appear|disappear|mov|park|start)",
+    re.IGNORECASE,
+)
+# Questions about the medium itself, or about its words, not what is in it.
+_NOT_A_PERCEPTION_ASK = re.compile(
+    r"\bhow\s+many\s+(?:seconds|minutes|hours|frames|words|times|pages|lines|bytes|megabytes|mb)\b|"
+    r"\b(?:say|says|said|mention|mentions|mentioned|word|words|speak|speaks|spoke|language|languages)\b|"
+    r"\bcount\s+(?:me|us|him|her|them)\s+(?:in|out)\b|\bcount\s+on\b|"
+    r"\bfollow(?:ing)?\s+(?:\w+\s+)?(?:instructions|steps|advice|recipe|guide|directions|tutorial|rules|link|along)\b",
+    re.IGNORECASE,
+)
+# The medium is what the ask is *in* - "how many ... in this video", "look at
+# the footage and count ..." - never merely mentioned beside an unrelated
+# question ("I watched the video, how many episodes are left?"), and never a
+# video call or chat.
+_PERCEIVABLE_MEDIUM = re.compile(
+    r"\b(?:in|on|from|through|across|during|within|of|at)\s+(?:this|that|the|my|these|those)\s+"
+    r"(?:[\w'-]+\s+){0,3}?(?:"
+    + "|".join(_VISUAL_NOUNS + ("recording",))
+    + r")s?\b(?!\s+(?:call|calls|chat|conference|meeting|game|link|channel))",
+    re.IGNORECASE,
+)
+_MEDIA_FILE = re.compile(r"\S+\.(?:png|jpe?g|gif|webp|bmp|mp4|webm|mov|mkv|avi)\b", re.IGNORECASE)
+
+
+def perceive_media_intent(task: Task, participants: Sequence[str] = ()) -> bool:
+    text = str(task.description or "")
+    if not _PERCEPTION_ASK.search(text) or _NOT_A_PERCEPTION_ASK.search(text):
+        return False
+    if _IMAGE_CREATION_VERB.search(text):
+        return False
+    return bool(_PERCEIVABLE_MEDIUM.search(text) or _MEDIA_FILE.search(text) or ARTIFACT_ID_PATTERN.search(text))
+
+
+PERCEPTION_TOOL = "perception"
+_ASKED_KIND = re.compile(
+    r"\bhow\s+many\s+((?:[a-z][\w'-]*\s+){0,2}?[a-z][\w'-]*?)\s+(?:are|were|is|was|do|did|can|came|went|moved|landed|"
+    r"passed|entered|left|arrived|there|in|on|at|appear|show)\b|"
+    r"\b(?:count|track|follow|detect)\s+(?:the|all|every|each)?\s*((?:[a-z][\w'-]*\s+){0,2}?[a-z][\w'-]*?)\s+(?:in|on|at|from|through)\b",
+    re.IGNORECASE,
+)
+_GENERIC_KINDS = {"thing", "things", "object", "objects", "moving things", "moving objects", "of them", "them", "it"}
+
+
+def _asked_kind(text: str) -> str:
+    match = _ASKED_KIND.search(text)
+    kind = next((g for g in (match.groups() if match else ()) if g), "")
+    kind = " ".join(kind.split()).lower()
+    return "" if kind in _GENERIC_KINDS else kind
+
+
+def perceive_media(request: CapabilityRequest) -> TaskResult:
+    """Find, follow and count what is in the medium the request points at,
+    through the governed perception tool; say plainly what the backend could
+    not tell (what the things are, when it only finds where)."""
+    text = request.task.description
+    content: dict = {"about": _asked_kind(text)}
+    from src.manager.knowledge import artifact_ids_in, resolve_shared_media_all
+
+    # "This picture" is the person's picture, never the view of it this
+    # capability saved a moment ago - unless that view is named by its id.
+    named_ids = set(artifact_ids_in([text]))
+    described = next((
+        found for found in resolve_shared_media_all(
+            text, tools=request.tools, history=request.history, shared_files=request.shared_files,
+            kinds=("image", "video"), limit=6,
+        )
+        if found.get("technique") != "perception" or found.get("artifact_id") in named_ids
+    ), None)
+    if described is not None:
+        content["artifact_id"] = described.get("artifact_id", "")
+    else:
+        named = _MEDIA_FILE.search(text)
+        if named is None:
+            return TaskResult.failure(
+                request.task, request.own_name,
+                "Which picture or recording? Share it in this conversation (or name it with 'artifact <id>') "
+                "and I'll find, follow and count what is in it.",
+            )
+        content["path"] = named.group(0).strip("'\".,;")
+    if not request.tools.permits(PERCEPTION_TOOL):
+        return TaskResult.failure(request.task, request.own_name,
+                                  "Perception is not installed for me right now, so I can't look for what is in it.")
+    outcome = request.tools.invoke(PERCEPTION_TOOL, {"operation": "analyze", "content": json.dumps(content)})
+    if not outcome.ok:
+        return TaskResult.failure(request.task, request.own_name, f"I couldn't look at it: {outcome.error}")
+    result = json.loads(outcome.output)
+    report = result["report"]
+    lines = [result["text"]]
+    if result.get("picture_artifact_id"):
+        lines.append(f"A picture of what I followed is saved as artifact {result['picture_artifact_id']}.")
+    if result.get("observations_recorded"):
+        lines.append(f"What was seen is kept as {result['observations_recorded']} observation(s) of "
+                     f"'{report['source']}', so you can ask about it or set a condition on it.")
+    return TaskResult.success(
+        request.task, request.own_name, "\n".join(lines),
+        payload={
+            "handled_by": "perceive_media", "backend": report["backend"], "distinct": report["distinct"],
+            "peak_in_view": report["peak_in_view"], "labelled": report["labelled"],
+            "picture_artifact_id": result.get("picture_artifact_id", ""),
+            "source_artifact_id": result.get("source_artifact_id", ""), "events": report["events"],
+            "asked_about": content["about"],
+        },
+    )
+
+
+PERCEIVE_MEDIA = ManagerCapability(
+    name="perceive_media",
+    capabilities=frozenset({"perception", "tracking", "counting"}),
+    handle=perceive_media,
+    description=(
+        "Finds, follows and counts what is in a shared picture or recording - how many, where each went, "
+        "when each arrived, stopped or left - through the perception provider axis (GM-03). Says plainly "
+        "what its backend cannot tell; never names a thing it did not name."
+    ),
+    claims=perceive_media_intent,
+    scoreable=False,
+    completes_request=True,
+)
+
+
 GENERATE_DOCUMENT = ManagerCapability(
     name="generate_document",
     capabilities=frozenset({"report", "document"}),
@@ -4221,6 +4384,12 @@ _HANDOUT_NOUNS = ("handout",)
 
 
 def create_artifact_intent(task: Task, participants: Sequence[str] = ()) -> bool:
+    # GM-06: "make me a dashboard of <things that are observed>" is a live
+    # view bound to data - live_view's own shape - never a static document.
+    from src.manager.ecosystem_capabilities import live_view_intent
+
+    if live_view_intent(task, participants):
+        return False
     if _marker_present(task.description, _HANDOUT_MARKERS) or document_conversion_intent(task.description):
         return True
     if _reordered_subject(task.description, nouns=_HANDOUT_NOUNS) is not None:
@@ -8899,6 +9068,10 @@ def knowledge_intent(task: Task, participants: Sequence[str] = ()) -> bool:
     # when the own-corpus reading was generalized (Phase 11 closure).
     if read_back_intent(task, participants):
         return False
+    # GM-03: "when did the cart stop in the video" is about what the recording
+    # shows over time - perceive_media's own shape - never settled knowledge.
+    if perceive_media_intent(task, participants):
+        return False
     # Agent-autonomous voice selection checkpoint, the identical
     # reasoning general_assistance_intent's own yield-checks already
     # apply: "find me a voice that sounds professional for this
@@ -12477,6 +12650,173 @@ TRANSCRIBE_MEDIA = ManagerCapability(
     scoreable=False,
 )
 
+# ---------------------------------------------------------------------------
+# GM campaign: the ecosystem's general mechanisms, reached from conversation.
+# The claims and handlers live in src/manager/ecosystem_capabilities.py, which
+# holds the one thing they share and nothing above needs: the live vocabulary
+# of what the ecosystem currently observes, watches and is connected to.
+# ---------------------------------------------------------------------------
+
+from src.manager.ecosystem_capabilities import (  # noqa: E402 - defined after everything they build on
+    condition_watch,
+    condition_watch_intent,
+    ecosystem_events,
+    ecosystem_events_intent,
+    entity_groups,
+    entity_groups_intent,
+    observation_history,
+    observation_history_intent,
+    observation_watch,
+    observation_watch_intent,
+    sensitivity_rules,
+    sensitivity_rules_intent,
+    series_analysis,
+    series_analysis_intent,
+    live_view,
+    live_view_intent,
+)
+
+_ECOSYSTEM_STATE_REASON = (
+    "reads or declares the ecosystem's own observed state - one store the orchestrator keeps for the whole "
+    "system, not work inside any specialist's area"
+)
+
+OBSERVATION_HISTORY = ManagerCapability(
+    name="observation_history",
+    capabilities=frozenset({"observation_history"}),
+    handle=observation_history,
+    description=(
+        "What an observed entity was over time - history, a window, min/max/mean/change - from the "
+        "ecosystem's observation store (GM-01). Never a live read; never invents a reading."
+    ),
+    claims=observation_history_intent,
+    scoreable=False,
+    completes_request=True,
+    self_contained=True,
+    self_contained_reason=_ECOSYSTEM_STATE_REASON,
+    operates_on_connections=True,
+)
+
+OBSERVATION_WATCH = ManagerCapability(
+    name="observation_watch",
+    capabilities=frozenset({"observation_watch"}),
+    handle=observation_watch,
+    description=(
+        "Starts or stops watching something a connection can safely read - sampled on a schedule, or "
+        "listened to when it streams - so its history is kept (GM-01, GM-04)."
+    ),
+    claims=observation_watch_intent,
+    scoreable=False,
+    completes_request=True,
+    self_contained=True,
+    self_contained_reason=_ECOSYSTEM_STATE_REASON,
+    operates_on_connections=True,
+)
+
+CONDITION_WATCH = ManagerCapability(
+    name="condition_watch",
+    capabilities=frozenset({"condition_watch"}),
+    handle=condition_watch,
+    description=(
+        "\"Tell me when <something observed> goes above/below/stops reporting ...\" and \"if <...>, <do "
+        "something>\": a declared condition over observations that notifies, or proposes an action and "
+        "waits for a yes - never acts alone (GM-02). Also lists and cancels conditions."
+    ),
+    claims=condition_watch_intent,
+    scoreable=False,
+    completes_request=True,
+    self_contained=True,
+    self_contained_reason=_ECOSYSTEM_STATE_REASON,
+    operates_on_connections=True,
+)
+
+LIVE_VIEW = ManagerCapability(
+    name="live_view",
+    capabilities=frozenset({"live_view"}),
+    handle=live_view,
+    description=(
+        "Live views - dashboards and operational screens whose widgets are bound to observed readings, their "
+        "history (optionally through a series technique), groups, events or what a camera saw, redrawn as the "
+        "data changes; served at live/<view> and as a workspace panel (GM-06). Views only ever read."
+    ),
+    claims=live_view_intent,
+    scoreable=False,
+    completes_request=True,
+    self_contained=True,
+    self_contained_reason=_ECOSYSTEM_STATE_REASON,
+    operates_on_connections=True,
+)
+
+SERIES_ANALYSIS = ManagerCapability(
+    name="series_analysis",
+    capabilities=frozenset({"series_analysis"}),
+    handle=series_analysis,
+    description=(
+        "What can be found in a history of readings - smoothing, rate of change, peaks and dips, unusual readings, "
+        "changes of level, repeating patterns, and how two histories relate - through the governed series "
+        "technique registry (GM-09). Measurements, never invention; refuses when there is too little to say."
+    ),
+    claims=series_analysis_intent,
+    scoreable=False,
+    completes_request=True,
+    self_contained=True,
+    self_contained_reason=_ECOSYSTEM_STATE_REASON,
+    operates_on_connections=True,
+)
+
+ENTITY_GROUPS = ManagerCapability(
+    name="entity_groups",
+    capabilities=frozenset({"entity_groups"}),
+    handle=entity_groups,
+    description=(
+        "Groups of things that belong together across different connections (a room, a line, a field): "
+        "declare and reshape them, read all their members at once with group-wide aggregates, and act on "
+        "every member - each step listed and confirmed first (GM-15)."
+    ),
+    claims=entity_groups_intent,
+    scoreable=False,
+    completes_request=True,
+    self_contained=True,
+    self_contained_reason=_ECOSYSTEM_STATE_REASON,
+    # A group's members are connections; naming one never means running one
+    # of its operations directly - a group action goes through its own
+    # confirmation listing every member's step.
+    operates_on_connections=True,
+)
+
+SENSITIVITY_RULES = ManagerCapability(
+    name="sensitivity_rules",
+    capabilities=frozenset({"sensitivity_rules"}),
+    handle=sensitivity_rules,
+    description=(
+        "The owner's rules for handling personal information: which words, sources and kinds of record are "
+        "personal, sensitive or restricted, and how long each level is kept (GM-13)."
+    ),
+    claims=sensitivity_rules_intent,
+    scoreable=False,
+    completes_request=True,
+    authority="manager",
+    authority_reason="how the owner's personal information is handled is the owner's own governance, set through the orchestrator",
+    self_contained=True,
+    self_contained_reason="declares the owner's own policy over every agent's information - no specialist's area",
+    # "mark readings from <connection> as sensitive" takes the connection as
+    # its object; it never performs one of its operations.
+    operates_on_connections=True,
+)
+
+ECOSYSTEM_EVENTS = ManagerCapability(
+    name="ecosystem_events",
+    capabilities=frozenset({"ecosystem_events"}),
+    handle=ecosystem_events,
+    description="What the declared conditions have raised - recent events and any proposal awaiting a yes (GM-02).",
+    claims=ecosystem_events_intent,
+    scoreable=False,
+    completes_request=True,
+    self_contained=True,
+    self_contained_reason=_ECOSYSTEM_STATE_REASON,
+)
+
+
 MANAGER_CAPABILITIES: dict[str, ManagerCapability] = {
     SELF_DESCRIPTION.name: SELF_DESCRIPTION,
     ROSTER_REPORT.name: ROSTER_REPORT,
@@ -12492,6 +12832,8 @@ MANAGER_CAPABILITIES: dict[str, ManagerCapability] = {
     CORRECT_MEMORY.name: CORRECT_MEMORY,
     LIVE_INFORMATION.name: LIVE_INFORMATION,
     IMAGE_ANALYSIS.name: IMAGE_ANALYSIS,
+    # GM-03: structured perception - find, follow, count.
+    PERCEIVE_MEDIA.name: PERCEIVE_MEDIA,
     # Pre-Stage-9 Campaign 8: was this image edited or generated - evidence only.
     IMAGE_AUTHENTICITY.name: IMAGE_AUTHENTICITY,
     # Whole-ecosystem campaign: image transformation/enhancement/reconstruction
@@ -12550,6 +12892,15 @@ MANAGER_CAPABILITIES: dict[str, ManagerCapability] = {
     CREATE_3D_MODEL.name: CREATE_3D_MODEL,
     # Pre-Stage-9 Campaign 9: translation, named and honest.
     TRANSLATE.name: TRANSLATE,
+    # GM campaign.
+    OBSERVATION_HISTORY.name: OBSERVATION_HISTORY,
+    OBSERVATION_WATCH.name: OBSERVATION_WATCH,
+    CONDITION_WATCH.name: CONDITION_WATCH,
+    ECOSYSTEM_EVENTS.name: ECOSYSTEM_EVENTS,
+    SENSITIVITY_RULES.name: SENSITIVITY_RULES,
+    ENTITY_GROUPS.name: ENTITY_GROUPS,
+    SERIES_ANALYSIS.name: SERIES_ANALYSIS,
+    LIVE_VIEW.name: LIVE_VIEW,
 }
 
 # Used when a task reaches the Manager without matching any handler's words.

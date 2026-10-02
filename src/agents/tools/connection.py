@@ -70,11 +70,17 @@ class ConnectionActionTool(Tool):
         operation: str,
         description: str,
         parameters: "tuple" = (),
+        observe: "object | None" = None,
     ) -> None:
         self._connection = connection
         self._operation = operation
         self._description = description
         self._parameters = tuple(parameters)
+        # GM-01: told of every successful answer, so a reading a person asked
+        # for joins the history of an operation someone declared worth
+        # watching - the same observation a scheduled sample would have kept.
+        # None (the default) observes nothing.
+        self._observe = observe
 
     @property
     def spec(self) -> ToolSpec:
@@ -89,4 +95,9 @@ class ConnectionActionTool(Tool):
         result = self._connection.execute(self._operation, **arguments)
         if not result.ok:
             raise RuntimeError(result.detail or f"{self._operation} did not succeed")
+        if self._observe is not None:
+            try:
+                self._observe(self._connection.name, self._operation, dict(arguments), result)
+            except Exception:  # noqa: BLE001 - keeping a history never costs the answer
+                pass
         return result.detail or f"{self._operation} succeeded"

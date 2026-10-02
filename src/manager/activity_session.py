@@ -228,6 +228,12 @@ class PendingConfirmation:
     is the question actually shown to the person, kept alongside the
     raw fields so a caller never has to reconstruct it to check what
     was asked.
+
+    GM-15 adds a third shape to the same gate, never a second gate: an
+    action on a *group* is ``group`` (its name) plus ``steps`` - one
+    ``{"connection", "operation", "params"}`` per member, every one of them
+    listed in ``description`` - and a "yes" runs each through its own
+    connection, exactly as a single connected action runs.
     """
 
     operation: str
@@ -236,14 +242,18 @@ class PendingConfirmation:
     content: str = ""
     connection: str = ""
     params: "dict[str, str]" = field(default_factory=dict)
+    group: str = ""
+    steps: "tuple[dict, ...]" = ()
 
     def __post_init__(self) -> None:
         if not str(self.operation).strip():
             raise ValueError("a PendingConfirmation must name its operation")
         if not str(self.description).strip():
             raise ValueError("a PendingConfirmation must have a description")
-        if not str(self.party).strip() and not str(self.connection).strip():
-            raise ValueError("a PendingConfirmation must name its party or its connection")
+        if self.steps and not str(self.group).strip():
+            raise ValueError("a PendingConfirmation with steps must name its group")
+        if not str(self.party).strip() and not str(self.connection).strip() and not self.steps:
+            raise ValueError("a PendingConfirmation must name its party, its connection or its group's steps")
 
 
 @dataclass

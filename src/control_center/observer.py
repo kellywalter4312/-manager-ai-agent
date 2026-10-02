@@ -156,13 +156,22 @@ def _memory_view(agent_name: str, memory: Any, owner: str) -> MemoryView:
             MemoryRecordView(
                 when=record.created_at,
                 kind=str(getattr(record, "kind", "") or "note"),
-                content=record.content,
+                # GM-13: a management surface shows a sensitive record redacted.
+                content=_shown(record),
                 tags=tuple(sorted(getattr(record, "tags", ()) or ())),
             )
             for record in records
         ),
         sampled=len(records),
     )
+
+
+def _shown(record: Any) -> str:
+    """A record's content as a management surface shows it (GM-13): a
+    sensitive or restricted record is named, never displayed."""
+    from src.services.memory.sensitivity import level_of, redact
+
+    return redact(str(getattr(record, "content", "")), level_of(record))
 
 
 def _tool_views(tools: Any) -> tuple[ToolView, ...]:
@@ -706,7 +715,7 @@ class ControlCenter:
         return tuple(
             TaskItemView(
                 record_id=record.id,
-                content=record.content,
+                content=_shown(record),
                 status=str((record.context or {}).get("status") or "pending"),
                 describe=describe_task(record),
             )
@@ -792,7 +801,7 @@ class ControlCenter:
             tasks = tuple(
                 TaskItemView(
                     record_id=record.id,
-                    content=record.content,
+                    content=_shown(record),
                     status=str((record.context or {}).get("status") or "pending"),
                     describe=describe_task(record),
                 )

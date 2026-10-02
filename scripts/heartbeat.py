@@ -191,6 +191,25 @@ def build_runner(settings: Settings, enabled: bool, dry_run: bool) -> HeartbeatR
     )
 
 
+def check_ecosystem(settings: Settings, *, clock: Callable[[], datetime] = utc_now) -> str:
+    """GM campaign - one ecosystem tick on this wake: sample the watches that
+    are due, evaluate every condition (which is how silence is ever noticed),
+    and run whatever other step a mechanism registered. Beside the email cycle
+    and the proactive check, never inside them - the same "second, small,
+    additive step" reasoning ``check_proactive_events`` gives. Conditions that
+    fire here are delivered by that proactive check a moment later, through
+    the pipeline every other due thing uses."""
+    from scripts.control_center import governed_adapter_versions
+    from src.services.automation.tick import run_ecosystem_tick
+
+    accounts = load_credential_store(DEFAULT_ACCOUNTS_PATH)
+    runtime = build_runtime(
+        settings, accounts=accounts,
+        connection_adapter_version=governed_adapter_versions(load_governed_config(DEFAULT_CONFIG_PATH)),
+    )
+    return run_ecosystem_tick(runtime.ecosystem, runtime.connections, now=clock()).describe()
+
+
 def check_proactive_events(
     settings: Settings, dry_run: bool, *, clock: Callable[[], datetime] = utc_now,
 ) -> str:
@@ -246,7 +265,9 @@ def check_proactive_events(
 
     manager = build_manager_factory(settings, dry_run)(None)
     calendar_events = build_calendar_event_provider(settings)
-    due = due_proactive_events(manager, today=today, calendar_events=calendar_events, now=now)
+    import src.manager.proactive_conditions  # noqa: F401 - GM-02: fired conditions are a registered source
+
+    due = due_proactive_events(manager, today=today, calendar_events=calendar_events, now=now, settings=settings)
     if not due:
         return "proactive events: none due today"
 
@@ -374,6 +395,7 @@ def main(argv: list[str] | None = None) -> int:
             while True:
                 print(runner.tick().describe())
                 if enabled:
+                    print(check_ecosystem(settings))
                     print(check_proactive_events(settings, args.dry_run))
                 time.sleep(interval)
         except KeyboardInterrupt:
@@ -387,6 +409,7 @@ def main(argv: list[str] | None = None) -> int:
     # proactive-milestone check is exactly the kind of autonomous
     # behaviour that rule already covers.
     if enabled:
+        print(check_ecosystem(settings))
         print(check_proactive_events(settings, args.dry_run))
     return 0 if result.status is not TickStatus.FAILED else 1
 

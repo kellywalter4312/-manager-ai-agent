@@ -221,7 +221,7 @@ class Session:
             "utterances": [
                 {
                     "speaker": u.speaker,
-                    "text": u.text,
+                    "text": _kept_text(u),
                     "when": u.when.isoformat(),
                     "addressed": u.addressed,
                     "detail": (detail_of or _plain)(u.detail),
@@ -324,6 +324,21 @@ class Session:
 
 def _participant(data: dict) -> Participant:
     return Participant(str(data["name"]), ParticipantKind(data.get("kind", ParticipantKind.AGENT.value)))
+
+
+def _kept_text(utterance: Any) -> str:
+    """What of an utterance a saved session keeps (GM-13): its words - unless
+    the person marked it, or the owner's rules made it, sensitive or above;
+    then only that something was said. The live room still holds the words
+    for as long as it is open."""
+    detail = utterance.detail if isinstance(utterance.detail, dict) else {}
+    level = str(detail.get("sensitivity") or "")
+    if level:
+        from src.core.sensitivity import rank
+
+        if rank(level) >= rank("sensitive"):
+            return f"[{level} - not kept in the saved session]"
+    return utterance.text
 
 
 def _plain(detail: Any) -> Any:

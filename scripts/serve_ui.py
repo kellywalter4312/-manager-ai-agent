@@ -339,7 +339,74 @@ def route(path: str, system: LiveSystem) -> tuple[int, bytes, str]:
         return _route_artifact_file(path, system)
     if path.startswith("/surface/"):
         return route_surface(path, system)
+    if path.split("?", 1)[0] == "/live.js":
+        return 200, LIVE_RENDERER.read_bytes(), "text/javascript; charset=utf-8"
+    if path.split("?", 1)[0] in ("/live", "/live/") or path.startswith("/live/"):
+        return route_live(path, system)
     return 404, b"not found", "text/plain; charset=utf-8"
+
+
+# GM-06: the one renderer every surface draws a live view with.
+LIVE_RENDERER = Path(__file__).resolve().parent.parent / "ui" / "live_view.js"
+
+_LIVE_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{title}</title>
+<style>
+:root{{color-scheme:light dark;--bg:#f6f7f9;--ink:#15171a}}
+@media (prefers-color-scheme: dark){{:root{{--bg:#111316;--ink:#e8eaed}}}}
+body{{margin:0;padding:16px;background:var(--bg);color:var(--ink);font:14px/1.4 system-ui,sans-serif}}
+</style></head>
+<body><main data-live-view="{view_id}" data-live-base="../"></main>
+<script src="../live.js"></script>
+<script>AlfredLive.watch({view_json}, "../");</script>
+</body></html>
+"""
+
+
+def route_live(path: str, system: LiveSystem) -> tuple[int, bytes, str]:
+    """GM-06 - live data-bound views, generic over what they show:
+
+        GET /live/                    every declared view
+        GET /live/<view>.json         the view resolved now (the one JSON every surface draws)
+        GET /live/<view>              a page showing it, redrawn as the data changes
+        GET /live/look/<watch>.png    the latest picture a camera watch's perception saw
+
+    Resolving only reads - never an operation a connection says changes
+    something (``src/services/views/live_views.py``)."""
+    from html import escape
+    from urllib.parse import unquote
+
+    from src.services.views.live_views import resolve_view
+
+    def answer(status: int, data: dict) -> tuple[int, bytes, str]:
+        return status, json.dumps(data, default=str).encode("utf-8"), "application/json; charset=utf-8"
+
+    ecosystem = getattr(system.runtime, "ecosystem", None)
+    if ecosystem is None:
+        return answer(404, {"error": "this system has no ecosystem stores"})
+    rest = unquote(path.split("?", 1)[0][len("/live"):].strip("/"))
+    if not rest:
+        views = ecosystem.views.all()
+        items = "".join(f'<li><a href="{escape(v.view_id)}">{escape(v.title)}</a> - {escape(v.describe())}</li>' for v in views)
+        page = f"<!doctype html><meta charset=utf-8><title>Live views</title><h1>Live views</h1><ul>{items or '<li>none declared yet</li>'}</ul>"
+        return 200, page.encode("utf-8"), "text/html; charset=utf-8"
+    if rest.startswith("look/") and rest.endswith(".png"):
+        from src.services.perception.frames import look_path
+
+        watch = ecosystem.watches.get(rest[len("look/"):-len(".png")])
+        picture = look_path(ecosystem, watch.watch_id) if watch is not None else None
+        if picture is None or not picture.is_file():
+            return 404, b"nothing seen yet", "text/plain; charset=utf-8"
+        return 200, picture.read_bytes(), "image/png"
+    wants_json = rest.endswith(".json")
+    view = ecosystem.views.get(rest[: -len(".json")] if wants_json else rest)
+    if view is None:
+        return answer(404, {"error": f"there is no live view called '{rest}'"})
+    if wants_json:
+        return answer(200, resolve_view(view, ecosystem, system.runtime.connections))
+    page = _LIVE_PAGE.format(title=escape(view.title), view_id=escape(view.view_id), view_json=json.dumps(view.view_id))
+    return 200, page.encode("utf-8"), "text/html; charset=utf-8"
 
 
 def route_surface(path: str, system: LiveSystem) -> tuple[int, bytes, str]:
@@ -1558,6 +1625,29 @@ def route_command(
     return 200, result.encode("utf-8"), "text/plain; charset=utf-8"
 
 
+def deliver_condition_event(system: LiveSystem, event) -> bool:
+    """GM-02: a condition that fired while the page is open is said into this
+    server's one room (``deliver_event`` in src/manager/proactive_conditions.py
+    owns how), under this server's one lock."""
+    from src.manager.proactive_conditions import deliver_event
+
+    return deliver_event(system.manager, system.conversation, event,
+                         ecosystem=getattr(system.centre.runtime, "ecosystem", None), lock=system.lock)
+
+
+def start_ecosystem_ticker(system: LiveSystem, *, interval: float = 15.0):
+    """GM campaign: while this server runs, the ecosystem keeps its own time -
+    due watches are sampled and every condition is checked every ``interval``
+    seconds (``src/services/automation/tick.py``), and a condition that fires
+    is delivered into the open conversation at once. Returns the ticker."""
+    from src.services.automation.tick import BackgroundTicker
+
+    ecosystem = getattr(system.centre.runtime, "ecosystem", None)
+    if ecosystem is not None:
+        ecosystem.engine.subscribe(lambda event: deliver_condition_event(system, event))
+    return BackgroundTicker(lambda: system.centre.runtime, interval=interval).start()
+
+
 class LiveServer(ThreadingHTTPServer):
     """A `ThreadingHTTPServer` carrying exactly one thing: the one system
     every request reads or acts on."""
@@ -1790,11 +1880,15 @@ def main(argv: list[str] | None = None) -> int:
         print(describe_trust_steps(ca, info))
 
     print(f"serving {scheme}://{args.host}:{args.port}/  (Ctrl+C to stop)")
+    # GM campaign: watches, conditions and every other due step keep running
+    # while the page is served, and fired conditions reach the conversation.
+    ticker = start_ecosystem_ticker(system, interval=float(system.runtime.settings.ecosystem_tick_seconds))
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        ticker.stop()
         httpd.server_close()
     return 0
 

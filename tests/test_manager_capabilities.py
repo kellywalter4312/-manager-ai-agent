@@ -219,6 +219,9 @@ class TestHandlersAreSelectedThroughTheRegistry:
             # state - four handlers, one per operation, each recognised by
             # its own marker shape rather than the ordinary word "task".
             "complete_task",
+            # GM campaign: a declared condition over observations that
+            # notifies, or proposes and waits for a yes (GM-02).
+            "condition_watch",
             "connected_action",
             # Phase 2 (Memory & Personal Context): replaces or invalidates
             # an existing memory when the user explicitly corrects it -
@@ -242,6 +245,10 @@ class TestHandlersAreSelectedThroughTheRegistry:
             # Phase 10: opens, continues, concludes or cancels a discussion
             # among the room's participants (Manager-only).
             "discussion",
+            # GM campaign: what declared conditions have raised (GM-02).
+            "ecosystem_events",
+            # GM-15: groups of things across connections.
+            "entity_groups",
             "forget",
             "general_assistance",
             # Phase 3 (Knowledge, Research & Live Information): composes a
@@ -273,13 +280,21 @@ class TestHandlersAreSelectedThroughTheRegistry:
             "list_recordings",
             "list_tasks",
             "live_information",
+            # GM-06: live views bound to observed data.
+            "live_view",
             "media_production",
             "milestone_recognition",
+            # GM campaign: what an observed entity was over time, and
+            # declaring what to watch (GM-01).
+            "observation_history",
+            "observation_watch",
             "open_conversation",
             # Phase 10: excusing a participant from the room, the mirror of
             # invitation (Manager-only).
             "participant_dismissal",
             "participant_invitation",
+            # GM-03: find, follow and count what is in a picture or recording.
+            "perceive_media",
             # Generalized user knowledge/personal-context checkpoint: a
             # self-declared, updatable fact about the person - a skill,
             # a schedule, an organisational context - so a later
@@ -320,6 +335,10 @@ class TestHandlersAreSelectedThroughTheRegistry:
             # real, currently-available voice matching a requested
             # language/accent, never overriding an explicit user choice.
             "select_voice",
+            # GM campaign: the owner's rules for personal information (GM-13).
+            "sensitivity_rules",
+            # GM-09: what can be found in a history of readings.
+            "series_analysis",
             "small_talk",
             # Real Audio Recording/Capture checkpoint: opens/stops a real
             # recording session - never a capture itself (only a browser

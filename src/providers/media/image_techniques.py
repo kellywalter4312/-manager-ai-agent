@@ -380,3 +380,13 @@ def compare_images(first: bytes, second: bytes) -> ImageComparison:
         first_brightness=float(a.mean()),
         second_brightness=float(b.mean()),
     )
+
+
+# GM-09: images are one technique family among others - governed through the
+# one family handler in Ecosystem Evolution (``src/core/techniques.py``).
+from src.core.techniques import TechniqueFamily, register_technique_family  # noqa: E402
+
+register_technique_family(TechniqueFamily(
+    "image_technique", image_techniques, validate_technique_value,
+    "how a real image can be transformed, enhanced or reconstructed",
+))

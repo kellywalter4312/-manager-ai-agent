@@ -32,6 +32,31 @@ from src.core.contracts import Task
 SHARED_CONTEXT_KEY = "shared_context"
 SHARED_PREFIX = "shared"
 
+# GM-13: how carefully a note's words are to be handled, by the owner's own
+# rules - bound by the composition root (``bind_note_screen``). A note above
+# "personal" never travels to another agent: it is withheld here, at the one
+# carrier between agents, whoever built it.
+_SCREEN: "list" = []
+
+
+def bind_note_screen(screen) -> None:
+    """``screen(text) -> level`` - the owner's sensitivity classification."""
+    _SCREEN[:] = [screen]
+
+
+def _screened(note: "SharedNote") -> "SharedNote":
+    if not _SCREEN:
+        return note
+    from src.core.sensitivity import rank
+
+    try:
+        level = _SCREEN[0](note.content)
+    except Exception:  # noqa: BLE001 - an unreadable rule never lets content through
+        level = "restricted"
+    if rank(level) >= rank("sensitive"):
+        return replace(note, content=f"[withheld - {level} information stays with the agent that holds it]")
+    return note
+
 
 @dataclass(frozen=True)
 class SharedNote:
@@ -66,7 +91,7 @@ def with_shared_context(task: Task, notes: Iterable[SharedNote]) -> Task:
     """``task`` carrying ``notes`` as its shared context. A new Task - a Task
     is frozen, and its id stays the same so the work is still one piece of
     work. Notes already on the task are kept, then these are added."""
-    added = tuple(n for n in notes if isinstance(n, SharedNote))
+    added = tuple(_screened(n) for n in notes if isinstance(n, SharedNote))
     if not added:
         return task
     payload = dict(task.payload)

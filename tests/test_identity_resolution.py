@@ -297,7 +297,11 @@ class TestThisIsNotASecondRouter:
         recording") by its own marker shape rather than the ordinary
         word "record" ("that's a new personal record"), the Real Audio
         Recording/Capture checkpoint - and every other request is still
-        settled by word overlap."""
+        settled by word overlap. The GM campaign adds five more, each
+        recognising an ask about what is observed, watched, raised or
+        protected by its own shape (a named connection or entity plus a
+        watch/threshold/history/sensitivity marker) rather than by ordinary
+        words like "watch" or "private"."""
         from src.manager.capabilities import MANAGER_CAPABILITIES
 
         claiming = sorted(c.name for c in MANAGER_CAPABILITIES.values() if c.claims)
@@ -309,7 +313,7 @@ class TestThisIsNotASecondRouter:
             # Pre-Stage-9 Campaign 9: coaching and translation are each
             # recognised by their own request shape.
             "coach",
-            "communication", "complete_task", "connected_action", "correct_memory",
+            "communication", "complete_task", "condition_watch", "connected_action", "correct_memory",
             "create_3d_model", "create_artifact",
             "create_diagram",
             "create_task", "current_datetime",
@@ -317,6 +321,8 @@ class TestThisIsNotASecondRouter:
             # by a discussion word followed by a participant's name or the room
             # - never by "discuss" or "meeting" alone (conversation, calendar).
             "discussion",
+            "ecosystem_events",
+            "entity_groups",
             "forget",
             "general_assistance", "generate_document", "image_analysis",
             # Pre-Stage-9 Campaign 8: an authenticity question is recognised by
@@ -327,11 +333,18 @@ class TestThisIsNotASecondRouter:
             # governed technique's own phrase) - never by "image" alone.
             "image_comparison", "image_transform",
             "knowledge", "list_recordings", "list_tasks", "live_information",
+            # GM-06: live views bound to observed data.
+            "live_view",
             "media_production",
             "milestone_recognition",
+            "observation_history", "observation_watch",
             # Phase 10: "dismiss/excuse <agent>", the name directly after the verb.
             "participant_dismissal",
-            "participant_invitation", "personal_context",
+            "participant_invitation",
+            # GM-03: a structured ask (how many / track / where did ... go)
+            # about a named picture or recording, never a subject word.
+            "perceive_media",
+            "personal_context",
             # Whole-ecosystem campaign: guidance is recognised by its asking
             # shapes (a situation, a week to plan, a life question), never a topic.
             "personal_guidance",
@@ -346,6 +359,9 @@ class TestThisIsNotASecondRouter:
             "roster_report",
             "run_artifact",
             "select_voice",
+            "sensitivity_rules",
+            # GM-09: what can be found in a history of readings.
+            "series_analysis",
             "small_talk", "start_recording", "stop_recording", "temporal_derivation", "transcribe_media", "translate", "translate_media", "update_task", "workspace_navigation",
         ]
 

@@ -117,6 +117,20 @@ def _try_resolve_confirmation(
 
     target = pending.connection or pending.party
 
+    if pending.steps:
+        # GM-15: one confirmation covering an action on every member of a group.
+        if _says(reply, _CANCEL_WORDS):
+            sessions.clear_confirmation(agent_key)
+            return TaskResult.success(
+                request.task, request.own_name,
+                f"Okay, I won't do that to the group '{pending.group}' - nothing was changed.",
+                payload={"handled_by": "entity_groups", "group": pending.group, "confirmed": False},
+            )
+        if not reply.endswith("?") and _says(reply, _CONFIRM_WORDS):
+            sessions.clear_confirmation(agent_key)
+            return _run_group_steps(request, pending)
+        return None
+
     if _says(reply, _CANCEL_WORDS):
         sessions.clear_confirmation(agent_key)
         return TaskResult.success(
@@ -158,6 +172,39 @@ def _try_resolve_confirmation(
         return _communication_send(request, pending.party, pending.content)
 
     return None
+
+
+def _run_group_steps(request, pending: PendingConfirmation) -> TaskResult:
+    """Every confirmed step of a group action, each through its own
+    connection's governed tool (``_execute_connected_operation``, the one
+    place a connected operation is invoked) - one member's failure never
+    stops the rest, and every outcome is reported."""
+    from src.manager.capabilities import _execute_connected_operation
+
+    resolver = request.connections
+    lines, done, failed = [], 0, 0
+    for step in pending.steps:
+        name, operation = str(step.get("connection", "")), str(step.get("operation", ""))
+        connection = resolver.get(name) if resolver is not None else None
+        if connection is None or connection.name != name:
+            failed += 1
+            lines.append(f"  {name}: not a connection I'm equipped with now - not done")
+            continue
+        outcome = _execute_connected_operation(request, connection, operation,
+                                               {k: str(v) for k, v in dict(step.get("params") or {}).items()})
+        if outcome.succeeded:
+            done += 1
+            lines.append(f"  {name} {operation}: done - {' '.join(str(outcome.output).split())[:160]}")
+        else:
+            failed += 1
+            lines.append(f"  {name} {operation}: FAILED - {outcome.error or outcome.output}")
+    head = f"The group '{pending.group}': {done} of {len(pending.steps)} done" + (f", {failed} not" if failed else "") + "."
+    text = "\n".join([head, *lines])
+    payload = {"handled_by": "entity_groups", "group": pending.group, "confirmed": True, "done": done,
+               "failed": failed, "steps": [dict(s) for s in pending.steps]}
+    if done:
+        return TaskResult.success(request.task, request.own_name, text, payload=payload)
+    return TaskResult.failure(request.task, request.own_name, text)
 
 
 def _credited(result: TaskResult, capability: str) -> TaskResult:
@@ -235,7 +282,8 @@ def guided_interaction_response(request) -> "TaskResult | None":
     if confirmation is not None:
         resolved = _try_resolve_confirmation(request, confirmation, sessions, agent_key)
         if resolved is not None:
-            return _credited(resolved, "connected_action" if confirmation.connection else "communication")
+            return _credited(resolved, "entity_groups" if confirmation.steps
+                             else "connected_action" if confirmation.connection else "communication")
         # Neither a clear yes nor a clear no - leave it pending, the
         # person may simply be saying something else first; fall through
         # exactly as an unresolved clarification already does below.

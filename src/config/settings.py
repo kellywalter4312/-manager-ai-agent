@@ -286,6 +286,10 @@ class Settings:
     # Universal voice translation: the offline translation engine ("null" |
     # "argos"), chosen through the Control Center category translation_provider.
     translation: str = "null"
+    # GM-03: how things are found, followed and counted in a still or a
+    # recording ("motion" | "regions" | "local_vision" | "null"), chosen
+    # through the Control Center category perception_provider.
+    perception: str = "motion"
     # How a due reminder reaches the person when no page is open ("null" |
     # "windows"), chosen through the Control Center category
     # desktop_notification_provider; used by the heartbeat.
@@ -337,6 +341,20 @@ class Settings:
     # text notes. An artifact has a stable identity and a real version
     # chain; a document_generation file does not.
     artifacts_dir: str = "data/artifacts"
+
+    # GM campaign: the one root every owner-declared ecosystem store lives
+    # under - observations and what is watched (GM-01), conditions and the
+    # events they raise (GM-02), groups (GM-15), zones and calibrations
+    # (GM-05), live bindings (GM-06), capture policy (GM-12), deployment
+    # destinations (GM-08), input bindings and anchors (GM-10), supervised
+    # device tasks (GM-11) and sensitivity rules (GM-13). A Settings path,
+    # not a module-level default, so a harness or a test that builds the
+    # system elsewhere isolates all of it by setting one field (P11X-03).
+    ecosystem_dir: str = "data/ecosystem"
+    # How often (seconds) the live server's background ecosystem tick runs
+    # (src/services/automation/tick.py). A watch's own interval still decides
+    # whether it is due; this only decides how often "is anything due?" is asked.
+    ecosystem_tick_seconds: str = "15"
 
     # Multimodal workspace/artifact checkpoint: which real engine
     # ArtifactProductionTool renders a document artifact's PDF export
@@ -426,6 +444,11 @@ class Settings:
             raise ValueError("Settings.translation must not be empty")
         object.__setattr__(self, "translation", translation)
 
+        perception = str(self.perception or "").strip().lower()
+        if not perception:
+            raise ValueError("Settings.perception must not be empty")
+        object.__setattr__(self, "perception", perception)
+
         whisper_model = self.whisper_model.strip()
         if not whisper_model:
             raise ValueError("Settings.whisper_model must not be empty")
@@ -500,6 +523,11 @@ class Settings:
         if not memory_dir:
             raise ValueError("Settings.memory_dir must not be empty")
         object.__setattr__(self, "memory_dir", memory_dir)
+
+        ecosystem_dir = self.ecosystem_dir.strip()
+        if not ecosystem_dir:
+            raise ValueError("Settings.ecosystem_dir must not be empty")
+        object.__setattr__(self, "ecosystem_dir", ecosystem_dir)
 
         zone = " ".join(self.timezone.split())
         if not zone:
