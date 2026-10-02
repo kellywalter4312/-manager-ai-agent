@@ -13491,3 +13491,62 @@ which is the evidence behind P11Z-11's disposition. Production `data/` was
 identical by md5 across every run; since this pass began, the tree differs only
 in the ledger, this document and the four files the governed commands wrote.
 
+
+---
+
+## 55. Handoff snapshot and architectural freeze (2026-10-02)
+
+This is a handoff, not a campaign. Nothing new was built. The repository was
+put into a clean, truthful and recoverable state, and the present is now
+described in one place, **`CURRENT_STATE.md`**. That file overrides any
+older section of this document wherever the two disagree about *today*.
+
+### What was found
+
+- Phase 11 was already committed (`f8892f5`, 2026-09-30) and is closed.
+  `capability.general_conversation-1` was resolved on 2026-09-28 (P11-G-13).
+  Production config, re-read today, holds only `"6"` (md5 `d2dad4e9...`).
+  No production mutation was needed.
+- On top of `f8892f5` a later session had begun the owner-approved GM
+  sequence (P11R) and left 66 uncommitted files. It updated neither the
+  ledger nor this document. At the owner's instruction (2026-10-02) all of
+  it is preserved **unmerged** on branch `gm-mechanisms-wip`, with its own
+  status file `GM_WORK_IN_PROGRESS.md`. It is not Phase 11 work and is not
+  represented on `main` as implemented.
+- Local `main` was 126 commits ahead of `origin/main`; none of that work had
+  been pushed to GitHub. It is pushed with this section.
+
+### What was verified, stated exactly
+
+- `gm-mechanisms-wip` (`84eaa0f`), exact tree: 8830 passed, 6 failed, 2
+  skipped. All 132 GM tests pass. The 6 failures are known
+  architecture/integration issues and are deliberately not fixed.
+- `main`: full suite started on clean main, reached 38% with 0 failures and
+  2 skips, then was stopped because of critically low memory on the 8 GB
+  development machine. **No complete passing run of main was obtained on
+  2026-10-02.**
+- Half Brain: re-verified at the one-shot CLI door from a clean copy of
+  main (details in `CURRENT_STATE.md`).
+- Full Brain: not re-verified today.
+- Production `data/`: byte-identical before and after (md5 manifest, 90
+  files); no production mutation.
+
+### The freeze, recorded as architecture
+
+**SPECIFIC EXAMPLE = VALIDATION INSTANCE. GENERAL MECHANISM = ARCHITECTURE.**
+(§54.5, restated.) Games, VR, AR, homes, appliances, TVs, 3D, simulations,
+AI agents, websites, web applications, commerce, phones, new hardware,
+interfaces, media, providers and models are not architectural boundaries.
+None becomes hardcoded architecture or an example-named subsystem. Each
+joins by extending a general mechanism and is then proven by an instance.
+Discussing an example does not make it a requirement to build.
+
+**The Brain/Provider boundary stays replaceable.** No dependency on any
+model or vendor. A provider or model change must never require replacing
+identity, personality, memory, agents, capabilities, connections, projects,
+artifacts or ecosystem state.
+
+**No new roadmap and no new phase.** The canonical roadmap's order stands
+(13 -> 14 -> 15 -> 12 last). After the roadmap the project is intentionally
+open-ended. Examples from conversation are not turned into a requirement
+ledger of their own.
